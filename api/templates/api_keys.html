@@ -1,0 +1,216 @@
+{% extends "base.html" %}
+
+{% block title %}API Keys - MemoGarden{% endblock %}
+
+{% block body %}
+<div class="min-h-screen bg-gray-50">
+    <!-- Header -->
+    <header class="bg-white shadow">
+        <div class="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between items-center">
+                <div>
+                    <h1 class="text-2xl font-bold text-gray-900">MemoGarden</h1>
+                    <p class="text-sm text-gray-600">API Key Management</p>
+                </div>
+                <div class="flex items-center gap-4">
+                    <span id="userDisplay" class="text-sm text-gray-700"></span>
+                    <button id="logoutBtn" class="text-sm text-gray-600 hover:text-gray-900">
+                        Logout
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 py-8 sm:px-6 lg:px-8">
+        {% if error %}
+        <div class="alert alert-error mb-6">
+            {{ error }}
+        </div>
+        {% endif %}
+
+        {% if message %}
+        <div class="alert alert-success mb-6">
+            {{ message }}
+        </div>
+        {% endif %}
+
+        <div class="flex justify-between items-center mb-6">
+            <h2 class="text-xl font-semibold text-gray-900">Your API Keys</h2>
+            <a href="/api-keys/new" class="btn-primary w-auto px-6">
+                + Create New API Key
+            </a>
+        </div>
+
+        <!-- API Keys List -->
+        <div id="apiKeysList" class="space-y-4">
+            <div class="text-center py-12 text-gray-500">
+                Loading API keys...
+            </div>
+        </div>
+
+        <!-- Empty State -->
+        <div id="emptyState" class="hidden text-center py-12">
+            <div class="text-gray-400 text-6xl mb-4">🔑</div>
+            <h3 class="text-lg font-medium text-gray-900 mb-2">No API Keys Yet</h3>
+            <p class="text-gray-600 mb-4">
+                Create an API key to use with agents, scripts, and programmatic clients.
+            </p>
+            <a href="/api-keys/new" class="btn-primary w-auto px-6 inline-block">
+                Create Your First API Key
+            </a>
+        </div>
+    </main>
+</div>
+
+<script>
+    // Get authentication token from localStorage
+    function getAuthToken() {
+        return localStorage.getItem('access_token');
+    }
+
+    // Check if user is authenticated
+    function isAuthenticated() {
+        return !!getAuthToken();
+    }
+
+    // Redirect to login if not authenticated
+    if (!isAuthenticated()) {
+        window.location.href = '/login';
+    }
+
+    // Display user info
+    const userInfo = JSON.parse(localStorage.getItem('user_info') || '{}');
+    document.getElementById('userDisplay').textContent = userInfo.username || 'Unknown User';
+
+    // Logout handler
+    document.getElementById('logoutBtn').addEventListener('click', function() {
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('user_info');
+        window.location.href = '/login';
+    });
+
+    // Fetch and display API keys
+    async function loadAPIKeys() {
+        const token = getAuthToken();
+
+        try {
+            const response = await fetch('/api-keys/', {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            if (response.status === 401) {
+                // Token expired or invalid
+                localStorage.removeItem('access_token');
+                localStorage.removeItem('user_info');
+                window.location.href = '/login';
+                return;
+            }
+
+            if (!response.ok) {
+                throw new Error('Failed to load API keys');
+            }
+
+            const apiKeys = await response.json();
+            displayAPIKeys(apiKeys);
+
+        } catch (error) {
+            console.error('Error loading API keys:', error);
+            document.getElementById('apiKeysList').innerHTML =
+                '<div class="alert alert-error">Failed to load API keys. Please refresh the page.</div>';
+        }
+    }
+
+    // Display API keys
+    function displayAPIKeys(apiKeys) {
+        const listContainer = document.getElementById('apiKeysList');
+        const emptyState = document.getElementById('emptyState');
+
+        if (!apiKeys || apiKeys.length === 0) {
+            listContainer.innerHTML = '';
+            emptyState.classList.remove('hidden');
+            return;
+        }
+
+        emptyState.classList.add('hidden');
+        listContainer.innerHTML = apiKeys.map(key => `
+            <div class="card">
+                <div class="flex justify-between items-start">
+                    <div class="flex-1">
+                        <div class="flex items-center gap-3 mb-2">
+                            <h3 class="text-lg font-semibold text-gray-900">${escapeHtml(key.name)}</h3>
+                            ${key.revoked_at
+                                ? '<span class="px-2 py-1 text-xs font-medium bg-red-100 text-red-700 rounded">Revoked</span>'
+                                : '<span class="px-2 py-1 text-xs font-medium bg-green-100 text-green-700 rounded">Active</span>'
+                            }
+                        </div>
+                        <div class="space-y-1 text-sm text-gray-600">
+                            <p><span class="font-medium">Key:</span> <code class="bg-gray-100 px-2 py-1 rounded">${escapeHtml(key.prefix)}...</code></p>
+                            <p><span class="font-medium">Created:</span> ${formatDate(key.created_at)}</p>
+                            ${key.last_seen ? `<p><span class="font-medium">Last Used:</span> ${formatDate(key.last_seen)}</p>` : ''}
+                            ${key.expires_at ? `<p><span class="font-medium">Expires:</span> ${formatDate(key.expires_at)}</p>` : ''}
+                            ${key.revoked_at ? `<p><span class="font-medium">Revoked:</span> ${formatDate(key.revoked_at)}</p>` : ''}
+                        </div>
+                    </div>
+                    ${!key.revoked_at ? `
+                        <button
+                            onclick="revokeAPIKey('${key.id}')"
+                            class="btn-danger w-auto px-4 py-2 text-sm"
+                        >
+                            Revoke
+                        </button>
+                    ` : ''}
+                </div>
+            </div>
+        `).join('');
+    }
+
+    // Revoke API key
+    async function revokeAPIKey(keyId) {
+        if (!confirm('Are you sure you want to revoke this API key? This action cannot be undone.')) {
+            return;
+        }
+
+        const token = getAuthToken();
+
+        try {
+            const response = await fetch(`/api-keys/${keyId}`, {
+                method: 'DELETE',
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            if (response.ok) {
+                // Reload the list
+                loadAPIKeys();
+            } else {
+                const error = await response.json();
+                alert('Failed to revoke API key: ' + (error.error?.message || 'Unknown error'));
+            }
+        } catch (error) {
+            console.error('Error revoking API key:', error);
+            alert('Failed to revoke API key. Please try again.');
+        }
+    }
+
+    // Helper: Escape HTML to prevent XSS
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // Helper: Format ISO date
+    function formatDate(isoString) {
+        const date = new Date(isoString);
+        return date.toLocaleString();
+    }
+
+    // Load API keys on page load
+    loadAPIKeys();
+</script>
+{% endblock %}

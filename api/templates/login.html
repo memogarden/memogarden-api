@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block title %}Login - MemoGarden{% endblock %}
+
+{% block body %}
+<div class="min-h-screen flex items-center justify-center px-4">
+    <div class="card w-full max-w-md">
+        <div class="text-center mb-8">
+            <h1 class="text-3xl font-bold text-gray-800 mb-2">MemoGarden</h1>
+            <p class="text-gray-600">Sign in to your account</p>
+        </div>
+
+        {% if error %}
+        <div class="alert alert-error">
+            {{ error }}
+        </div>
+        {% endif %}
+
+        {% if message %}
+        <div class="alert alert-success">
+            {{ message }}
+        </div>
+        {% endif %}
+
+        {% if request.args.get('registered') == 'true' %}
+        <div class="alert alert-success">
+            Admin account created successfully! Please sign in below.
+        </div>
+        {% endif %}
+
+        {% if request.args.get('existing') == 'true' %}
+        <div class="alert alert-error">
+            Admin account already exists. Please sign in below.
+        </div>
+        {% endif %}
+
+        <form id="loginForm" method="POST" action="/auth/login">
+            <div class="mb-4">
+                <label for="username" class="block text-sm font-medium text-gray-700 mb-2">
+                    Username
+                </label>
+                <input
+                    type="text"
+                    id="username"
+                    name="username"
+                    class="input-field"
+                    required
+                    pattern="[A-Za-z0-9_-]+"
+                    autocomplete="username"
+                    placeholder="Enter your username"
+                />
+            </div>
+
+            <div class="mb-6">
+                <label for="password" class="block text-sm font-medium text-gray-700 mb-2">
+                    Password
+                </label>
+                <input
+                    type="password"
+                    id="password"
+                    name="password"
+                    class="input-field"
+                    required
+                    minlength="8"
+                    autocomplete="current-password"
+                    placeholder="Enter your password"
+                />
+            </div>
+
+            <button type="submit" class="btn-primary">
+                Sign In
+            </button>
+        </form>
+
+        <div class="mt-6 text-center">
+            <p class="text-sm text-gray-600">
+                Don't have an account?
+                <a href="/admin/register" class="text-blue-600 hover:underline">Set up admin account</a>
+            </p>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Handle form submission
+    document.getElementById('loginForm').addEventListener('submit', async function(e) {
+        e.preventDefault();
+
+        const formData = new FormData(this);
+        const data = {
+            username: formData.get('username'),
+            password: formData.get('password')
+        };
+
+        try {
+            const response = await fetch('/auth/login', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data)
+            });
+
+            const result = await response.json();
+
+            if (response.ok) {
+                // Store token in localStorage
+                localStorage.setItem('access_token', result.access_token);
+                localStorage.setItem('user_info', JSON.stringify(result.user));
+
+                // Redirect to API keys page
+                window.location.href = '/api-keys';
+            } else {
+                // Show error
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'alert alert-error';
+                errorDiv.textContent = result.error?.message || 'Login failed';
+                this.insertBefore(errorDiv, this.firstChild);
+
+                // Remove error after 5 seconds
+                setTimeout(() => errorDiv.remove(), 5000);
+            }
+        } catch (error) {
+            console.error('Login error:', error);
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'alert alert-error';
+            errorDiv.textContent = 'Network error. Please try again.';
+            this.insertBefore(errorDiv, this.firstChild);
+        }
+    });
+</script>
+{% endblock %}

@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - MemoGarden{% endblock %}
+
+{% block body %}
+<div class="min-h-screen bg-gray-50">
+    <!-- Header -->
+    <header class="bg-white shadow">
+        <div class="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between items-center">
+                <div>
+                    <h1 class="text-2xl font-bold text-gray-900">MemoGarden</h1>
+                    <p class="text-sm text-gray-600">Settings</p>
+                </div>
+                <div class="flex items-center gap-4">
+                    <a href="/api-keys" class="text-sm text-gray-600 hover:text-gray-900">API Keys</a>
+                    <button id="logoutBtn" class="text-sm text-gray-600 hover:text-gray-900">
+                        Logout
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-4xl mx-auto px-4 py-8 sm:px-6 lg:px-8">
+        {% if error %}
+        <div class="alert alert-error mb-6">
+            {{ error }}
+        </div>
+        {% endif %}
+
+        {% if message %}
+        <div class="alert alert-success mb-6">
+            {{ message }}
+        </div>
+        {% endif %}
+
+        <!-- User Profile Section -->
+        <div class="card mb-6">
+            <h2 class="text-xl font-semibold text-gray-900 mb-4">Profile</h2>
+
+            <div id="profileInfo" class="space-y-3">
+                <div class="flex justify-between py-2 border-b border-gray-200">
+                    <span class="text-gray-600">Username</span>
+                    <span id="profileUsername" class="font-medium text-gray-900">Loading...</span>
+                </div>
+                <div class="flex justify-between py-2 border-b border-gray-200">
+                    <span class="text-gray-600">Role</span>
+                    <span id="profileRole" class="font-medium text-gray-900">Loading...</span>
+                </div>
+                <div class="flex justify-between py-2 border-b border-gray-200">
+                    <span class="text-gray-600">User ID</span>
+                    <span id="profileId" class="font-mono text-sm text-gray-700">Loading...</span>
+                </div>
+                <div class="flex justify-between py-2 border-b border-gray-200">
+                    <span class="text-gray-600">Account Created</span>
+                    <span id="profileCreated" class="text-gray-700">Loading...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Token Information -->
+        <div class="card mb-6">
+            <h2 class="text-xl font-semibold text-gray-900 mb-4">Authentication Token</h2>
+
+            <div id="tokenInfo" class="space-y-3">
+                <div class="flex justify-between py-2 border-b border-gray-200">
+                    <span class="text-gray-600">Token Type</span>
+                    <span class="font-medium text-gray-900">Bearer (JWT)</span>
+                </div>
+                <div class="flex justify-between py-2 border-b border-gray-200">
+                    <span class="text-gray-600">Status</span>
+                    <span id="tokenStatus" class="font-medium text-green-600">Valid</span>
+                </div>
+            </div>
+
+            <div class="mt-4 p-4 bg-gray-50 rounded-lg">
+                <p class="text-sm text-gray-600">
+                    <strong>Note:</strong> Your authentication token is stored in your browser's local storage.
+                    Token expiry is handled automatically. You can logout to revoke access from this device.
+                </p>
+            </div>
+        </div>
+
+        <!-- Quick Actions -->
+        <div class="card">
+            <h2 class="text-xl font-semibold text-gray-900 mb-4">Quick Actions</h2>
+
+            <div class="space-y-3">
+                <a href="/api-keys" class="block w-full btn-primary text-center">
+                    Manage API Keys
+                </a>
+                <button id="logoutBtnMain" class="btn-secondary">
+                    Logout
+                </button>
+            </div>
+        </div>
+
+        <!-- About Section -->
+        <div class="mt-6 text-center text-sm text-gray-500">
+            <p>MemoGarden Core v1.0.0</p>
+            <p class="mt-1">Personal Memory System for Financial Transactions</p>
+        </div>
+    </main>
+</div>
+
+<script>
+    // Get authentication token from localStorage
+    function getAuthToken() {
+        return localStorage.getItem('access_token');
+    }
+
+    // Check if user is authenticated
+    function isAuthenticated() {
+        return !!getAuthToken();
+    }
+
+    // Redirect to login if not authenticated
+    if (!isAuthenticated()) {
+        window.location.href = '/login';
+    }
+
+    // Logout handlers
+    document.getElementById('logoutBtn').addEventListener('click', logout);
+    document.getElementById('logoutBtnMain').addEventListener('click', logout);
+
+    function logout() {
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('user_info');
+        window.location.href = '/login';
+    }
+
+    // Load user profile
+    async function loadProfile() {
+        const token = getAuthToken();
+
+        try {
+            const response = await fetch('/auth/me', {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            if (response.status === 401) {
+                // Token expired or invalid
+                localStorage.removeItem('access_token');
+                localStorage.removeItem('user_info');
+                window.location.href = '/login';
+                return;
+            }
+
+            if (!response.ok) {
+                throw new Error('Failed to load profile');
+            }
+
+            const user = await response.json();
+            displayProfile(user);
+
+        } catch (error) {
+            console.error('Error loading profile:', error);
+            document.getElementById('profileInfo').innerHTML =
+                '<div class="alert alert-error">Failed to load profile. Please refresh the page.</div>';
+        }
+    }
+
+    // Display profile information
+    function displayProfile(user) {
+        document.getElementById('profileUsername').textContent = user.username;
+        document.getElementById('profileRole').textContent = user.is_admin ? 'Admin' : 'User';
+        document.getElementById('profileId').textContent = user.id;
+        document.getElementById('profileCreated').textContent = formatDate(user.created_at);
+    }
+
+    // Format ISO date
+    function formatDate(isoString) {
+        const date = new Date(isoString);
+        return date.toLocaleString();
+    }
+
+    // Load profile on page load
+    loadProfile();
+</script>
+{% endblock %}
