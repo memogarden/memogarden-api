@@ -18,13 +18,14 @@ Architecture Notes:
 """
 
 import logging
-from datetime import datetime
+
 from flask import Blueprint, jsonify, request
 
 from system.core import get_core
 from system.utils import isodatetime, recurrence
-from ...validation import validate_request
+
 from ...schemas.recurrence import RecurrenceCreate, RecurrenceUpdate
+from ...validation import validate_request
 
 logger = logging.getLogger(__name__)
 
@@ -34,26 +35,40 @@ recurrences_bp = Blueprint('recurrences', __name__, url_prefix='/recurrences')
 
 def _row_to_recurrence_response(row) -> dict:
     """
-    Convert a database row from recurrences_view to RecurrenceResponse dict.
+    Convert a database row from entity table to RecurrenceResponse dict.
+
+    Adds core_ prefix to UUIDs and includes hash chain fields.
 
     Args:
-        row: SQLite Row object from recurrences_view
+        row: SQLite Row object from entity table with json_extract fields
 
     Returns:
-        Dictionary matching RecurrenceResponse schema
+        Dictionary matching RecurrenceResponse schema (PRD v6 compliant)
     """
+    # Helper function to safely get optional values from sqlite3.Row
+    def safe_get(key, default=None):
+        try:
+            val = row[key]
+            return val if val is not None else default
+        except (KeyError, IndexError):
+            return default
+
     return {
-        "id": row["id"],
+        "uuid": row["uuid"],
+        "id": row["uuid"],  # Alias for compatibility
         "rrule": row["rrule"],
         "entities": row["entities"],
         "valid_from": row["valid_from"],
-        "valid_until": row["valid_until"],
+        "valid_until": safe_get("valid_until"),
+        "hash": row["hash"],
+        "previous_hash": safe_get("previous_hash"),
+        "version": row["version"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
-        "superseded_by": row["superseded_by"],
-        "superseded_at": row["superseded_at"],
-        "group_id": row["group_id"],
-        "derived_from": row["derived_from"],
+        "superseded_by": safe_get("superseded_by"),
+        "superseded_at": safe_get("superseded_at"),
+        "group_id": safe_get("group_id"),
+        "derived_from": safe_get("derived_from"),
     }
 
 

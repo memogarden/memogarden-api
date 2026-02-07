@@ -1,0 +1,167 @@
+"""Pydantic schemas for Semantic API requests and responses.
+
+Per RFC-005 v7, the Semantic API uses a message-passing interface with
+a consistent request/response envelope format.
+
+Request envelope:
+    {"op": "create", "type": "Contact", "data": {...}}
+
+Response envelope (success):
+    {"ok": true, "actor": "usr_xxx", "timestamp": "...", "result": {...}}
+
+Response envelope (error):
+    {"ok": false, "actor": "usr_xxx", "timestamp": "...", "error": {...}}
+"""
+
+from datetime import datetime
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field, field_validator
+
+# ============================================================================
+# Request Envelope
+# ============================================================================
+
+class SemanticRequest(BaseModel):
+    """Base Semantic API request envelope.
+
+    All requests use the "op" field to specify the verb.
+    Additional fields vary by operation.
+    """
+
+    op: Literal[
+        "create", "edit", "forget", "get", "query",
+        "add", "amend",
+        "link", "unlink", "edit_relation", "get_relation", "query_relation", "explore",
+        "enter", "leave", "focus", "rejoin",
+        "search",
+        "register"
+    ] = Field(..., description="Operation verb")
+
+
+# ============================================================================
+# Common Request Types
+# ============================================================================
+
+class CreateRequest(SemanticRequest):
+    """Request to create an entity.
+
+    Per RFC-005:
+    - create: to bring into being. Reifies a belief into existence in MemoGarden
+    """
+    op: Literal["create"] = "create"
+    type: str = Field(..., description="Entity type (e.g., 'Transaction', 'Recurrence')")
+    data: dict[str, Any] = Field(default_factory=dict, description="Entity data (type-specific fields)")
+    metadata: dict[str, Any] | None = Field(default=None, description="Optional app-defined metadata")
+
+
+class GetRequest(SemanticRequest):
+    """Request to get an entity, fact, or relation by UUID.
+
+    Per RFC-005:
+    - get: to obtain. Retrieve by identifier
+    UUID prefix indicates target type (soil_, core_, rel_)
+    """
+    op: Literal["get", "get_relation"] = "get"
+    target: str = Field(..., description="UUID of the target (with or without prefix)")
+
+
+class EditRequest(SemanticRequest):
+    """Request to edit an entity or relation.
+
+    Per RFC-005 v7:
+    - edit: to revise and publish. Makes changes to entity state
+    Uses set/unset semantics for field modifications
+
+    set: handles both add-new and update-existing
+    unset: removes fields entirely
+    """
+    op: Literal["edit", "edit_relation"] = "edit"
+    target: str = Field(..., description="Entity or relation UUID")
+    set: dict[str, Any] | None = Field(default=None, description="Fields to add or update")
+    unset: list[str] | None = Field(default=None, description="Field names to remove")
+
+    @field_validator('unset')
+    @classmethod
+    def validate_unset_not_empty(cls, v: list[str] | None) -> list[str] | None:
+        """Ensure unset list is not empty if provided."""
+        if v is not None and len(v) == 0:
+            raise ValueError("unset list must not be empty")
+        return v
+
+
+class ForgetRequest(SemanticRequest):
+    """Request to soft delete an entity.
+
+    Per RFC-005:
+    - forget: to lose the power of recall. Entity becomes inactive but traces remain in Soil
+    """
+    op: Literal["forget"] = "forget"
+    target: str = Field(..., description="Entity UUID to forget")
+
+
+class QueryRequest(SemanticRequest):
+    """Request to query entities with filters.
+
+    Per RFC-005:
+    - query: to ask, to seek by asking. Find entities matching criteria
+
+    Session 1: Basic equality filters only
+    Future: Full DSL with operators (any, not, etc.)
+    """
+    op: Literal["query", "query_relation"] = "query"
+    target_type: Literal["entity", "fact", "relation"] = Field(
+        default="entity",
+        description="Target type to query"
+    )
+    type: str | None = Field(default=None, description="Filter by exact type name")
+    filters: dict[str, Any] | None = Field(
+        default=None,
+        description="Field-value filters (basic equality in Session 1)"
+    )
+    start_index: int = Field(default=0, description="Pagination start index", ge=0)
+    count: int = Field(default=20, description="Max results to return", ge=1, le=100)
+
+
+# ============================================================================
+# Response Envelope
+# ============================================================================
+
+class SemanticResponse(BaseModel):
+    """Base Semantic API response envelope.
+
+    Per RFC-005 v7, all responses include:
+    - ok: boolean indicating success/failure
+    - actor: the authenticated user/agent performing the operation
+    - timestamp: ISO 8601 timestamp
+    - result: operation-specific payload (on success)
+    - error: error details (on failure)
+    """
+
+    ok: bool = Field(..., description="True if operation succeeded, false otherwise")
+    actor: str = Field(..., description="Actor UUID (usr_xxx or agt_xxx)")
+    timestamp: datetime = Field(..., description="ISO 8601 timestamp")
+    result: dict[str, Any] | None = Field(default=None, description="Operation result (on success)")
+    error: dict[str, Any] | None = Field(default=None, description="Error details (on failure)")
+
+
+class QueryResult(BaseModel):
+    """Response envelope for query operations."""
+
+    results: list[dict[str, Any]] = Field(default_factory=list, description="Query results")
+    total: int = Field(..., description="Total matching results")
+    start_index: int = Field(..., description="Pagination start index")
+    count: int = Field(..., description="Number of results returned")
+
+
+# ============================================================================
+# Type aliases for request validation
+# ============================================================================
+
+SemanticRequestType = (
+    CreateRequest |
+    GetRequest |
+    EditRequest |
+    ForgetRequest |
+    QueryRequest
+)

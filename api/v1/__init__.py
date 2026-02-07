@@ -13,7 +13,6 @@ All API v1 endpoints require authentication via JWT token or API key.
 from flask import Blueprint
 
 from ..middleware.decorators import _authenticate_request
-from ..exceptions import AuthenticationError
 from .core import recurrences, transactions
 
 # Create the ApiV1 blueprint

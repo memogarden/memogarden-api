@@ -25,12 +25,14 @@ Architecture Notes:
 """
 
 import logging
+
 from flask import Blueprint, g, jsonify, request
 
 from system.core import get_core
 from system.utils import uid
-from ...validation import validate_request
+
 from ...schemas.transaction import ConflictResponse, TransactionCreate, TransactionUpdate
+from ...validation import validate_request
 
 logger = logging.getLogger(__name__)
 
@@ -40,19 +42,26 @@ transactions_bp = Blueprint('transactions', __name__, url_prefix='/transactions'
 
 def _row_to_transaction_response(row) -> dict:
     """
-    Convert a database row from transactions_view to TransactionResponse dict.
+    Convert a database row from entity table to TransactionResponse dict.
 
     Adds core_ prefix to UUIDs and includes hash chain fields.
 
     Args:
-        row: SQLite Row object from transactions_view
+        row: SQLite Row object from entity table with json_extract fields
 
     Returns:
         Dictionary matching TransactionResponse schema (PRD v6 compliant)
     """
-    # Get the UUID (row has both 'id' from transactions and 'uuid' from the join)
-    # The view creates 'uuid' alias for t.id
-    entity_uuid = row.get("uuid") or row["id"]
+    # Get the UUID (new schema always returns 'uuid' from entity table)
+    entity_uuid = row["uuid"]
+
+    # Helper function to safely get optional values from sqlite3.Row
+    def safe_get(key, default=None):
+        try:
+            val = row[key]
+            return val if val is not None else default
+        except (KeyError, IndexError):
+            return default
 
     return {
         "uuid": uid.add_core_prefix(entity_uuid),
@@ -65,18 +74,18 @@ def _row_to_transaction_response(row) -> dict:
         "category": row["category"],
         "notes": row["notes"],
         "author": row["author"],
-        "recurrence_id": uid.add_core_prefix(row["recurrence_id"]) if row.get("recurrence_id") else None,
+        "recurrence_id": uid.add_core_prefix(row["recurrence_id"]) if safe_get("recurrence_id") else None,
         # Hash chain fields (PRD v6)
         "hash": row["hash"],
-        "previous_hash": row.get("previous_hash"),
+        "previous_hash": safe_get("previous_hash"),
         "version": row["version"],
         # Entity metadata
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
-        "superseded_by": uid.add_core_prefix(row["superseded_by"]) if row.get("superseded_by") else None,
-        "superseded_at": row.get("superseded_at"),
-        "group_id": uid.add_core_prefix(row["group_id"]) if row.get("group_id") else None,
-        "derived_from": uid.add_core_prefix(row["derived_from"]) if row.get("derived_from") else None,
+        "superseded_by": uid.add_core_prefix(row["superseded_by"]) if safe_get("superseded_by") else None,
+        "superseded_at": safe_get("superseded_at"),
+        "group_id": uid.add_core_prefix(row["group_id"]) if safe_get("group_id") else None,
+        "derived_from": uid.add_core_prefix(row["derived_from"]) if safe_get("derived_from") else None,
     }
 
 

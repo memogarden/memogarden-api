@@ -5,13 +5,19 @@ import logging
 from flask import Flask, jsonify
 from flask_cors import CORS
 
-from .v1 import api_v1_bp
+from system.core import _create_connection, init_db
+from system.exceptions import (
+    AuthenticationError,
+    MemoGardenError,
+    ResourceNotFound,
+    ValidationError,
+)
+
+from . import semantic
 from .config import settings
-from .exceptions import AuthenticationError, MemoGardenError, ResourceNotFound, ValidationError
 from .middleware import api as auth_api
 from .middleware import ui as auth_ui
-from system.core import init_db
-from system.core import _create_connection
+from .v1 import api_v1_bp
 
 # Configure logging
 logging.basicConfig(
@@ -141,6 +147,9 @@ app.register_blueprint(auth_api.auth_bp)
 
 # Auth UI pages (HTML responses, top-level routes)
 app.register_blueprint(auth_ui.auth_views_bp)
+
+# Semantic API (/mg endpoint)
+app.register_blueprint(semantic.semantic_bp)
 
 
 if __name__ == "__main__":
