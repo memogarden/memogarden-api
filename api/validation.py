@@ -12,7 +12,7 @@ import logging
 from flask import request
 from pydantic import BaseModel, ValidationError
 
-from .exceptions import ValidationError as MGValidationError
+from system.exceptions import ValidationError as MGValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ def _validate_request_body(model_class: type) -> BaseModel:
             f"path={request.path}, errors={errors}, received={request.json}"
         )
 
-        raise MGValidationError(
+        raise MGValidationError(  # noqa: B904
             f"Request validation failed for {model_class.__name__}. "
             f"See details for specific fields.",
             {

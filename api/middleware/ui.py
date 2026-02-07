@@ -13,9 +13,10 @@ import logging
 
 from flask import Blueprint, jsonify, render_template, render_template_string
 
+from system.core import get_core
+
 from ..config import settings
 from . import service
-from system.core import get_core
 
 logger = logging.getLogger(__name__)
 

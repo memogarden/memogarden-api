@@ -10,8 +10,9 @@ Confines bcrypt dependency for API key hashing to this module only.
 import sqlite3
 from datetime import datetime
 
-from .schemas import APIKeyCreate, APIKeyListResponse, APIKeyResponse
 from system.utils import isodatetime, secret
+
+from .schemas import APIKeyCreate, APIKeyListResponse, APIKeyResponse
 from .service import hash_password  # Reuse password hashing for API keys
 
 # ============================================================================
@@ -139,10 +140,20 @@ def create_api_key(conn: sqlite3.Connection, user_id: str, data: APIKeyCreate) -
     key_prefix = get_api_key_prefix(plain_key)
 
     # Create entity registry entry first (same ID as API key)
+    # Include required fields for new schema (hash, version, data)
+    import json
+
+    from system.utils import hash_chain
+    entity_hash = hash_chain.compute_entity_hash(
+        entity_type="ApiKey",
+        created_at=now,
+        updated_at=now,
+        previous_hash=None  # Initial entity has no previous hash
+    )
     conn.execute(
-        """INSERT INTO entity (id, type, created_at, updated_at)
-        VALUES (?, 'api_keys', ?, ?)""",
-        (api_key_id, now, now)
+        """INSERT INTO entity (uuid, type, hash, version, created_at, updated_at, data)
+        VALUES (?, 'ApiKey', ?, ?, ?, ?, ?)""",
+        (api_key_id, entity_hash, 1, now, now, json.dumps({}))
     )
 
     # Convert expires_at datetime to ISO string if present

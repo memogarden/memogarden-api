@@ -1,17 +1,17 @@
 """API Pydantic schemas for request/response validation."""
 
-from .transaction import (
-    ConflictResponse,
-    TransactionCreate,
-    TransactionBase,
-    TransactionResponse,
-    TransactionUpdate,
-)
 from .recurrence import (
     RecurrenceBase,
     RecurrenceCreate,
     RecurrenceResponse,
     RecurrenceUpdate,
+)
+from .transaction import (
+    ConflictResponse,
+    TransactionBase,
+    TransactionCreate,
+    TransactionResponse,
+    TransactionUpdate,
 )
 
 __all__ = [

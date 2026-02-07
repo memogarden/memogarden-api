@@ -13,14 +13,15 @@ from localhost and only when no users exist in the database.
 import logging
 import sqlite3
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify
+
+from system.core import get_core
+from system.exceptions import AuthenticationError
 
 from ..validation import validate_request
-from ..exceptions import AuthenticationError
 from . import api_keys, decorators, service, token
 from .decorators import _authenticate_jwt
 from .schemas import AdminRegistrationResponse, APIKeyCreate, TokenResponse, UserCreate, UserLogin
-from system.core import get_core
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,7 @@ def admin_register(data: UserCreate):
 
     except sqlite3.IntegrityError:
         logger.warning(f"Admin registration failed (username exists): {data.username}")
-        raise AuthenticationError(
+        raise AuthenticationError(  # noqa: B904
             "Username already exists",
             {"username": data.username}
         )

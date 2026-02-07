@@ -13,9 +13,10 @@ import sqlite3
 
 import bcrypt
 
-from .schemas import UserCreate, UserResponse
-from ..config import settings
 from system.utils import isodatetime, uid
+
+from ..config import settings
+from .schemas import UserCreate, UserResponse
 
 # ============================================================================
 # Password Hashing and Verification
@@ -110,10 +111,20 @@ def create_user(conn: sqlite3.Connection, data: UserCreate, is_admin: bool = Tru
     password_hash = hash_password(data.password)
 
     # Create entity registry entry first (same ID as user)
+    # Include required fields for new schema (hash, version, data)
+    import json
+
+    from system.utils import hash_chain
+    entity_hash = hash_chain.compute_entity_hash(
+        entity_type="User",
+        created_at=now,
+        updated_at=now,
+        previous_hash=None  # Initial entity has no previous hash
+    )
     conn.execute(
-        """INSERT INTO entity (id, type, created_at, updated_at)
-        VALUES (?, 'users', ?, ?)""",
-        (user_id, now, now)
+        """INSERT INTO entity (uuid, type, hash, version, created_at, updated_at, data)
+        VALUES (?, 'User', ?, ?, ?, ?, ?)""",
+        (user_id, entity_hash, 1, now, now, json.dumps({}))
     )
 
     # Create user entity (foreign key to entity)
