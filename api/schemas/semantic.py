@@ -123,6 +123,65 @@ class QueryRequest(SemanticRequest):
     count: int = Field(default=20, description="Max results to return", ge=1, le=100)
 
 
+class AddRequest(SemanticRequest):
+    """Request to add a fact (Item) to Soil.
+
+    Per RFC-005 v7:
+    - add: to bring external data into MemoGarden as a Fact
+
+    Facts are immutable once created. Use `amend` to create superseding facts.
+
+    Session 2: Supports baseline item types only
+    """
+    op: Literal["add"] = "add"
+    type: str = Field(
+        ...,
+        description="Item type (e.g., 'Note', 'Message', 'Email', 'ToolCall')"
+    )
+    data: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Item data (type-specific fields)"
+    )
+    canonical_at: datetime | None = Field(
+        default=None,
+        description="User-controllable subjective time (defaults to realized_at)"
+    )
+    metadata: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional app-defined metadata"
+    )
+
+
+class AmendRequest(SemanticRequest):
+    """Request to amend a fact (Item) in Soil.
+
+    Per RFC-005 v7:
+    - amend: to correct or rectify. Creates a superseding Fact
+
+    Creates a new Fact with a `supersedes` relation to the original.
+    The original Fact remains immutable but is marked as superseded.
+
+    Session 2: Basic amendment with new data
+    """
+    op: Literal["amend"] = "amend"
+    target: str = Field(
+        ...,
+        description="UUID of the Item to amend (with or without soil_ prefix)"
+    )
+    data: dict[str, Any] = Field(
+        ...,
+        description="New/corrected data for the Item"
+    )
+    canonical_at: datetime | None = Field(
+        default=None,
+        description="Updated canonical time (defaults to original)"
+    )
+    metadata: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional metadata for the amendment"
+    )
+
+
 # ============================================================================
 # Response Envelope
 # ============================================================================
@@ -163,5 +222,7 @@ SemanticRequestType = (
     GetRequest |
     EditRequest |
     ForgetRequest |
-    QueryRequest
+    QueryRequest |
+    AddRequest |
+    AmendRequest
 )

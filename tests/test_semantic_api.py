@@ -1,4 +1,4 @@
-"""Tests for Semantic API Core bundle verbs.
+"""Tests for Semantic API Core bundle and Soil bundle verbs.
 
 Per RFC-005 v7, the Semantic API is a message-passing interface with:
 - Request: {"op": "verb", ...}
@@ -10,6 +10,12 @@ Session 1 tests Core bundle verbs:
 - edit: Edit entity (set/unset semantics)
 - forget: Soft delete entity
 - query: Query entities with filters
+
+Session 2 tests Soil bundle verbs:
+- add: Add fact (bring external data into MemoGarden)
+- amend: Amend fact (create superseding fact)
+- get: Get fact by UUID (routes based on UUID prefix)
+- query: Query facts with filters
 """
 
 
@@ -519,3 +525,464 @@ class TestSemanticAPINullSemantics:
         data = response.get_json()
         assert data["ok"] is True
         assert data["result"]["data"]["field"] is None
+
+
+class TestAddVerb:
+    """Tests for add verb (Soil bundle)."""
+
+    def test_add_note_fact(self, client, auth_headers):
+        """Test adding a Note fact via Semantic API."""
+        response = client.post(
+            "/mg",
+            json={
+                "op": "add",
+                "type": "Note",
+                "data": {
+                    "title": "Test Note",
+                    "description": "This is a test note"
+                }
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+        assert "result" in data
+
+        # Verify fact structure
+        result = data["result"]
+        assert "uuid" in result
+        assert result["type"] == "Note"
+        assert result["data"]["title"] == "Test Note"
+        assert result["data"]["description"] == "This is a test note"
+        assert result["uuid"].startswith("soil_")
+        assert "integrity_hash" in result
+        assert "realized_at" in result
+        assert "canonical_at" in result
+        assert result["fidelity"] == "full"
+
+    def test_add_message_fact(self, client, auth_headers):
+        """Test adding a Message fact (baseline type)."""
+        response = client.post(
+            "/mg",
+            json={
+                "op": "add",
+                "type": "Message",
+                "data": {
+                    "from": "alice@example.com",
+                    "to": ["bob@example.com"],
+                    "content": "Hello Bob"
+                }
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+        assert data["result"]["type"] == "Message"
+
+    def test_add_unsupported_type_fails(self, client, auth_headers):
+        """Test adding unsupported fact type fails."""
+        response = client.post(
+            "/mg",
+            json={
+                "op": "add",
+                "type": "CustomFact",
+                "data": {}
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data["ok"] is False
+        assert "not supported" in data["error"]["message"]
+
+    def test_add_fact_with_metadata(self, client, auth_headers):
+        """Test adding a fact with metadata."""
+        response = client.post(
+            "/mg",
+            json={
+                "op": "add",
+                "type": "Note",
+                "data": {"description": "Test"},
+                "metadata": {"source": "test", "priority": 1}
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+        assert data["result"]["metadata"]["source"] == "test"
+        assert data["result"]["metadata"]["priority"] == 1
+
+
+class TestAmendVerb:
+    """Tests for amend verb (Soil bundle)."""
+
+    def test_amend_fact(self, client, auth_headers):
+        """Test amending a fact creates superseding fact."""
+        # Create original fact
+        add_response = client.post(
+            "/mg",
+            json={
+                "op": "add",
+                "type": "Note",
+                "data": {
+                    "title": "Original",
+                    "description": "Original content"
+                }
+            },
+            headers=auth_headers
+        )
+        fact_uuid = add_response.get_json()["result"]["uuid"]
+
+        # Amend the fact
+        response = client.post(
+            "/mg",
+            json={
+                "op": "amend",
+                "target": fact_uuid,
+                "data": {
+                    "title": "Corrected",
+                    "description": "Corrected content"
+                }
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+
+        # Verify amended fact
+        result = data["result"]
+        assert result["type"] == "Note"
+        assert result["data"]["title"] == "Corrected"
+        assert result["data"]["description"] == "Corrected content"
+        assert result["uuid"].startswith("soil_")
+        # New UUID for amended fact
+        assert result["uuid"] != fact_uuid
+
+        # Verify original is superseded
+        original_response = client.post(
+            "/mg",
+            json={"op": "get", "target": fact_uuid},
+            headers=auth_headers
+        )
+        original = original_response.get_json()["result"]
+        assert original["superseded_by"] is not None
+        assert original["superseded_at"] is not None
+
+    def test_amend_fact_preserves_metadata(self, client, auth_headers):
+        """Test amending a fact preserves original metadata."""
+        # Create fact with metadata
+        add_response = client.post(
+            "/mg",
+            json={
+                "op": "add",
+                "type": "Note",
+                "data": {"description": "Test"},
+                "metadata": {"original": "value"}
+            },
+            headers=auth_headers
+        )
+        fact_uuid = add_response.get_json()["result"]["uuid"]
+
+        # Amend with additional metadata
+        response = client.post(
+            "/mg",
+            json={
+                "op": "amend",
+                "target": fact_uuid,
+                "data": {"description": "Amended"},
+                "metadata": {"new": "field"}
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        # Metadata should be merged
+        assert data["result"]["metadata"]["original"] == "value"
+        assert data["result"]["metadata"]["new"] == "field"
+
+    def test_amend_nonexistent_fact_fails(self, client, auth_headers):
+        """Test amending non-existent fact returns 404."""
+        response = client.post(
+            "/mg",
+            json={
+                "op": "amend",
+                "target": "soil_00000000-0000-0000-0000-000000000000",
+                "data": {"description": "Amended"}
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 404
+
+    def test_amend_superseded_fact_fails(self, client, auth_headers):
+        """Test amending a fact that is already superseded fails."""
+        # Create and amend a fact
+        add_response = client.post(
+            "/mg",
+            json={
+                "op": "add",
+                "type": "Note",
+                "data": {"description": "Original"}
+            },
+            headers=auth_headers
+        )
+        fact_uuid = add_response.get_json()["result"]["uuid"]
+
+        client.post(
+            "/mg",
+            json={
+                "op": "amend",
+                "target": fact_uuid,
+                "data": {"description": "First amendment"}
+            },
+            headers=auth_headers
+        )
+
+        # Try to amend again (should fail because original is superseded)
+        response = client.post(
+            "/mg",
+            json={
+                "op": "amend",
+                "target": fact_uuid,
+                "data": {"description": "Second amendment"}
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data["ok"] is False
+        assert "superseded" in data["error"]["message"].lower()
+
+
+class TestGetFactVerb:
+    """Tests for get verb with facts (Soil bundle)."""
+
+    def test_get_fact_by_uuid(self, client, auth_headers):
+        """Test getting a fact by UUID."""
+        # Create a fact
+        add_response = client.post(
+            "/mg",
+            json={
+                "op": "add",
+                "type": "Note",
+                "data": {"description": "Test note"}
+            },
+            headers=auth_headers
+        )
+        fact_uuid = add_response.get_json()["result"]["uuid"]
+
+        # Get the fact
+        response = client.post(
+            "/mg",
+            json={
+                "op": "get",
+                "target": fact_uuid
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+        assert data["result"]["uuid"] == fact_uuid
+
+    def test_get_fact_routes_on_prefix(self, client, auth_headers):
+        """Test get verb routes correctly based on UUID prefix."""
+        # Create a fact (soil_ prefix)
+        add_response = client.post(
+            "/mg",
+            json={
+                "op": "add",
+                "type": "Note",
+                "data": {"description": "Test"}
+            },
+            headers=auth_headers
+        )
+        fact_uuid = add_response.get_json()["result"]["uuid"]
+
+        # Get with soil_ prefix
+        response = client.post(
+            "/mg",
+            json={
+                "op": "get",
+                "target": fact_uuid
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+        # Should return fact, not entity
+        assert "integrity_hash" in data["result"]
+        assert "realized_at" in data["result"]
+
+    def test_get_fact_not_found(self, client, auth_headers):
+        """Test getting non-existent fact returns 404."""
+        response = client.post(
+            "/mg",
+            json={
+                "op": "get",
+                "target": "soil_00000000-0000-0000-0000-000000000000"
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 404
+        data = response.get_json()
+        assert data["ok"] is False
+        assert "not found" in data["error"]["message"].lower()
+
+
+class TestQueryFactsVerb:
+    """Tests for query verb with facts (Soil bundle)."""
+
+    def test_query_all_facts(self, client, auth_headers):
+        """Test querying all facts via target_type=fact."""
+        # Create a few facts
+        client.post(
+            "/mg",
+            json={"op": "add", "type": "Note", "data": {"description": "Note 1"}},
+            headers=auth_headers
+        )
+        client.post(
+            "/mg",
+            json={"op": "add", "type": "Message", "data": {"content": "Message 1"}},
+            headers=auth_headers
+        )
+
+        # Query for facts
+        response = client.post(
+            "/mg",
+            json={
+                "op": "query",
+                "target_type": "fact"
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+        assert "results" in data["result"]
+        assert "total" in data["result"]
+
+    def test_query_facts_by_type(self, client, auth_headers):
+        """Test querying facts filtered by type."""
+        # Create facts of different types
+        client.post(
+            "/mg",
+            json={"op": "add", "type": "Note", "data": {"description": "Note 1"}},
+            headers=auth_headers
+        )
+        client.post(
+            "/mg",
+            json={"op": "add", "type": "Message", "data": {"content": "Message 1"}},
+            headers=auth_headers
+        )
+        client.post(
+            "/mg",
+            json={"op": "add", "type": "Note", "data": {"description": "Note 2"}},
+            headers=auth_headers
+        )
+
+        # Query for Note type only
+        response = client.post(
+            "/mg",
+            json={
+                "op": "query",
+                "target_type": "fact",
+                "type": "Note"
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+        # All results should be Note type
+        for result in data["result"]["results"]:
+            assert result["type"] == "Note"
+
+    def test_query_facts_excludes_superseded(self, client, auth_headers):
+        """Test query excludes superseded facts by default."""
+        # Create and supersede a fact
+        add_response = client.post(
+            "/mg",
+            json={
+                "op": "add",
+                "type": "Note",
+                "data": {"description": "Original"}
+            },
+            headers=auth_headers
+        )
+        fact_uuid = add_response.get_json()["result"]["uuid"]
+
+        client.post(
+            "/mg",
+            json={
+                "op": "amend",
+                "target": fact_uuid,
+                "data": {"description": "Amended"}
+            },
+            headers=auth_headers
+        )
+
+        # Query facts - should not include superseded
+        response = client.post(
+            "/mg",
+            json={
+                "op": "query",
+                "target_type": "fact",
+                "type": "Note"
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        # All results should not be superseded
+        for result in data["result"]["results"]:
+            assert result["superseded_by"] is None
+
+    def test_query_facts_pagination(self, client, auth_headers):
+        """Test query facts with pagination."""
+        # Create multiple facts
+        for i in range(5):
+            client.post(
+                "/mg",
+                json={
+                    "op": "add",
+                    "type": "Note",
+                    "data": {"description": f"Note {i}"}
+                },
+                headers=auth_headers
+            )
+
+        # Query with limit
+        response = client.post(
+            "/mg",
+            json={
+                "op": "query",
+                "target_type": "fact",
+                "count": 2
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+        assert len(data["result"]["results"]) <= 2
+        assert data["result"]["count"] <= 2

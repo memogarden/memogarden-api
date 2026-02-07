@@ -18,6 +18,12 @@ Session 1 implements Core bundle verbs:
 - edit: Edit entity (set/unset semantics)
 - forget: Soft delete entity
 - query: Query entities with filters
+
+Session 2 implements Soil bundle verbs:
+- add: Add fact (bring external data into MemoGarden)
+- amend: Amend fact (create superseding fact)
+- get: Get fact by UUID (routes based on UUID prefix)
+- query: Query facts with filters (routes based on target_type)
 """
 
 import json
@@ -25,10 +31,12 @@ import logging
 
 from flask import Blueprint, g, jsonify, request
 from pydantic import ValidationError
-from system.utils import isodatetime
 
 from api.handlers import core as core_handlers
+from api.handlers import soil as soil_handlers
 from api.schemas.semantic import (
+    AddRequest,
+    AmendRequest,
     CreateRequest,
     EditRequest,
     ForgetRequest,
@@ -45,6 +53,7 @@ from system.exceptions import (
 from system.exceptions import (
     ValidationError as MGValidationError,
 )
+from system.utils import isodatetime
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +62,41 @@ semantic_bp = Blueprint("semantic", __name__, url_prefix="/mg")
 
 # Map operation names to handler functions
 HANDLERS = {
+    # Core bundle
     "create": core_handlers.handle_create,
-    "get": core_handlers.handle_get,
     "edit": core_handlers.handle_edit,
     "forget": core_handlers.handle_forget,
-    "query": core_handlers.handle_query,
+    # Soil bundle
+    "add": soil_handlers.handle_add,
+    "amend": soil_handlers.handle_amend,
 }
+
+
+def _get_handler(op: str, request_json: dict):
+    """Get handler function for operation.
+
+    Some operations route to different handlers based on request parameters:
+    - get: Routes based on target UUID prefix (soil_ → fact, core_ → entity)
+    - query: Routes based on target_type field (fact → soil, entity/relation → core)
+    """
+    if op == "get":
+        # Route based on target UUID prefix
+        target = request_json.get("target", "")
+        if target.startswith("soil_"):
+            return soil_handlers.handle_get_fact
+        else:
+            return core_handlers.handle_get
+
+    if op == "query":
+        # Route based on target_type field
+        target_type = request_json.get("target_type", "entity")
+        if target_type == "fact":
+            return soil_handlers.handle_query_facts
+        else:
+            return core_handlers.handle_query
+
+    # Default handler lookup
+    return HANDLERS.get(op)
 
 
 # ============================================================================
@@ -136,7 +174,8 @@ def semantic_api():
         op = request.json["op"]
 
         # Check if operation is supported
-        if op not in HANDLERS:
+        handler = _get_handler(op, request.json)
+        if handler is None:
             response = SemanticResponse(
                 ok=False,
                 actor=actor,
@@ -145,7 +184,7 @@ def semantic_api():
                     "type": "ValidationError",
                     "message": f"Unsupported operation: {op}",
                     "details": {
-                        "supported_operations": list(HANDLERS.keys()),
+                        "supported_operations": sorted(set(HANDLERS.keys()) | {"get", "query"}),
                     }
                 }
             )
@@ -155,7 +194,6 @@ def semantic_api():
         validated_request = _validate_request(request.json, op)
 
         # Dispatch to handler
-        handler = HANDLERS[op]
         result = handler(validated_request, actor)
 
         # Build success response
@@ -281,6 +319,8 @@ def _validate_request(request_json: dict, op: str) -> SemanticRequest:
         "edit": EditRequest,
         "forget": ForgetRequest,
         "query": QueryRequest,
+        "add": AddRequest,
+        "amend": AmendRequest,
     }
 
     schema = request_schemas.get(op)

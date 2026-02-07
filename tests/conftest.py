@@ -3,7 +3,7 @@ Pytest configuration and fixtures for memogarden-api tests.
 
 This module provides fixtures for:
 - Flask app with in-memory SQLite database
-- Database initialization
+- Database initialization (Core and Soil)
 - User authentication (JWT tokens and API keys)
 - Test client with proper authentication headers
 
@@ -16,6 +16,7 @@ Testing Approach:
 import hashlib
 import os
 import sqlite3
+import tempfile
 from typing import Any
 from unittest.mock import patch
 
@@ -26,6 +27,8 @@ os.environ["DATABASE_PATH"] = ":memory:"
 os.environ["JWT_SECRET_KEY"] = "test-secret-key"
 os.environ["BYPASS_LOCALHOST_CHECK"] = "true"
 
+# Import isodatetime for test fixtures (must be after env vars are set)
+from system.utils import isodatetime  # noqa: E402
 
 # ============================================================================
 # SQLite Extension Functions
@@ -75,8 +78,9 @@ def flask_app():
     Returns:
         Flask app instance configured for testing
     """
-    # Track temp DB path for cleanup
+    # Track temp DB paths for cleanup
     temp_db_path = None
+    temp_soil_db_path = None
     _schema_initialized = False
 
     # Now import and configure the app
@@ -87,7 +91,6 @@ def flask_app():
 
         # Create database if it doesn't exist
         if temp_db_path is None:
-            import tempfile
             fd, temp_db_path = tempfile.mkstemp(suffix=".db")
             os.close(fd)
 
@@ -97,11 +100,8 @@ def flask_app():
         # Initialize schema on first connection
         if not _schema_initialized:
             # Load schema from the memogarden-system core.sql file
-            # This ensures tests always match production schema
             from pathlib import Path
 
-            # Find the core.sql file in memogarden-system
-            # Try relative path from tests directory
             tests_dir = Path(__file__).parent
             project_root = tests_dir.parent.parent
             schema_path = project_root / "memogarden-system" / "system" / "schemas" / "sql" / "core.sql"
@@ -115,22 +115,18 @@ def flask_app():
             final_schema_sql = schema_path.read_text()
             conn.executescript(final_schema_sql)
 
-            # Add authentication tables (users and api_keys) which are not in core.sql yet
+            # Add authentication tables (users and api_keys)
             auth_tables_sql = """
-            -- Users table for authentication
             CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
-
                 FOREIGN KEY (id) REFERENCES entity(uuid) ON DELETE CASCADE
             );
-
             CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 
-            -- API Keys table for authentication
             CREATE TABLE IF NOT EXISTS api_keys (
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
@@ -141,37 +137,73 @@ def flask_app():
                 created_at TEXT NOT NULL,
                 last_seen TEXT,
                 revoked_at TEXT,
-
                 FOREIGN KEY (id) REFERENCES entity(uuid) ON DELETE CASCADE,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
-
             CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
             CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(revoked_at) WHERE revoked_at IS NULL;
             """
             conn.executescript(auth_tables_sql)
             conn.commit()
             _schema_initialized = True
-        return conn  # Return connection, but don't cache it
+        return conn
+
+    # Initialize Soil database for tests
+    # Create a separate temp file for Soil
+    soil_fd, temp_soil_db_path = tempfile.mkstemp(suffix="_soil.db")
+    os.close(soil_fd)
+
+    # Create soil database and initialize schema
+    soil_conn = _create_sqlite_connection(temp_soil_db_path)
+    from pathlib import Path
+    tests_dir = Path(__file__).parent
+    project_root = tests_dir.parent.parent
+    soil_schema_path = project_root / "memogarden-system" / "system" / "schemas" / "sql" / "soil.sql"
+
+    if not soil_schema_path.exists():
+        raise FileNotFoundError(
+            f"Soil schema file not found at {soil_schema_path}. "
+            f"Ensure memogarden-system repository is available."
+        )
+
+    soil_schema_sql = soil_schema_path.read_text()
+    soil_conn.executescript(soil_schema_sql)
+    soil_conn.commit()
+
+    # Save original Soil.__init__ before any patching
+    from system.soil.database import Soil
+    original_soil_init = Soil.__init__
+
+    # Create a custom Soil.__init__ that uses our test database
+    # pyright: ignore[reportIncompatibleVariableOverride]
+    def _mock_soil_init(self, db_path: str | Path = "soil.db"):
+        # Always use test database, ignore the passed db_path
+        original_soil_init(self, temp_soil_db_path)
 
     # Patch _create_connection BEFORE importing the app
     with patch('system.core._create_connection', _mock_create_connection):
-        from api.main import app
+        # Patch Soil.__init__ to use test database
+        with patch.object(Soil, '__init__', _mock_soil_init):
+            from api.main import app
 
-        app.config["TESTING"] = True
+            app.config["TESTING"] = True
 
-        # Skip initialize_database() in tests since the fixture already sets up the schema
-        # The initialize_database() function uses sqlite3.connect() directly which
-        # bypasses our mocked connection
+            yield app
 
-        yield app
+        # Cleanup soil connection
+        soil_conn.close()
 
-        # Cleanup temp DB
-        if temp_db_path:
-            try:
-                os.unlink(temp_db_path)
-            except OSError:
-                pass  # Ignore cleanup failures in tests
+    # Cleanup temp DBs
+    if temp_db_path:
+        try:
+            os.unlink(temp_db_path)
+        except OSError:
+            pass
+    if temp_soil_db_path:
+        try:
+            os.unlink(temp_soil_db_path)
+        except OSError:
+            pass
 
 
 @pytest.fixture
@@ -294,7 +326,6 @@ def test_user(db_conn):
     """
     import json
     import uuid
-    from datetime import datetime
 
     from api.middleware.service import hash_password
 
@@ -303,7 +334,7 @@ def test_user(db_conn):
     password = "TestPass123"
     password_hash = hash_password(password)  # Use default work factor
 
-    now = datetime.utcnow()
+    now = isodatetime.now()
 
     # Create entity for user (links to users table)
     # Include empty JSON object for data field (required by new schema)
@@ -343,7 +374,6 @@ def test_user_app(flask_app):
     """
     import json
     import uuid
-    from datetime import datetime
 
     from api.middleware.service import hash_password
     from system.core import _create_connection
@@ -354,7 +384,7 @@ def test_user_app(flask_app):
     password = "TestPass123"
     password_hash = hash_password(password)  # Use default work factor
 
-    now = datetime.utcnow()
+    now = isodatetime.now()
 
     # Get the Flask app's connection
     conn = _create_connection()
@@ -363,21 +393,21 @@ def test_user_app(flask_app):
         # Create entity for user with proper hash
         entity_hash = hash_chain.compute_entity_hash(
             entity_type="User",
-            created_at=now.isoformat(),
-            updated_at=now.isoformat(),
+            created_at=now,  # isodatetime.now() already returns ISO string
+            updated_at=now,
             previous_hash=None
         )
         conn.execute(
             """INSERT INTO entity (uuid, type, hash, version, created_at, updated_at, data)
             VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (user_id, "User", entity_hash, 1, now.isoformat(), now.isoformat(), json.dumps({}))
+            (user_id, "User", entity_hash, 1, now, now, json.dumps({}))
         )
 
         # Create user (id references entity.uuid)
         conn.execute(
             """INSERT INTO users (id, username, password_hash, is_admin, created_at)
             VALUES (?, ?, ?, ?, ?)""",
-            (user_id, username, password_hash, True, now.isoformat())
+            (user_id, username, password_hash, True, now)
         )
         conn.commit()
 
@@ -443,7 +473,6 @@ def auth_headers_apikey(test_user_app):
     """
     import json
     import uuid
-    from datetime import datetime
 
     from api.middleware.api_keys import get_api_key_prefix, hash_api_key
     from system.core import _create_connection
@@ -455,7 +484,7 @@ def auth_headers_apikey(test_user_app):
     key_hash = hash_api_key(raw_key)
     key_prefix = get_api_key_prefix(raw_key)
 
-    now = datetime.utcnow()
+    now = isodatetime.now()
 
     # Get the Flask app's connection
     conn = _create_connection()
@@ -464,21 +493,21 @@ def auth_headers_apikey(test_user_app):
         # Create entity for API key with proper hash
         entity_hash = hash_chain.compute_entity_hash(
             entity_type="ApiKey",
-            created_at=now.isoformat(),
-            updated_at=now.isoformat(),
+            created_at=now,  # isodatetime.now() already returns ISO string
+            updated_at=now,
             previous_hash=None
         )
         conn.execute(
             """INSERT INTO entity (uuid, type, hash, version, created_at, updated_at, data)
             VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (api_key_id, "ApiKey", entity_hash, 1, now.isoformat(), now.isoformat(), json.dumps({}))
+            (api_key_id, "ApiKey", entity_hash, 1, now, now, json.dumps({}))
         )
 
         # Create API key (id references entity.uuid)
         conn.execute(
             """INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix, created_at)
             VALUES (?, ?, ?, ?, ?, ?)""",
-            (api_key_id, test_user_app["id"], "test-key", key_hash, key_prefix, now.isoformat())
+            (api_key_id, test_user_app["id"], "test-key", key_hash, key_prefix, now)
         )
         conn.commit()
 
