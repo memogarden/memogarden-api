@@ -1206,3 +1206,220 @@ class TestLinkVerb:
         assert response.status_code == 400
         data = response.get_json()
         assert data["ok"] is False
+
+
+class TestSemanticAPIContextVerbs:
+    """Test Semantic API context verbs (RFC-003 v4)."""
+
+    def test_enter_scope_adds_to_active_set(self, client, auth_headers):
+        """Test enter verb adds scope to active set."""
+        # Create a scope (using Artifact as proxy)
+        scope_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {"name": "Project A"}},
+            headers=auth_headers
+        )
+        scope_uuid = scope_response.get_json()["result"]["uuid"]
+
+        # Enter scope
+        response = client.post(
+            "/mg",
+            json={"op": "enter", "scope": scope_uuid},
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+
+        # Verify response
+        result = data["result"]
+        assert result["scope"] == scope_uuid
+        assert scope_uuid in result["active_scopes"]
+        assert result["primary_scope"] == scope_uuid  # First scope becomes primary
+
+    def test_enter_multiple_scopes(self, client, auth_headers):
+        """Test entering multiple scopes."""
+        # Create two scopes
+        scope1_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {"name": "Project A"}},
+            headers=auth_headers
+        )
+        scope1_uuid = scope1_response.get_json()["result"]["uuid"]
+
+        scope2_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {"name": "Project B"}},
+            headers=auth_headers
+        )
+        scope2_uuid = scope2_response.get_json()["result"]["uuid"]
+
+        # Enter first scope
+        client.post("/mg", json={"op": "enter", "scope": scope1_uuid}, headers=auth_headers)
+
+        # Enter second scope
+        response = client.post(
+            "/mg",
+            json={"op": "enter", "scope": scope2_uuid},
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        result = data["result"]
+
+        # Both scopes should be active
+        assert scope1_uuid in result["active_scopes"]
+        assert scope2_uuid in result["active_scopes"]
+
+        # First scope should still be primary (INV-11a: Focus Separation)
+        assert result["primary_scope"] == scope1_uuid
+
+    def test_enter_already_active_scope_fails(self, client, auth_headers):
+        """Test entering a scope that's already active fails."""
+        # Create and enter a scope
+        scope_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {"name": "Project A"}},
+            headers=auth_headers
+        )
+        scope_uuid = scope_response.get_json()["result"]["uuid"]
+
+        client.post("/mg", json={"op": "enter", "scope": scope_uuid}, headers=auth_headers)
+
+        # Try to enter again
+        response = client.post(
+            "/mg",
+            json={"op": "enter", "scope": scope_uuid},
+            headers=auth_headers
+        )
+
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data["ok"] is False
+        assert "already in active set" in data["error"]["message"]
+
+    def test_leave_scope_removes_from_active_set(self, client, auth_headers):
+        """Test leave verb removes scope from active set."""
+        # Create and enter a scope
+        scope_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {"name": "Project A"}},
+            headers=auth_headers
+        )
+        scope_uuid = scope_response.get_json()["result"]["uuid"]
+
+        client.post("/mg", json={"op": "enter", "scope": scope_uuid}, headers=auth_headers)
+
+        # Leave scope
+        response = client.post(
+            "/mg",
+            json={"op": "leave", "scope": scope_uuid},
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+
+        # Verify scope removed
+        result = data["result"]
+        assert scope_uuid not in result["active_scopes"]
+        assert result["primary_scope"] is None  # Leaving primary clears it
+
+    def test_leave_scope_not_active_fails(self, client, auth_headers):
+        """Test leaving a scope that's not active fails."""
+        # Create a scope (but don't enter it)
+        scope_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {"name": "Project A"}},
+            headers=auth_headers
+        )
+        scope_uuid = scope_response.get_json()["result"]["uuid"]
+
+        # Try to leave without entering (no context frame exists)
+        response = client.post(
+            "/mg",
+            json={"op": "leave", "scope": scope_uuid},
+            headers=auth_headers
+        )
+
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data["ok"] is False
+        # Either "no active context frame" or "not in active set" is acceptable
+        error_msg = data["error"]["message"].lower()
+        assert "no active context frame" in error_msg or "not in active set" in error_msg
+
+    def test_focus_scope_changes_primary(self, client, auth_headers):
+        """Test focus verb changes primary scope."""
+        # Create two scopes
+        scope1_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {"name": "Project A"}},
+            headers=auth_headers
+        )
+        scope1_uuid = scope1_response.get_json()["result"]["uuid"]
+
+        scope2_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {"name": "Project B"}},
+            headers=auth_headers
+        )
+        scope2_uuid = scope2_response.get_json()["result"]["uuid"]
+
+        # Enter both scopes
+        client.post("/mg", json={"op": "enter", "scope": scope1_uuid}, headers=auth_headers)
+        client.post("/mg", json={"op": "enter", "scope": scope2_uuid}, headers=auth_headers)
+
+        # Focus on second scope
+        response = client.post(
+            "/mg",
+            json={"op": "focus", "scope": scope2_uuid},
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+
+        # Verify primary changed
+        result = data["result"]
+        assert result["primary_scope"] == scope2_uuid
+        assert scope1_uuid in result["active_scopes"]
+        assert scope2_uuid in result["active_scopes"]
+
+    def test_focus_scope_not_active_fails(self, client, auth_headers):
+        """Test focusing on a scope that's not active fails."""
+        # Create a scope (but don't enter it)
+        scope_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {"name": "Project A"}},
+            headers=auth_headers
+        )
+        scope_uuid = scope_response.get_json()["result"]["uuid"]
+
+        # Try to focus without entering (no context frame exists)
+        response = client.post(
+            "/mg",
+            json={"op": "focus", "scope": scope_uuid},
+            headers=auth_headers
+        )
+
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data["ok"] is False
+        # Either "no active context frame" or "not in active set" is acceptable
+        error_msg = data["error"]["message"].lower()
+        assert "no active context frame" in error_msg or "not in active set" in error_msg
+
+    def test_context_verbs_require_authentication(self, client):
+        """Test context verbs require authentication."""
+        # Try to enter a scope without auth
+        response = client.post(
+            "/mg",
+            json={"op": "enter", "scope": "some_scope_uuid"}
+        )
+
+        assert response.status_code == 401

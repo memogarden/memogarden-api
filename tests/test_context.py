@@ -530,3 +530,239 @@ def test_agent_context_frame(core):
 
     assert context_frame.owner_type == "agent"
     assert context_frame.owner == agent_uuid
+
+
+# ============================================================================
+# Test: enter_scope() operation
+# ============================================================================
+
+def test_enter_scope_adds_to_active_set(core):
+    """enter_scope() should add scope to active set."""
+    operator_uuid = core.entity.create("Operator")
+    scope_uuid = core.entity.create("Artifact")  # Using Artifact as proxy for Scope
+
+    context_frame = core.context.get_context_frame(
+        owner=operator_uuid,
+        owner_type="operator",
+        create_if_missing=True
+    )
+
+    # Enter scope
+    context_frame = core.context.enter_scope(context_frame, scope_uuid)
+
+    # Verify scope in active set
+    assert scope_uuid in context_frame.active_scopes
+    assert len(context_frame.active_scopes) == 1
+
+
+def test_enter_scope_first_scope_becomes_primary(core):
+    """INV-11b: First scope entered should become primary automatically."""
+    operator_uuid = core.entity.create("Operator")
+    scope_uuid = core.entity.create("Artifact")
+
+    context_frame = core.context.get_context_frame(
+        owner=operator_uuid,
+        owner_type="operator",
+        create_if_missing=True
+    )
+
+    # Enter scope
+    context_frame = core.context.enter_scope(context_frame, scope_uuid)
+
+    # Verify first scope becomes primary
+    assert context_frame.primary_scope == scope_uuid
+
+
+def test_enter_scope_does_not_change_existing_primary(core):
+    """INV-11a: enter should NOT change primary scope if already set."""
+    operator_uuid = core.entity.create("Operator")
+    scope1_uuid = core.entity.create("Artifact")
+    scope2_uuid = core.entity.create("Artifact")
+
+    context_frame = core.context.get_context_frame(
+        owner=operator_uuid,
+        owner_type="operator",
+        create_if_missing=True
+    )
+
+    # Enter first scope (becomes primary)
+    context_frame = core.context.enter_scope(context_frame, scope1_uuid)
+    assert context_frame.primary_scope == scope1_uuid
+
+    # Enter second scope
+    context_frame = core.context.enter_scope(context_frame, scope2_uuid)
+
+    # Primary should still be first scope (INV-11a: Focus Separation)
+    assert context_frame.primary_scope == scope1_uuid
+    assert scope2_uuid in context_frame.active_scopes
+
+
+def test_enter_scope_already_active_raises(core):
+    """enter_scope() should raise if scope already in active set."""
+    operator_uuid = core.entity.create("Operator")
+    scope_uuid = core.entity.create("Artifact")
+
+    context_frame = core.context.get_context_frame(
+        owner=operator_uuid,
+        owner_type="operator",
+        create_if_missing=True
+    )
+
+    # Enter scope once
+    context_frame = core.context.enter_scope(context_frame, scope_uuid)
+
+    # Try to enter again - should raise
+    with pytest.raises(Exception, match="already in active set"):
+        core.context.enter_scope(context_frame, scope_uuid)
+
+
+def test_enter_scope_for_agent_raises(core):
+    """Only operators can have active scopes."""
+    agent_uuid = core.entity.create("Agent")
+    scope_uuid = core.entity.create("Artifact")
+
+    context_frame = core.context.get_context_frame(
+        owner=agent_uuid,
+        owner_type="agent",
+        create_if_missing=True
+    )
+
+    # Agent cannot enter scopes
+    with pytest.raises(Exception, match="Only operators can have active scopes"):
+        core.context.enter_scope(context_frame, scope_uuid)
+
+
+# ============================================================================
+# Test: leave_scope() operation
+# ============================================================================
+
+def test_leave_scope_removes_from_active_set(core):
+    """leave_scope() should remove scope from active set."""
+    operator_uuid = core.entity.create("Operator")
+    scope_uuid = core.entity.create("Artifact")
+
+    context_frame = core.context.get_context_frame(
+        owner=operator_uuid,
+        owner_type="operator",
+        create_if_missing=True
+    )
+
+    # Enter scope
+    context_frame = core.context.enter_scope(context_frame, scope_uuid)
+    assert scope_uuid in context_frame.active_scopes
+
+    # Leave scope
+    context_frame = core.context.leave_scope(context_frame, scope_uuid)
+
+    # Verify scope removed from active set
+    assert scope_uuid not in context_frame.active_scopes
+    assert len(context_frame.active_scopes) == 0
+
+
+def test_leave_scope_clears_primary_if_leaving_primary(core):
+    """Leaving primary scope should clear primary_scope."""
+    operator_uuid = core.entity.create("Operator")
+    scope1_uuid = core.entity.create("Artifact")
+    scope2_uuid = core.entity.create("Artifact")
+
+    context_frame = core.context.get_context_frame(
+        owner=operator_uuid,
+        owner_type="operator",
+        create_if_missing=True
+    )
+
+    # Enter scopes
+    context_frame = core.context.enter_scope(context_frame, scope1_uuid)
+    context_frame = core.context.enter_scope(context_frame, scope2_uuid)
+
+    # Focus on scope2
+    context_frame = core.context.focus_scope(context_frame, scope2_uuid)
+    assert context_frame.primary_scope == scope2_uuid
+
+    # Leave primary scope (scope2)
+    context_frame = core.context.leave_scope(context_frame, scope2_uuid)
+
+    # Primary should be cleared
+    assert context_frame.primary_scope is None
+    assert scope1_uuid in context_frame.active_scopes
+
+
+def test_leave_scope_not_active_raises(core):
+    """leave_scope() should raise if scope not in active set."""
+    operator_uuid = core.entity.create("Operator")
+    scope_uuid = core.entity.create("Artifact")
+
+    context_frame = core.context.get_context_frame(
+        owner=operator_uuid,
+        owner_type="operator",
+        create_if_missing=True
+    )
+
+    # Try to leave scope that hasn't been entered
+    with pytest.raises(Exception, match="not in active set"):
+        core.context.leave_scope(context_frame, scope_uuid)
+
+
+# ============================================================================
+# Test: focus_scope() operation
+# ============================================================================
+
+def test_focus_scope_switches_primary(core):
+    """focus_scope() should switch primary scope among active scopes."""
+    operator_uuid = core.entity.create("Operator")
+    scope1_uuid = core.entity.create("Artifact")
+    scope2_uuid = core.entity.create("Artifact")
+
+    context_frame = core.context.get_context_frame(
+        owner=operator_uuid,
+        owner_type="operator",
+        create_if_missing=True
+    )
+
+    # Enter scopes
+    context_frame = core.context.enter_scope(context_frame, scope1_uuid)
+    context_frame = core.context.enter_scope(context_frame, scope2_uuid)
+
+    # Focus on scope2
+    context_frame = core.context.focus_scope(context_frame, scope2_uuid)
+
+    # Verify primary changed
+    assert context_frame.primary_scope == scope2_uuid
+
+    # Focus on scope1
+    context_frame = core.context.focus_scope(context_frame, scope1_uuid)
+
+    # Verify primary changed again
+    assert context_frame.primary_scope == scope1_uuid
+
+
+def test_focus_scope_not_active_raises(core):
+    """focus_scope() should raise if scope not in active set."""
+    operator_uuid = core.entity.create("Operator")
+    scope_uuid = core.entity.create("Artifact")
+
+    context_frame = core.context.get_context_frame(
+        owner=operator_uuid,
+        owner_type="operator",
+        create_if_missing=True
+    )
+
+    # Try to focus on scope that hasn't been entered
+    with pytest.raises(Exception, match="not in active set"):
+        core.context.focus_scope(context_frame, scope_uuid)
+
+
+def test_focus_scope_for_agent_raises(core):
+    """Only operators can focus scopes."""
+    agent_uuid = core.entity.create("Agent")
+    scope_uuid = core.entity.create("Artifact")
+
+    context_frame = core.context.get_context_frame(
+        owner=agent_uuid,
+        owner_type="agent",
+        create_if_missing=True
+    )
+
+    # Agent cannot focus scopes
+    with pytest.raises(Exception, match="Only operators can have active scopes"):
+        core.context.focus_scope(context_frame, scope_uuid)

@@ -228,6 +228,52 @@ class LinkRequest(SemanticRequest):
     )
 
 
+class EnterRequest(SemanticRequest):
+    """Request to enter a scope - add to active set (RFC-003).
+
+    Per RFC-003 v4:
+    - enter: Add scope to active set
+
+    INV-11a: Focus Separation - enter does NOT auto-focus
+    INV-11b: Implied Focus - first scope becomes primary automatically
+    """
+    op: Literal["enter"] = "enter"  # type: ignore[var-annotated]
+    scope: str = Field(
+        ...,
+        description="UUID of the scope to enter (with or without prefix)"
+    )
+
+
+class LeaveRequest(SemanticRequest):
+    """Request to leave a scope - remove from active set (RFC-003).
+
+    Per RFC-003 v4:
+    - leave: Remove scope from active set
+
+    INV-8: Stream Suspension on Leave - scope view-stream suspends
+    """
+    op: Literal["leave"] = "leave"  # type: ignore[var-annotated]
+    scope: str = Field(
+        ...,
+        description="UUID of the scope to leave (with or without prefix)"
+    )
+
+
+class FocusRequest(SemanticRequest):
+    """Request to focus a scope - switch primary scope (RFC-003).
+
+    Per RFC-003 v4:
+    - focus: Switch primary scope among active scopes
+
+    INV-11: Explicit Scope Control - focus requires explicit action
+    """
+    op: Literal["focus"] = "focus"  # type: ignore[var-annotated]
+    scope: str = Field(
+        ...,
+        description="UUID of the scope to focus (must be in active set, with or without prefix)"
+    )
+
+
 # ============================================================================
 # Response Envelope
 # ============================================================================
@@ -271,5 +317,8 @@ SemanticRequestType = (
     QueryRequest |
     AddRequest |
     AmendRequest |
-    LinkRequest
+    LinkRequest |
+    EnterRequest |
+    LeaveRequest |
+    FocusRequest
 )

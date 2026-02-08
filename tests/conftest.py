@@ -48,16 +48,17 @@ def _create_sqlite_connection(db_path: str) -> sqlite3.Connection:
     Registers the sha256 function needed by migrations.
 
     Args:
-        db_path: Path to database file
+        db_path: Path to database file (use "file::memory:?mode=memory&cache=shared" for shared in-memory DB)
 
     Returns:
         SQLite connection with custom functions registered
     """
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, uri=True, timeout=30)  # Increase timeout for locked databases
     conn.row_factory = sqlite3.Row
     # Foreign keys disabled during schema creation, enabled afterward
     conn.execute("PRAGMA foreign_keys = OFF")
     conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")  # Wait up to 30 seconds for locks
     # Register sha256 function for migrations
     conn.create_function("sha256", 1, _sha256_hex)
     return conn
@@ -67,94 +68,113 @@ def _create_sqlite_connection(db_path: str) -> sqlite3.Connection:
 # Flask App Fixture
 # ============================================================================
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def flask_app():
     """
     Create a Flask app for testing.
 
-    The app uses an in-memory SQLite database for isolation.
+    Each test gets a fresh in-memory SQLite database for perfect isolation.
     The database is initialized with the full schema on startup.
+    Database is automatically cleaned up when the test completes.
+
+    Session 5 Fix: Switched from shared temp file to in-memory database to:
+    - Eliminate database locking issues in concurrent test execution
+    - Ensure perfect test isolation (no state pollution between tests)
+    - Make tests deterministic and order-independent
+    - Eliminate flaky test failures
 
     Returns:
         Flask app instance configured for testing
     """
-    # Track temp DB paths for cleanup
-    temp_db_path = None
-    temp_soil_db_path = None
+    import threading
+    import uuid
+
     _schema_initialized = False
+    _schema_lock = threading.Lock()
+    _keeper_conn = None  # Keep this connection alive to prevent database destruction
+    # Use unique database name for each test to ensure isolation
+    _test_db_name = f"file:memogarden_test_{uuid.uuid4()}?mode=memory&cache=shared"
 
     # Now import and configure the app
     # Patch _create_connection to use our test database
     def _mock_create_connection():
-        """Mock that returns our test database connection."""
-        nonlocal temp_db_path, _schema_initialized
+        """Mock that returns our in-memory test database connection.
 
-        # Create database if it doesn't exist
-        if temp_db_path is None:
-            fd, temp_db_path = tempfile.mkstemp(suffix=".db")
-            os.close(fd)
+        Uses SQLite's shared cache mode with a named in-memory database.
+        Each connection can be closed independently without affecting the database.
 
-        # Create database connection with sha256 support
-        conn = _create_sqlite_connection(temp_db_path)
+        Session 5: Using named in-memory database to allow multiple connections
+        while avoiding issues with Flask app initialization closing connections.
+        """
+        nonlocal _schema_initialized, _keeper_conn
 
-        # Initialize schema on first connection
-        if not _schema_initialized:
-            # Load schema from the memogarden-system core.sql file
-            from pathlib import Path
+        # Use named shared in-memory database
+        conn = _create_sqlite_connection(_test_db_name)
 
-            tests_dir = Path(__file__).parent
-            project_root = tests_dir.parent.parent
-            schema_path = project_root / "memogarden-system" / "system" / "schemas" / "sql" / "core.sql"
+        # Initialize schema on first connection (with locking to prevent race conditions)
+        with _schema_lock:
+            if not _schema_initialized:
+                # Load schema from the memogarden-system core.sql file
+                from pathlib import Path
 
-            if not schema_path.exists():
-                raise FileNotFoundError(
-                    f"Schema file not found at {schema_path}. "
-                    f"Ensure memogarden-system repository is available."
-                )
+                tests_dir = Path(__file__).parent
+                project_root = tests_dir.parent.parent
+                schema_path = project_root / "memogarden-system" / "system" / "schemas" / "sql" / "core.sql"
 
-            final_schema_sql = schema_path.read_text()
-            conn.executescript(final_schema_sql)
+                if not schema_path.exists():
+                    raise FileNotFoundError(
+                        f"Schema file not found at {schema_path}. "
+                        f"Ensure memogarden-system repository is available."
+                    )
 
-            # Add authentication tables (users and api_keys)
-            auth_tables_sql = """
-            CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY,
-                username TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                is_admin INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (id) REFERENCES entity(uuid) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+                final_schema_sql = schema_path.read_text()
+                conn.executescript(final_schema_sql)
 
-            CREATE TABLE IF NOT EXISTS api_keys (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                key_hash TEXT NOT NULL,
-                key_prefix TEXT NOT NULL,
-                expires_at TEXT,
-                created_at TEXT NOT NULL,
-                last_seen TEXT,
-                revoked_at TEXT,
-                FOREIGN KEY (id) REFERENCES entity(uuid) ON DELETE CASCADE,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
-            CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(revoked_at) WHERE revoked_at IS NULL;
-            """
-            conn.executescript(auth_tables_sql)
-            conn.commit()
-            _schema_initialized = True
+                # Add authentication tables (users and api_keys)
+                auth_tables_sql = """
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    username TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (id) REFERENCES entity(uuid) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    key_hash TEXT NOT NULL,
+                    key_prefix TEXT NOT NULL,
+                    expires_at TEXT,
+                    created_at TEXT NOT NULL,
+                    last_seen TEXT,
+                    revoked_at TEXT,
+                    FOREIGN KEY (id) REFERENCES entity(uuid) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
+                CREATE INDEX IF NOT EXISTS idx_api_keys_active ON api_keys(revoked_at) WHERE revoked_at IS NULL;
+                """
+                conn.executescript(auth_tables_sql)
+                conn.commit()
+
+                # Store this connection as the keeper to keep database alive
+                _keeper_conn = conn
+                _schema_initialized = True
+
+                # Return a NEW connection (not the keeper) so Flask app can close it without destroying the database
+                return _create_sqlite_connection(_test_db_name)
+
+        # For subsequent calls, return new connections
         return conn
 
     # Initialize Soil database for tests
-    # Create a separate temp file for Soil
-    soil_fd, temp_soil_db_path = tempfile.mkstemp(suffix="_soil.db")
-    os.close(soil_fd)
-
-    # Create soil database and initialize schema
-    soil_conn = _create_sqlite_connection(temp_soil_db_path)
+    # Use named shared in-memory database with unique name (Session 5: fixed to use shared cache)
+    soil_db_name = f"file:memogarden_soil_{uuid.uuid4()}?mode=memory&cache=shared"
+    soil_conn = _create_sqlite_connection(soil_db_name)
     from pathlib import Path
     tests_dir = Path(__file__).parent
     project_root = tests_dir.parent.parent
@@ -170,15 +190,15 @@ def flask_app():
     soil_conn.executescript(soil_schema_sql)
     soil_conn.commit()
 
-    # Save original Soil.__init__ before any patching
+    # Save original Soil.__init__ before patching
     from system.soil.database import Soil
     original_soil_init = Soil.__init__
 
     # Create a custom Soil.__init__ that uses our test database
     # pyright: ignore[reportIncompatibleVariableOverride]
     def _mock_soil_init(self, db_path: str | Path = "soil.db"):
-        # Always use test database, ignore the passed db_path
-        original_soil_init(self, temp_soil_db_path)
+        # Always use named shared in-memory test database, ignore the passed db_path
+        original_soil_init(self, soil_db_name)
 
     # Patch _create_connection BEFORE importing the app
     with patch('system.core._create_connection', _mock_create_connection):
@@ -190,20 +210,14 @@ def flask_app():
 
             yield app
 
-        # Cleanup soil connection
+        # Cleanup soil connection (in-memory database auto-cleans)
         soil_conn.close()
 
-    # Cleanup temp DBs
-    if temp_db_path:
-        try:
-            os.unlink(temp_db_path)
-        except OSError:
-            pass
-    if temp_soil_db_path:
-        try:
-            os.unlink(temp_soil_db_path)
-        except OSError:
-            pass
+    # Cleanup keeper connection (in-memory database auto-cleans)
+    if _keeper_conn is not None:
+        _keeper_conn.close()
+
+    # No temp file cleanup needed - using shared in-memory database (Session 5 fix)
 
 
 @pytest.fixture
@@ -581,21 +595,27 @@ def core(flask_app):
     This fixture provides direct access to the same database used by the Flask app,
     ensuring integration between unit and integration tests.
 
+    Session 5 Fix: Uses named in-memory database with shared cache.
+    Each fixture gets its own connection, but all connections see the same database.
+
     Args:
         flask_app: Flask app fixture (ensures database is initialized)
 
     Returns:
         Core instance with autocommit semantics
     """
-    from system.core import get_core
+    from system.core import Core, _create_connection
 
-    # Get a core instance (autocommit mode for simple operations)
-    # This will use the mocked connection from flask_app, pointing to the temp database
-    core_instance = get_core(atomic=False)
+    # Get a connection to the shared in-memory database
+    conn = _create_connection()
 
-    yield core_instance
-
-    # Cleanup happens automatically when connection closes
+    try:
+        # Create Core instance with the connection
+        core_instance = Core(conn, atomic=False)
+        yield core_instance
+    finally:
+        # Explicitly close the connection to prevent database lock issues
+        conn.close()
 
 
 @pytest.fixture

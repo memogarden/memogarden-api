@@ -22,6 +22,7 @@ from ..schemas.semantic import (
     GetRequest,
     QueryRequest,
 )
+from .decorators import with_soil_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,8 @@ def _row_to_fact_response(row) -> dict:
 # Verb Handlers
 # ============================================================================
 
-def handle_add(request: AddRequest, actor: str) -> dict:
+@with_soil_cleanup
+def handle_add(request: AddRequest, actor: str, soil) -> dict:
     """Handle add verb - add a new fact (Item) to Soil.
 
     Session 2: Supports baseline item types only.
@@ -121,6 +123,7 @@ def handle_add(request: AddRequest, actor: str) -> dict:
     Args:
         request: Validated AddRequest
         actor: Authenticated user/agent UUID
+        soil: Soil instance (injected by @with_soil_cleanup decorator)
 
     Returns:
         dict with created fact data
@@ -154,10 +157,7 @@ def handle_add(request: AddRequest, actor: str) -> dict:
     )
 
     # Create item in Soil
-    soil = get_soil()
     item_uuid = soil.create_item(item)
-    # Commit the transaction
-    soil._get_connection().commit()
 
     # Fetch created item
     item = soil.get_item(item_uuid)
@@ -165,7 +165,8 @@ def handle_add(request: AddRequest, actor: str) -> dict:
     return _item_to_fact_response(item)
 
 
-def handle_amend(request: AmendRequest, actor: str) -> dict:
+@with_soil_cleanup
+def handle_amend(request: AmendRequest, actor: str, soil) -> dict:
     """Handle amend verb - amend a fact by creating a superseding fact.
 
     Creates a new Fact with the corrected data and creates a `supersedes`
@@ -176,6 +177,7 @@ def handle_amend(request: AmendRequest, actor: str) -> dict:
     Args:
         request: Validated AmendRequest
         actor: Authenticated user/agent UUID
+        soil: Soil instance (injected by @with_soil_cleanup decorator)
 
     Returns:
         dict with amended fact data
@@ -184,7 +186,6 @@ def handle_amend(request: AmendRequest, actor: str) -> dict:
     target_id = uid.strip_prefix(request.target)
 
     # Get original item
-    soil = get_soil()
     original = soil.get_item(target_id)
     if original is None:
         from system.exceptions import ResourceNotFound
@@ -235,14 +236,11 @@ def handle_amend(request: AmendRequest, actor: str) -> dict:
     amended_uuid = soil.create_item(amended_item)
 
     # Update original to mark as superseded
-    # Use request.target (with prefix) since database stores prefixed UUIDs
-    soil._get_connection().execute(
-        """UPDATE item
-           SET superseded_by = ?, superseded_at = ?
-           WHERE uuid = ?""",
-        (amended_uuid, now, request.target)
+    soil.mark_superseded(
+        original_uuid=request.target,
+        superseded_by_uuid=amended_uuid,
+        superseded_at=now
     )
-    soil._get_connection().commit()
 
     # Create supersedes relation
     from system.soil.relation import SystemRelation

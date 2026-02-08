@@ -45,6 +45,9 @@ from api.schemas.semantic import (
     QueryRequest,
     SemanticRequest,
     SemanticResponse,
+    EnterRequest,
+    LeaveRequest,
+    FocusRequest,
 )
 from system.exceptions import (
     AuthenticationError,
@@ -72,6 +75,10 @@ HANDLERS = {
     # Soil bundle
     "add": soil_handlers.handle_add,
     "amend": soil_handlers.handle_amend,
+    # Context bundle (RFC-003 v4)
+    "enter": core_handlers.handle_enter,
+    "leave": core_handlers.handle_leave,
+    "focus": core_handlers.handle_focus,
 }
 
 
@@ -325,6 +332,9 @@ def _validate_request(request_json: dict, op: str) -> SemanticRequest:
         "add": AddRequest,
         "amend": AmendRequest,
         "link": LinkRequest,
+        "enter": EnterRequest,
+        "leave": LeaveRequest,
+        "focus": FocusRequest,
     }
 
     schema = request_schemas.get(op)

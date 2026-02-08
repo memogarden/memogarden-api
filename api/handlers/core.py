@@ -23,7 +23,11 @@ from ..schemas.semantic import (
     GetRequest,
     LinkRequest,
     QueryRequest,
+    EnterRequest,
+    LeaveRequest,
+    FocusRequest,
 )
+from .decorators import with_core_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -321,4 +325,137 @@ def handle_link(request: LinkRequest, actor: str) -> dict:
         "time_horizon": row["time_horizon"],
         "last_access_at": row["last_access_at"],
         "created_at": row["created_at"],
+    }
+
+
+# ============================================================================
+# Context Verb Handlers (RFC-003 v4)
+# ============================================================================
+
+@with_core_cleanup
+def handle_enter(request: EnterRequest, actor: str, core) -> dict:
+    """Handle enter verb - add scope to active set.
+
+    Per RFC-003 v4:
+    - enter: Add scope to active set
+    - INV-11a: Focus Separation (enter does NOT auto-focus)
+    - INV-11b: Implied Focus (first scope becomes primary)
+
+    Args:
+        request: Validated EnterRequest
+        actor: Authenticated user/agent UUID
+        core: Core instance (injected by @with_core_cleanup decorator)
+
+    Returns:
+        dict with scope and active_scopes
+    """
+    # Get user's ContextFrame
+    context_frame = core.context.get_context_frame(
+        owner=actor,
+        owner_type="operator",
+        create_if_missing=True
+    )
+
+    # Strip prefix from scope UUID
+    scope_uuid = uid.strip_prefix(request.scope)
+
+    # Enter the scope
+    context_frame = core.context.enter_scope(context_frame, scope_uuid)
+
+    return {
+        "scope": uid.add_core_prefix(scope_uuid),
+        "active_scopes": [uid.add_core_prefix(s) for s in (context_frame.active_scopes or [])],
+        "primary_scope": uid.add_core_prefix(context_frame.primary_scope) if context_frame.primary_scope else None
+    }
+
+
+@with_core_cleanup
+def handle_leave(request: LeaveRequest, actor: str, core) -> dict:
+    """Handle leave verb - remove scope from active set.
+
+    Per RFC-003 v4:
+    - leave: Remove scope from active set
+    - INV-8: Stream Suspension on Leave
+
+    Args:
+        request: Validated LeaveRequest
+        actor: Authenticated user/agent UUID
+        core: Core instance (injected by @with_core_cleanup decorator)
+
+    Returns:
+        dict with scope and active_scopes
+
+    Raises:
+        ResourceNotFound: If user has no ContextFrame
+        ValueError: If scope not in active set
+    """
+    try:
+        # Get user's ContextFrame (don't create if missing)
+        context_frame = core.context.get_context_frame(
+            owner=actor,
+            owner_type="operator",
+            create_if_missing=False
+        )
+    except Exception as e:
+        # Convert to ValueError for consistent 400 response
+        if "not found" in str(e).lower():
+            raise ValueError("No active context frame. You must enter a scope first.")
+        raise
+
+    # Strip prefix from scope UUID
+    scope_uuid = uid.strip_prefix(request.scope)
+
+    # Leave the scope
+    context_frame = core.context.leave_scope(context_frame, scope_uuid)
+
+    return {
+        "scope": uid.add_core_prefix(scope_uuid),
+        "active_scopes": [uid.add_core_prefix(s) for s in (context_frame.active_scopes or [])],
+        "primary_scope": uid.add_core_prefix(context_frame.primary_scope) if context_frame.primary_scope else None
+    }
+
+
+@with_core_cleanup
+def handle_focus(request: FocusRequest, actor: str, core) -> dict:
+    """Handle focus verb - switch primary scope among active scopes.
+
+    Per RFC-003 v4:
+    - focus: Switch primary scope among active scopes
+    - INV-11: Explicit Scope Control (focus requires explicit action)
+
+    Args:
+        request: Validated FocusRequest
+        actor: Authenticated user/agent UUID
+        core: Core instance (injected by @with_core_cleanup decorator)
+
+    Returns:
+        dict with scope and primary_scope
+
+    Raises:
+        ResourceNotFound: If user has no ContextFrame
+        ValueError: If scope not in active set
+    """
+    try:
+        # Get user's ContextFrame (don't create if missing)
+        context_frame = core.context.get_context_frame(
+            owner=actor,
+            owner_type="operator",
+            create_if_missing=False
+        )
+    except Exception as e:
+        # Convert to ValueError for consistent 400 response
+        if "not found" in str(e).lower():
+            raise ValueError("No active context frame. You must enter a scope first.")
+        raise
+
+    # Strip prefix from scope UUID
+    scope_uuid = uid.strip_prefix(request.scope)
+
+    # Focus the scope
+    context_frame = core.context.focus_scope(context_frame, scope_uuid)
+
+    return {
+        "scope": uid.add_core_prefix(scope_uuid),
+        "primary_scope": uid.add_core_prefix(context_frame.primary_scope) if context_frame.primary_scope else None,
+        "active_scopes": [uid.add_core_prefix(s) for s in (context_frame.active_scopes or [])]
     }
