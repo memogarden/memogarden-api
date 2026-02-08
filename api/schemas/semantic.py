@@ -49,7 +49,7 @@ class CreateRequest(SemanticRequest):
     Per RFC-005:
     - create: to bring into being. Reifies a belief into existence in MemoGarden
     """
-    op: Literal["create"] = "create"
+    op: Literal["create"] = "create"  # type: ignore[var-annotated]
     type: str = Field(..., description="Entity type (e.g., 'Transaction', 'Recurrence')")
     data: dict[str, Any] = Field(default_factory=dict, description="Entity data (type-specific fields)")
     metadata: dict[str, Any] | None = Field(default=None, description="Optional app-defined metadata")
@@ -62,7 +62,7 @@ class GetRequest(SemanticRequest):
     - get: to obtain. Retrieve by identifier
     UUID prefix indicates target type (soil_, core_, rel_)
     """
-    op: Literal["get", "get_relation"] = "get"
+    op: Literal["get", "get_relation"] = "get"  # type: ignore[var-annotated]
     target: str = Field(..., description="UUID of the target (with or without prefix)")
 
 
@@ -76,7 +76,7 @@ class EditRequest(SemanticRequest):
     set: handles both add-new and update-existing
     unset: removes fields entirely
     """
-    op: Literal["edit", "edit_relation"] = "edit"
+    op: Literal["edit", "edit_relation"] = "edit"  # type: ignore[var-annotated]
     target: str = Field(..., description="Entity or relation UUID")
     set: dict[str, Any] | None = Field(default=None, description="Fields to add or update")
     unset: list[str] | None = Field(default=None, description="Field names to remove")
@@ -96,7 +96,7 @@ class ForgetRequest(SemanticRequest):
     Per RFC-005:
     - forget: to lose the power of recall. Entity becomes inactive but traces remain in Soil
     """
-    op: Literal["forget"] = "forget"
+    op: Literal["forget"] = "forget"  # type: ignore[var-annotated]
     target: str = Field(..., description="Entity UUID to forget")
 
 
@@ -109,7 +109,7 @@ class QueryRequest(SemanticRequest):
     Session 1: Basic equality filters only
     Future: Full DSL with operators (any, not, etc.)
     """
-    op: Literal["query", "query_relation"] = "query"
+    op: Literal["query", "query_relation"] = "query"  # type: ignore[var-annotated]
     target_type: Literal["entity", "fact", "relation"] = Field(
         default="entity",
         description="Target type to query"
@@ -133,7 +133,7 @@ class AddRequest(SemanticRequest):
 
     Session 2: Supports baseline item types only
     """
-    op: Literal["add"] = "add"
+    op: Literal["add"] = "add"  # type: ignore[var-annotated]
     type: str = Field(
         ...,
         description="Item type (e.g., 'Note', 'Message', 'Email', 'ToolCall')"
@@ -163,7 +163,7 @@ class AmendRequest(SemanticRequest):
 
     Session 2: Basic amendment with new data
     """
-    op: Literal["amend"] = "amend"
+    op: Literal["amend"] = "amend"  # type: ignore[var-annotated]
     target: str = Field(
         ...,
         description="UUID of the Item to amend (with or without soil_ prefix)"
@@ -192,7 +192,7 @@ class LinkRequest(SemanticRequest):
     based on access patterns. The time horizon determines when
     the relation should fossilize.
     """
-    op: Literal["link"] = "link"
+    op: Literal["link"] = "link"  # type: ignore[var-annotated]
     kind: Literal["explicit_link"] = Field(
         default="explicit_link",
         description="Relation kind (currently only explicit_link supported)"
