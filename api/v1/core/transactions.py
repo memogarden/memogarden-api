@@ -116,7 +116,7 @@ def create_transaction(data: TransactionCreate):
     # Get author from authenticated user (set by before_request:authenticate)
     author = g.username
 
-    with get_core(atomic=True) as core:
+    with get_core() as core:
         transaction_id = core.transaction.create(
             amount=data.amount,
             transaction_date=data.transaction_date,
@@ -128,8 +128,8 @@ def create_transaction(data: TransactionCreate):
         )
 
     # Fetch created transaction with fresh Core (connection closed after atomic block)
-    core = get_core()
-    row = core.transaction.get_by_id(transaction_id)
+    with get_core() as core:
+        row = core.transaction.get_by_id(transaction_id)
 
     return jsonify(_row_to_transaction_response(row)), 201
 
@@ -149,8 +149,8 @@ def get_transaction(transaction_id: str):
         404: Transaction not found
         401: Authentication required (if no valid auth provided)
     """
-    core = get_core()
-    row = core.transaction.get_by_id(transaction_id)
+    with get_core() as core:
+        row = core.transaction.get_by_id(transaction_id)
 
     return jsonify(_row_to_transaction_response(row))
 
@@ -192,8 +192,8 @@ def list_transactions():
         "include_superseded": include_superseded
     }
 
-    core = get_core()
-    rows = core.transaction.list_transactions(filters, limit=limit, offset=offset)
+    with get_core() as core:
+        rows = core.transaction.list_transactions(filters, limit=limit, offset=offset)
 
     return jsonify([_row_to_transaction_response(row) for row in rows])
 
@@ -235,40 +235,39 @@ def update_transaction(transaction_id: str, data: TransactionUpdate):
     # Strip prefix if provided
     transaction_id = uid.strip_prefix(transaction_id)
 
-    core = get_core()
+    with get_core() as core:
+        # Get current state for conflict detection
+        current_row = core.transaction.get_by_id(transaction_id)
+        current_hash = current_row["hash"]
+        current_version = current_row["version"]
 
-    # Get current state for conflict detection
-    current_row = core.transaction.get_by_id(transaction_id)
-    current_hash = current_row["hash"]
-    current_version = current_row["version"]
+        # Check for conflicts if client provided hash or version
+        if data.based_on_hash and data.based_on_hash != current_hash:
+            conflict_response = ConflictResponse(
+                message="Transaction was modified by another client",
+                current_hash=current_hash,
+                current_version=current_version,
+                client_hash=data.based_on_hash,
+            )
+            return jsonify(conflict_response.model_dump()), 409
 
-    # Check for conflicts if client provided hash or version
-    if data.based_on_hash and data.based_on_hash != current_hash:
-        conflict_response = ConflictResponse(
-            message="Transaction was modified by another client",
-            current_hash=current_hash,
-            current_version=current_version,
-            client_hash=data.based_on_hash,
-        )
-        return jsonify(conflict_response.model_dump()), 409
+        if data.based_on_version is not None and data.based_on_version != current_version:
+            conflict_response = ConflictResponse(
+                message="Transaction version mismatch",
+                current_hash=current_hash,
+                current_version=current_version,
+                client_version=data.based_on_version,
+            )
+            return jsonify(conflict_response.model_dump()), 409
 
-    if data.based_on_version is not None and data.based_on_version != current_version:
-        conflict_response = ConflictResponse(
-            message="Transaction version mismatch",
-            current_hash=current_hash,
-            current_version=current_version,
-            client_version=data.based_on_version,
-        )
-        return jsonify(conflict_response.model_dump()), 409
+        # Build update data from only provided fields (excluding optimistic locking fields)
+        update_data = data.model_dump(exclude_unset=True, exclude={"based_on_hash", "based_on_version"})
 
-    # Build update data from only provided fields (excluding optimistic locking fields)
-    update_data = data.model_dump(exclude_unset=True, exclude={"based_on_hash", "based_on_version"})
+        if update_data:
+            core.transaction.update(transaction_id, update_data)
 
-    if update_data:
-        core.transaction.update(transaction_id, update_data)
-
-    # Fetch updated transaction
-    row = core.transaction.get_by_id(transaction_id)
+        # Fetch updated transaction
+        row = core.transaction.get_by_id(transaction_id)
 
     return jsonify(_row_to_transaction_response(row))
 
@@ -293,7 +292,7 @@ def delete_transaction(transaction_id: str):
     # Strip prefix if provided
     transaction_id = uid.strip_prefix(transaction_id)
 
-    with get_core(atomic=True) as core:
+    with get_core() as core:
         # Verify transaction exists
         core.transaction.get_by_id(transaction_id)
 
@@ -320,8 +319,8 @@ def list_accounts():
         200: Array of account label strings
         401: Authentication required (if no valid auth provided)
     """
-    core = get_core()
-    rows = core.transaction.get_accounts()
+    with get_core() as core:
+        rows = core.transaction.get_accounts()
 
     return jsonify(rows)
 
@@ -340,7 +339,7 @@ def list_categories():
         200: Array of category label strings
         401: Authentication required (if no valid auth provided)
     """
-    core = get_core()
-    rows = core.transaction.get_categories()
+    with get_core() as core:
+        rows = core.transaction.get_categories()
 
     return jsonify(rows)

@@ -610,8 +610,9 @@ def core(flask_app):
     conn = _create_connection()
 
     try:
-        # Create Core instance with the connection
-        core_instance = Core(conn, atomic=False)
+        # Create Core instance and mark it as in context for testing
+        core_instance = Core(conn)
+        core_instance._in_context = True  # Mark as already in context
         yield core_instance
     finally:
         # Explicitly close the connection to prevent database lock issues

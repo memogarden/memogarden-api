@@ -385,7 +385,7 @@ def test_append_view_chronological(core):
 
 def test_is_substantive_type():
     """is_substantive_type() should return True for substantive types."""
-    context_ops = ContextOperations(None, None)
+    context_ops = ContextOperations(None)
 
     for entity_type in SUBSTANTIVE_TYPES:
         assert context_ops.is_substantive_type(entity_type), \
@@ -394,7 +394,7 @@ def test_is_substantive_type():
 
 def test_is_primitive_type():
     """is_primitive_type() should return True for primitive types."""
-    context_ops = ContextOperations(None, None)
+    context_ops = ContextOperations(None)
 
     for entity_type in PRIMITIVE_TYPES:
         assert context_ops.is_primitive_type(entity_type), \
@@ -403,7 +403,7 @@ def test_is_primitive_type():
 
 def test_substantive_and_primitive_are_mutually_exclusive():
     """Substantive and primitive types should not overlap."""
-    context_ops = ContextOperations(None, None)
+    context_ops = ContextOperations(None)
 
     for entity_type in SUBSTANTIVE_TYPES:
         assert not context_ops.is_primitive_type(entity_type), \
@@ -416,7 +416,7 @@ def test_substantive_and_primitive_are_mutually_exclusive():
 
 def test_unknown_type_is_neither():
     """Unknown entity types should be neither substantive nor primitive."""
-    context_ops = ContextOperations(None, None)
+    context_ops = ContextOperations(None)
 
     assert not context_ops.is_substantive_type("UnknownType")
     assert not context_ops.is_primitive_type("UnknownType")

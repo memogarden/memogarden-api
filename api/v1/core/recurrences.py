@@ -106,7 +106,7 @@ def create_recurrence(data: RecurrenceCreate):
         return jsonify({"error": str(e)}), 400
 
     # Use atomic transaction for coordinated entity + recurrence creation
-    with get_core(atomic=True) as core:
+    with get_core() as core:
         recurrence_id = core.recurrence.create(
             rrule=data.rrule,
             entities=data.entities,
@@ -115,8 +115,8 @@ def create_recurrence(data: RecurrenceCreate):
         )
 
     # Fetch created recurrence with fresh Core (connection closed after atomic block)
-    core = get_core()
-    row = core.recurrence.get_by_id(recurrence_id)
+    with get_core() as core:
+        row = core.recurrence.get_by_id(recurrence_id)
 
     return jsonify(_row_to_recurrence_response(row)), 201
 
@@ -136,8 +136,8 @@ def get_recurrence(recurrence_id: str):
         404: Recurrence not found
         401: Authentication required (if no valid auth provided)
     """
-    core = get_core()
-    row = core.recurrence.get_by_id(recurrence_id)
+    with get_core() as core:
+        row = core.recurrence.get_by_id(recurrence_id)
 
     return jsonify(_row_to_recurrence_response(row))
 
@@ -173,8 +173,8 @@ def list_recurrences():
         "include_superseded": include_superseded
     }
 
-    core = get_core()
-    rows = core.recurrence.list(filters, limit=limit, offset=offset)
+    with get_core() as core:
+        rows = core.recurrence.list(filters, limit=limit, offset=offset)
 
     return jsonify([_row_to_recurrence_response(row) for row in rows])
 
@@ -205,40 +205,39 @@ def update_recurrence(recurrence_id: str, data: RecurrenceUpdate):
         400: Validation error
         401: Authentication required
     """
-    core = get_core()
+    with get_core() as core:
+        # Verify recurrence exists
+        core.recurrence.get_by_id(recurrence_id)
 
-    # Verify recurrence exists
-    core.recurrence.get_by_id(recurrence_id)
+        # Validate RRULE format if provided
+        if data.rrule and not recurrence.validate_rrule(data.rrule):
+            return jsonify({"error": "Invalid RRULE format"}), 400
 
-    # Validate RRULE format if provided
-    if data.rrule and not recurrence.validate_rrule(data.rrule):
-        return jsonify({"error": "Invalid RRULE format"}), 400
+        # Build update data from only provided fields
+        update_data = data.model_dump(exclude_unset=True)
 
-    # Build update data from only provided fields
-    update_data = data.model_dump(exclude_unset=True)
+        # Validate recurrence window if date fields are being updated
+        if update_data:
+            row = core.recurrence.get_by_id(recurrence_id)
+            current_valid_from = row["valid_from"]
+            current_valid_until = row["valid_until"]
 
-    # Validate recurrence window if date fields are being updated
-    if update_data:
+            new_valid_from = update_data.get("valid_from", isodatetime.to_datetime(current_valid_from))
+            new_valid_until = update_data.get("valid_until", isodatetime.to_datetime(current_valid_until) if current_valid_until else None)
+
+            try:
+                valid_from_str = isodatetime.to_timestamp(new_valid_from)
+                valid_until_str = isodatetime.to_timestamp(new_valid_until) if new_valid_until else None
+
+                if not recurrence.is_valid_recurrence_window(valid_from_str, valid_until_str):
+                    return jsonify({"error": "Invalid recurrence window: valid_from must be before valid_until"}), 400
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+
+            core.recurrence.update(recurrence_id, update_data)
+
+        # Fetch updated recurrence
         row = core.recurrence.get_by_id(recurrence_id)
-        current_valid_from = row["valid_from"]
-        current_valid_until = row["valid_until"]
-
-        new_valid_from = update_data.get("valid_from", isodatetime.to_datetime(current_valid_from))
-        new_valid_until = update_data.get("valid_until", isodatetime.to_datetime(current_valid_until) if current_valid_until else None)
-
-        try:
-            valid_from_str = isodatetime.to_timestamp(new_valid_from)
-            valid_until_str = isodatetime.to_timestamp(new_valid_until) if new_valid_until else None
-
-            if not recurrence.is_valid_recurrence_window(valid_from_str, valid_until_str):
-                return jsonify({"error": "Invalid recurrence window: valid_from must be before valid_until"}), 400
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 400
-
-        core.recurrence.update(recurrence_id, update_data)
-
-    # Fetch updated recurrence
-    row = core.recurrence.get_by_id(recurrence_id)
 
     return jsonify(_row_to_recurrence_response(row))
 
@@ -260,7 +259,7 @@ def delete_recurrence(recurrence_id: str):
         404: Recurrence not found
         401: Authentication required (if no valid auth provided)
     """
-    with get_core(atomic=True) as core:
+    with get_core() as core:
         # Verify recurrence exists
         core.recurrence.get_by_id(recurrence_id)
 

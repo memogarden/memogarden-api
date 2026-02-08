@@ -27,7 +27,7 @@ from ..schemas.semantic import (
     LinkRequest,
     QueryRequest,
 )
-from .decorators import with_core_cleanup
+from .decorators import with_audit
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,7 @@ def _row_to_entity_response(row, entity_type: str = "Entity") -> dict:
 # Verb Handlers
 # ============================================================================
 
+@with_audit
 def handle_create(request: CreateRequest, actor: str) -> dict:
     """Handle create verb - create a new entity.
 
@@ -119,20 +120,20 @@ def handle_create(request: CreateRequest, actor: str) -> dict:
             f"Custom schema registration not yet implemented."
         )
 
-    # Use atomic transaction for entity creation
-    with get_core(atomic=True) as core:
+    # Use transaction for entity creation and fetch
+    with get_core() as core:
         entity_uuid = core.entity.create(
             entity_type=request.type,
             data=json.dumps(request.data) if request.data else json.dumps({}),
         )
 
-    # Fetch created entity
-    core = get_core()
-    row = core.entity.get_by_id(entity_uuid)
+        # Fetch created entity
+        row = core.entity.get_by_id(entity_uuid)
 
-    return _row_to_entity_response(row)
+        return _row_to_entity_response(row)
 
 
+@with_audit
 def handle_get(request: GetRequest, actor: str) -> dict:
     """Handle get verb - get entity by UUID.
 
@@ -146,12 +147,12 @@ def handle_get(request: GetRequest, actor: str) -> dict:
     Returns:
         dict with entity data
     """
-    core = get_core()
-    row = core.entity.get_by_id(request.target)
+    with get_core() as core:
+        row = core.entity.get_by_id(request.target)
+        return _row_to_entity_response(row)
 
-    return _row_to_entity_response(row)
 
-
+@with_audit
 def handle_edit(request: EditRequest, actor: str) -> dict:
     """Handle edit verb - edit entity with set/unset semantics.
 
@@ -169,32 +170,33 @@ def handle_edit(request: EditRequest, actor: str) -> dict:
         dict with updated entity data
     """
     entity_id = uid.strip_prefix(request.target)
-    core = get_core()
 
-    # Get current entity state
-    current = core.entity.get_by_id(entity_id)
-    # sqlite3.Row doesn't have .get(), use direct access
-    data_value = current["data"]
-    current_data = json.loads(data_value) if data_value else {}
+    with get_core() as core:
+        # Get current entity state
+        current = core.entity.get_by_id(entity_id)
+        # sqlite3.Row doesn't have .get(), use direct access
+        data_value = current["data"]
+        current_data = json.loads(data_value) if data_value else {}
 
-    # Apply set operations
-    if request.set:
-        current_data.update(request.set)
+        # Apply set operations
+        if request.set:
+            current_data.update(request.set)
 
-    # Apply unset operations
-    if request.unset:
-        for field in request.unset:
-            current_data.pop(field, None)
+        # Apply unset operations
+        if request.unset:
+            for field in request.unset:
+                current_data.pop(field, None)
 
-    # Update entity data and hash via Core API
-    core.entity.update_data(entity_id, current_data)
+        # Update entity data and hash via Core API
+        core.entity.update_data(entity_id, current_data)
 
-    # Fetch updated entity
-    row = core.entity.get_by_id(entity_id)
+        # Fetch updated entity
+        row = core.entity.get_by_id(entity_id)
 
-    return _row_to_entity_response(row)
+        return _row_to_entity_response(row)
 
 
+@with_audit
 def handle_forget(request: ForgetRequest, actor: str) -> dict:
     """Handle forget verb - soft delete entity via supersession.
 
@@ -209,7 +211,7 @@ def handle_forget(request: ForgetRequest, actor: str) -> dict:
     """
     entity_id = uid.strip_prefix(request.target)
 
-    with get_core(atomic=True) as core:
+    with get_core() as core:
         # Verify entity exists
         core.entity.get_by_id(entity_id)
 
@@ -219,13 +221,13 @@ def handle_forget(request: ForgetRequest, actor: str) -> dict:
         # Mark original as superseded
         core.entity.supersede(entity_id, tombstone_id)
 
-    # Return the original entity (now superseded)
-    core = get_core()
-    row = core.entity.get_by_id(entity_id)
+        # Return the original entity (now superseded)
+        row = core.entity.get_by_id(entity_id)
 
-    return _row_to_entity_response(row)
+        return _row_to_entity_response(row)
 
 
+@with_audit
 def handle_query(request: QueryRequest, actor: str) -> dict:
     """Handle query verb - query entities with filters.
 
@@ -239,54 +241,57 @@ def handle_query(request: QueryRequest, actor: str) -> dict:
     Returns:
         dict with query results (results, total, start_index, count)
     """
-    core = get_core()
+    with get_core() as core:
+        # Build query with basic filters
+        # Session 1: Filter by type, basic pagination
+        # Future: Full DSL with operators (any, not, etc.)
 
-    # Build query with basic filters
-    # Session 1: Filter by type, basic pagination
-    # Future: Full DSL with operators (any, not, etc.)
+        # Build WHERE clause
+        where_parts = []
+        params = []
 
-    # Build WHERE clause
-    where_parts = []
-    params = []
+        # Filter by type
+        if request.type:
+            where_parts.append("type = ?")
+            params.append(request.type)
 
-    # Filter by type
-    if request.type:
-        where_parts.append("type = ?")
-        params.append(request.type)
+        # Filter by superseded status (default: exclude superseded)
+        where_parts.append("superseded_by IS NULL")
 
-    # Filter by superseded status (default: exclude superseded)
-    where_parts.append("superseded_by IS NULL")
+        # Build full query
+        where_clause = " AND ".join(where_parts) if where_parts else "1=1"
+        query = f"""
+            SELECT * FROM entity
+            WHERE {where_clause}
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+        """
 
-    # Build full query
-    where_clause = " AND ".join(where_parts) if where_parts else "1=1"
-    query = f"""
-        SELECT * FROM entity
-        WHERE {where_clause}
-        ORDER BY created_at DESC
-        LIMIT ? OFFSET ?
-    """
+        params.extend([request.count, request.start_index])
 
-    params.extend([request.count, request.start_index])
+        # Execute query
+        # TODO: Add public API method to Core for querying entities with filters
+        # This is a temporary workaround accessing private connection until
+        # Core.entity.query_with_filters() or similar public method exists.
+        rows = core._conn.execute(query, params).fetchall()
 
-    # Execute query
-    rows = core._conn.execute(query, params).fetchall()
+        # Get total count
+        count_query = f"SELECT COUNT(*) as total FROM entity WHERE {where_clause}"
+        total_row = core._conn.execute(count_query, params[:-2]).fetchone()
+        total = total_row["total"]
 
-    # Get total count
-    count_query = f"SELECT COUNT(*) as total FROM entity WHERE {where_clause}"
-    total_row = core._conn.execute(count_query, params[:-2]).fetchone()
-    total = total_row["total"]
+        # Convert rows to response format
+        results = [_row_to_entity_response(row) for row in rows]
 
-    # Convert rows to response format
-    results = [_row_to_entity_response(row) for row in rows]
-
-    return {
-        "results": results,
-        "total": total,
-        "start_index": request.start_index,
-        "count": len(results),
-    }
+        return {
+            "results": results,
+            "total": total,
+            "start_index": request.start_index,
+            "count": len(results),
+        }
 
 
+@with_audit
 def handle_link(request: LinkRequest, actor: str) -> dict:
     """Handle link verb - create user relation with time horizon (RFC-002).
 
@@ -303,28 +308,27 @@ def handle_link(request: LinkRequest, actor: str) -> dict:
     Raises:
         ValueError: If relation kind is invalid
     """
-    core = get_core()
+    with get_core() as core:
+        # Create the user relation
+        relation_uuid = core.relation.create(
+            kind=request.kind,
+            source=request.source,
+            source_type=request.source_type,
+            target=request.target,
+            target_type=request.target_type,
+            initial_horizon_days=request.initial_horizon_days,
+            evidence=request.evidence,
+            metadata=request.metadata,
+        )
 
-    # Create the user relation
-    relation_uuid = core.relation.create(
-        kind=request.kind,
-        source=request.source,
-        source_type=request.source_type,
-        target=request.target,
-        target_type=request.target_type,
-        initial_horizon_days=request.initial_horizon_days,
-        evidence=request.evidence,
-        metadata=request.metadata,
-    )
+        # Get the created relation
+        row = core.relation.get_by_id(relation_uuid)
 
-    # Get the created relation
-    row = core.relation.get_by_id(relation_uuid)
-
-    return {
-        "uuid": uid.add_core_prefix(row["uuid"]),
-        "kind": row["kind"],
-        "source": uid.add_core_prefix(row["source"]),
-        "source_type": row["source_type"],
+        return {
+            "uuid": uid.add_core_prefix(row["uuid"]),
+            "kind": row["kind"],
+            "source": uid.add_core_prefix(row["source"]),
+            "source_type": row["source_type"],
         "target": uid.add_core_prefix(row["target"]),
         "target_type": row["target_type"],
         "time_horizon": row["time_horizon"],
@@ -337,8 +341,8 @@ def handle_link(request: LinkRequest, actor: str) -> dict:
 # Context Verb Handlers (RFC-003 v4)
 # ============================================================================
 
-@with_core_cleanup
-def handle_enter(request: EnterRequest, actor: str, core) -> dict:
+@with_audit
+def handle_enter(request: EnterRequest, actor: str) -> dict:
     """Handle enter verb - add scope to active set.
 
     Per RFC-003 v4:
@@ -349,33 +353,33 @@ def handle_enter(request: EnterRequest, actor: str, core) -> dict:
     Args:
         request: Validated EnterRequest
         actor: Authenticated user/agent UUID
-        core: Core instance (injected by @with_core_cleanup decorator)
 
     Returns:
         dict with scope and active_scopes
     """
-    # Get user's ContextFrame
-    context_frame = core.context.get_context_frame(
-        owner=actor,
-        owner_type="operator",
-        create_if_missing=True
-    )
+    with get_core() as core:
+        # Get user's ContextFrame
+        context_frame = core.context.get_context_frame(
+            owner=actor,
+            owner_type="operator",
+            create_if_missing=True
+        )
 
-    # Strip prefix from scope UUID
-    scope_uuid = uid.strip_prefix(request.scope)
+        # Strip prefix from scope UUID
+        scope_uuid = uid.strip_prefix(request.scope)
 
-    # Enter the scope
-    context_frame = core.context.enter_scope(context_frame, scope_uuid)
+        # Enter the scope
+        context_frame = core.context.enter_scope(context_frame, scope_uuid)
 
-    return {
-        "scope": uid.add_core_prefix(scope_uuid),
-        "active_scopes": [uid.add_core_prefix(s) for s in (context_frame.active_scopes or [])],
-        "primary_scope": uid.add_core_prefix(context_frame.primary_scope) if context_frame.primary_scope else None
-    }
+        return {
+            "scope": uid.add_core_prefix(scope_uuid),
+            "active_scopes": [uid.add_core_prefix(s) for s in (context_frame.active_scopes or [])],
+            "primary_scope": uid.add_core_prefix(context_frame.primary_scope) if context_frame.primary_scope else None
+        }
 
 
-@with_core_cleanup
-def handle_leave(request: LeaveRequest, actor: str, core) -> dict:
+@with_audit
+def handle_leave(request: LeaveRequest, actor: str) -> dict:
     """Handle leave verb - remove scope from active set.
 
     Per RFC-003 v4:
@@ -385,7 +389,6 @@ def handle_leave(request: LeaveRequest, actor: str, core) -> dict:
     Args:
         request: Validated LeaveRequest
         actor: Authenticated user/agent UUID
-        core: Core instance (injected by @with_core_cleanup decorator)
 
     Returns:
         dict with scope and active_scopes
@@ -394,34 +397,35 @@ def handle_leave(request: LeaveRequest, actor: str, core) -> dict:
         ResourceNotFound: If user has no ContextFrame
         ValueError: If scope not in active set
     """
-    try:
-        # Get user's ContextFrame (don't create if missing)
-        context_frame = core.context.get_context_frame(
-            owner=actor,
-            owner_type="operator",
-            create_if_missing=False
-        )
-    except Exception as e:
-        # Convert to ValueError for consistent 400 response
-        if "not found" in str(e).lower():
-            raise ValueError("No active context frame. You must enter a scope first.") from None
-        raise
+    with get_core() as core:
+        try:
+            # Get user's ContextFrame (don't create if missing)
+            context_frame = core.context.get_context_frame(
+                owner=actor,
+                owner_type="operator",
+                create_if_missing=False
+            )
+        except Exception as e:
+            # Convert to ValueError for consistent 400 response
+            if "not found" in str(e).lower():
+                raise ValueError("No active context frame. You must enter a scope first.") from None
+            raise
 
-    # Strip prefix from scope UUID
-    scope_uuid = uid.strip_prefix(request.scope)
+        # Strip prefix from scope UUID
+        scope_uuid = uid.strip_prefix(request.scope)
 
-    # Leave the scope
-    context_frame = core.context.leave_scope(context_frame, scope_uuid)
+        # Leave the scope
+        context_frame = core.context.leave_scope(context_frame, scope_uuid)
 
-    return {
-        "scope": uid.add_core_prefix(scope_uuid),
-        "active_scopes": [uid.add_core_prefix(s) for s in (context_frame.active_scopes or [])],
-        "primary_scope": uid.add_core_prefix(context_frame.primary_scope) if context_frame.primary_scope else None
-    }
+        return {
+            "scope": uid.add_core_prefix(scope_uuid),
+            "active_scopes": [uid.add_core_prefix(s) for s in (context_frame.active_scopes or [])],
+            "primary_scope": uid.add_core_prefix(context_frame.primary_scope) if context_frame.primary_scope else None
+        }
 
 
-@with_core_cleanup
-def handle_focus(request: FocusRequest, actor: str, core) -> dict:
+@with_audit
+def handle_focus(request: FocusRequest, actor: str) -> dict:
     """Handle focus verb - switch primary scope among active scopes.
 
     Per RFC-003 v4:
@@ -431,7 +435,6 @@ def handle_focus(request: FocusRequest, actor: str, core) -> dict:
     Args:
         request: Validated FocusRequest
         actor: Authenticated user/agent UUID
-        core: Core instance (injected by @with_core_cleanup decorator)
 
     Returns:
         dict with scope and primary_scope
@@ -440,27 +443,28 @@ def handle_focus(request: FocusRequest, actor: str, core) -> dict:
         ResourceNotFound: If user has no ContextFrame
         ValueError: If scope not in active set
     """
-    try:
-        # Get user's ContextFrame (don't create if missing)
-        context_frame = core.context.get_context_frame(
-            owner=actor,
-            owner_type="operator",
-            create_if_missing=False
-        )
-    except Exception as e:
-        # Convert to ValueError for consistent 400 response
-        if "not found" in str(e).lower():
-            raise ValueError("No active context frame. You must enter a scope first.") from None
-        raise
+    with get_core() as core:
+        try:
+            # Get user's ContextFrame (don't create if missing)
+            context_frame = core.context.get_context_frame(
+                owner=actor,
+                owner_type="operator",
+                create_if_missing=False
+            )
+        except Exception as e:
+            # Convert to ValueError for consistent 400 response
+            if "not found" in str(e).lower():
+                raise ValueError("No active context frame. You must enter a scope first.") from None
+            raise
 
-    # Strip prefix from scope UUID
-    scope_uuid = uid.strip_prefix(request.scope)
+        # Strip prefix from scope UUID
+        scope_uuid = uid.strip_prefix(request.scope)
 
-    # Focus the scope
-    context_frame = core.context.focus_scope(context_frame, scope_uuid)
+        # Focus the scope
+        context_frame = core.context.focus_scope(context_frame, scope_uuid)
 
-    return {
-        "scope": uid.add_core_prefix(scope_uuid),
-        "primary_scope": uid.add_core_prefix(context_frame.primary_scope) if context_frame.primary_scope else None,
-        "active_scopes": [uid.add_core_prefix(s) for s in (context_frame.active_scopes or [])]
-    }
+        return {
+            "scope": uid.add_core_prefix(scope_uuid),
+            "primary_scope": uid.add_core_prefix(context_frame.primary_scope) if context_frame.primary_scope else None,
+            "active_scopes": [uid.add_core_prefix(s) for s in (context_frame.active_scopes or [])]
+        }

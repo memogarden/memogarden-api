@@ -27,6 +27,8 @@ class SemanticRequest(BaseModel):
 
     All requests use the "op" field to specify the verb.
     Additional fields vary by operation.
+
+    Session 6: Added bypass_semantic_api field to prevent audit recursion.
     """
 
     op: Literal[
@@ -37,6 +39,7 @@ class SemanticRequest(BaseModel):
         "search",
         "register"
     ] = Field(..., description="Operation verb")
+    bypass_semantic_api: bool = Field(default=False, description="If True, skip audit logging (internal use)")
 
 
 # ============================================================================

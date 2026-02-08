@@ -22,7 +22,7 @@ from ..schemas.semantic import (
     GetRequest,
     QueryRequest,
 )
-from .decorators import with_soil_cleanup
+from .decorators import with_audit
 
 logger = logging.getLogger(__name__)
 
@@ -113,8 +113,8 @@ def _row_to_fact_response(row) -> dict:
 # Verb Handlers
 # ============================================================================
 
-@with_soil_cleanup
-def handle_add(request: AddRequest, actor: str, soil) -> dict:
+@with_audit
+def handle_add(request: AddRequest, actor: str) -> dict:
     """Handle add verb - add a new fact (Item) to Soil.
 
     Session 2: Supports baseline item types only.
@@ -123,50 +123,50 @@ def handle_add(request: AddRequest, actor: str, soil) -> dict:
     Args:
         request: Validated AddRequest
         actor: Authenticated user/agent UUID
-        soil: Soil instance (injected by @with_soil_cleanup decorator)
 
     Returns:
         dict with created fact data
     """
-    # Validate item type is in baseline
-    if request.type not in BASELINE_ITEM_TYPES:
-        raise ValueError(
-            f"Item type '{request.type}' not supported. "
-            f"Baseline types: {', '.join(sorted(BASELINE_ITEM_TYPES))}. "
-            f"Custom schema registration not yet implemented."
+    with get_soil() as soil:
+        # Validate item type is in baseline
+        if request.type not in BASELINE_ITEM_TYPES:
+            raise ValueError(
+                f"Item type '{request.type}' not supported. "
+                f"Baseline types: {', '.join(sorted(BASELINE_ITEM_TYPES))}. "
+                f"Custom schema registration not yet implemented."
+            )
+
+        # Get current time for realized_at
+        now = isodatetime.now()
+
+        # Use provided canonical_at or default to realized_at
+        canonical_at = request.canonical_at
+        if canonical_at is None:
+            canonical_at = now
+
+        # Create Item
+        item = Item(
+            uuid=generate_soil_uuid(),
+            _type=request.type,
+            realized_at=now,
+            canonical_at=canonical_at,
+            data=request.data,
+            metadata=request.metadata,
+            integrity_hash=None,  # Will be computed by create_item
+            fidelity="full",
         )
 
-    # Get current time for realized_at
-    now = isodatetime.now()
+        # Create item in Soil
+        item_uuid = soil.create_item(item)
 
-    # Use provided canonical_at or default to realized_at
-    canonical_at = request.canonical_at
-    if canonical_at is None:
-        canonical_at = now
+        # Fetch created item
+        item = soil.get_item(item_uuid)
 
-    # Create Item
-    item = Item(
-        uuid=generate_soil_uuid(),
-        _type=request.type,
-        realized_at=now,
-        canonical_at=canonical_at,
-        data=request.data,
-        metadata=request.metadata,
-        integrity_hash=None,  # Will be computed by create_item
-        fidelity="full",
-    )
-
-    # Create item in Soil
-    item_uuid = soil.create_item(item)
-
-    # Fetch created item
-    item = soil.get_item(item_uuid)
-
-    return _item_to_fact_response(item)
+        return _item_to_fact_response(item)
 
 
-@with_soil_cleanup
-def handle_amend(request: AmendRequest, actor: str, soil) -> dict:
+@with_audit
+def handle_amend(request: AmendRequest, actor: str) -> dict:
     """Handle amend verb - amend a fact by creating a superseding fact.
 
     Creates a new Fact with the corrected data and creates a `supersedes`
@@ -177,94 +177,95 @@ def handle_amend(request: AmendRequest, actor: str, soil) -> dict:
     Args:
         request: Validated AmendRequest
         actor: Authenticated user/agent UUID
-        soil: Soil instance (injected by @with_soil_cleanup decorator)
 
     Returns:
         dict with amended fact data
     """
-    # Strip prefix to get raw UUID
-    target_id = uid.strip_prefix(request.target)
+    with get_soil() as soil:
+        # Strip prefix to get raw UUID
+        target_id = uid.strip_prefix(request.target)
 
-    # Get original item
-    original = soil.get_item(target_id)
-    if original is None:
-        from system.exceptions import ResourceNotFound
-        raise ResourceNotFound(
-            f"Fact not found: {request.target}",
-            details={"target": request.target}
+        # Get original item
+        original = soil.get_item(target_id)
+        if original is None:
+            from system.exceptions import ResourceNotFound
+            raise ResourceNotFound(
+                f"Fact not found: {request.target}",
+                details={"target": request.target}
+            )
+
+        # Check if already superseded
+        if original.superseded_by is not None:
+            from system.exceptions import ValidationError as MGValidationError
+            raise MGValidationError(
+                message="Cannot amend fact that is already superseded",
+                details={
+                    "fact_uuid": uid.add_soil_prefix(target_id),
+                    "superseded_by": uid.add_soil_prefix(original.superseded_by),
+                }
+            )
+
+        # Get current time for realized_at
+        now = isodatetime.now()
+
+        # Use provided canonical_at or default to original's canonical_at
+        canonical_at = request.canonical_at
+        if canonical_at is None:
+            canonical_at = original.canonical_at
+
+        # Merge metadata with original metadata
+        new_metadata = {}
+        if original.metadata:
+            new_metadata.update(original.metadata)
+        if request.metadata:
+            new_metadata.update(request.metadata)
+
+        # Create new Item with amended data
+        amended_item = Item(
+            uuid=generate_soil_uuid(),
+            _type=original._type,
+            realized_at=now,
+            canonical_at=canonical_at,
+            data=request.data,
+            metadata=new_metadata if new_metadata else None,
+            integrity_hash=None,  # Will be computed by create_item
+            fidelity="full",
         )
 
-    # Check if already superseded
-    if original.superseded_by is not None:
-        from system.exceptions import ValidationError as MGValidationError
-        raise MGValidationError(
-            message="Cannot amend fact that is already superseded",
-            details={
-                "fact_uuid": uid.add_soil_prefix(target_id),
-                "superseded_by": uid.add_soil_prefix(original.superseded_by),
-            }
+        # Create amended item
+        amended_uuid = soil.create_item(amended_item)
+
+        # Update original to mark as superseded
+        soil.mark_superseded(
+            original_uuid=request.target,
+            superseded_by_uuid=amended_uuid,
+            superseded_at=now
         )
 
-    # Get current time for realized_at
-    now = isodatetime.now()
+        # Create supersedes relation
+        from system.soil.relation import SystemRelation
+        relation = SystemRelation(
+            uuid=generate_soil_uuid(),  # Uses module-level import from system.soil.item
+            kind="supersedes",
+            source=amended_uuid,
+            source_type="item",
+            target=request.target,  # Use request.target which has the prefix
+            target_type="item",
+            created_at=current_day(),  # Uses module-level import from system.soil.item
+            evidence={
+                "source": "user_stated",
+                "method": "semantic_api_amend",
+            },
+        )
+        soil.create_relation(relation)
 
-    # Use provided canonical_at or default to original's canonical_at
-    canonical_at = request.canonical_at
-    if canonical_at is None:
-        canonical_at = original.canonical_at
+        # Fetch amended item
+        amended = soil.get_item(amended_uuid)
 
-    # Merge metadata with original metadata
-    new_metadata = {}
-    if original.metadata:
-        new_metadata.update(original.metadata)
-    if request.metadata:
-        new_metadata.update(request.metadata)
-
-    # Create new Item with amended data
-    amended_item = Item(
-        uuid=generate_soil_uuid(),
-        _type=original._type,
-        realized_at=now,
-        canonical_at=canonical_at,
-        data=request.data,
-        metadata=new_metadata if new_metadata else None,
-        integrity_hash=None,  # Will be computed by create_item
-        fidelity="full",
-    )
-
-    # Create amended item
-    amended_uuid = soil.create_item(amended_item)
-
-    # Update original to mark as superseded
-    soil.mark_superseded(
-        original_uuid=request.target,
-        superseded_by_uuid=amended_uuid,
-        superseded_at=now
-    )
-
-    # Create supersedes relation
-    from system.soil.relation import SystemRelation
-    relation = SystemRelation(
-        uuid=generate_soil_uuid(),  # Uses module-level import from system.soil.item
-        kind="supersedes",
-        source=amended_uuid,
-        source_type="item",
-        target=request.target,  # Use request.target which has the prefix
-        target_type="item",
-        created_at=current_day(),  # Uses module-level import from system.soil.item
-        evidence={
-            "source": "user_stated",
-            "method": "semantic_api_amend",
-        },
-    )
-    soil.create_relation(relation)
-
-    # Fetch amended item
-    amended = soil.get_item(amended_uuid)
-
-    return _item_to_fact_response(amended)
+        return _item_to_fact_response(amended)
 
 
+@with_audit
 def handle_get_fact(request: GetRequest, actor: str) -> dict:
     """Handle get verb - get fact by UUID.
 
@@ -278,19 +279,20 @@ def handle_get_fact(request: GetRequest, actor: str) -> dict:
     Returns:
         dict with fact data
     """
-    soil = get_soil()
-    item = soil.get_item(request.target)
+    with get_soil() as soil:
+        item = soil.get_item(request.target)
 
-    if item is None:
-        from system.exceptions import ResourceNotFound
-        raise ResourceNotFound(
-            f"Fact not found: {request.target}",
-            details={"target": request.target}
-        )
+        if item is None:
+            from system.exceptions import ResourceNotFound
+            raise ResourceNotFound(
+                f"Fact not found: {request.target}",
+                details={"target": request.target}
+            )
 
-    return _item_to_fact_response(item)
+        return _item_to_fact_response(item)
 
 
+@with_audit
 def handle_query_facts(request: QueryRequest, actor: str) -> dict:
     """Handle query verb - query facts with filters.
 
@@ -304,45 +306,47 @@ def handle_query_facts(request: QueryRequest, actor: str) -> dict:
     Returns:
         dict with query results (results, total, start_index, count)
     """
-    soil = get_soil()
+    with get_soil() as soil:
+        # Build WHERE clause
+        where_parts = []
+        params = []
 
-    # Build WHERE clause
-    where_parts = []
-    params = []
+        # Filter by type
+        if request.type:
+            where_parts.append("_type = ?")
+            params.append(request.type)
 
-    # Filter by type
-    if request.type:
-        where_parts.append("_type = ?")
-        params.append(request.type)
+        # Filter by superseded status (default: exclude superseded)
+        where_parts.append("superseded_by IS NULL")
 
-    # Filter by superseded status (default: exclude superseded)
-    where_parts.append("superseded_by IS NULL")
+        # Build full query
+        where_clause = " AND ".join(where_parts) if where_parts else "1=1"
+        query = f"""
+            SELECT * FROM item
+            WHERE {where_clause}
+            ORDER BY realized_at DESC
+            LIMIT ? OFFSET ?
+        """
 
-    # Build full query
-    where_clause = " AND ".join(where_parts) if where_parts else "1=1"
-    query = f"""
-        SELECT * FROM item
-        WHERE {where_clause}
-        ORDER BY realized_at DESC
-        LIMIT ? OFFSET ?
-    """
+        params.extend([request.count, request.start_index])
 
-    params.extend([request.count, request.start_index])
+        # Execute query
+        # TODO: Add public API method to Soil for querying items with filters
+        # This is a temporary workaround accessing private connection until
+        # Soil.query_items_with_filters() or similar public method exists.
+        rows = soil._get_connection().execute(query, params).fetchall()
 
-    # Execute query
-    rows = soil._get_connection().execute(query, params).fetchall()
+        # Get total count
+        count_query = f"SELECT COUNT(*) as total FROM item WHERE {where_clause}"
+        total_row = soil._get_connection().execute(count_query, params[:-2]).fetchone()
+        total = total_row["total"]
 
-    # Get total count
-    count_query = f"SELECT COUNT(*) as total FROM item WHERE {where_clause}"
-    total_row = soil._get_connection().execute(count_query, params[:-2]).fetchone()
-    total = total_row["total"]
+        # Convert rows to response format
+        results = [_row_to_fact_response(row) for row in rows]
 
-    # Convert rows to response format
-    results = [_row_to_fact_response(row) for row in rows]
-
-    return {
-        "results": results,
-        "total": total,
-        "start_index": request.start_index,
-        "count": len(results),
-    }
+        return {
+            "results": results,
+            "total": total,
+            "start_index": request.start_index,
+            "count": len(results),
+        }
