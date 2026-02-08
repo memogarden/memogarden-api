@@ -14,18 +14,18 @@ import json
 import logging
 
 from system.core import get_core
-from system.utils import isodatetime, uid
+from system.utils import uid
 
 from ..schemas.semantic import (
     CreateRequest,
     EditRequest,
+    EnterRequest,
+    FocusRequest,
     ForgetRequest,
     GetRequest,
+    LeaveRequest,
     LinkRequest,
     QueryRequest,
-    EnterRequest,
-    LeaveRequest,
-    FocusRequest,
 )
 from .decorators import with_core_cleanup
 
@@ -64,12 +64,17 @@ def _row_to_entity_response(row, entity_type: str = "Entity") -> dict:
         data = {}
 
     # Helper to safely get optional values from sqlite3.Row
-    def safe_get(key, default=None):
+    def safe_get(key: str, default: str | None = None) -> str | None:
         try:
             val = row[key]
             return val if val is not None else default
         except (KeyError, IndexError):
             return default
+
+    # Get optional UUID fields and add prefix if present
+    superseded_by = safe_get("superseded_by")
+    group_id = safe_get("group_id")
+    derived_from = safe_get("derived_from")
 
     return {
         "uuid": uid.add_core_prefix(entity_uuid),
@@ -82,10 +87,10 @@ def _row_to_entity_response(row, entity_type: str = "Entity") -> dict:
         # Entity metadata
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
-        "superseded_by": uid.add_core_prefix(safe_get("superseded_by")) if safe_get("superseded_by") else None,
+        "superseded_by": uid.add_core_prefix(superseded_by) if superseded_by else None,
         "superseded_at": safe_get("superseded_at"),
-        "group_id": uid.add_core_prefix(safe_get("group_id")) if safe_get("group_id") else None,
-        "derived_from": uid.add_core_prefix(safe_get("derived_from")) if safe_get("derived_from") else None,
+        "group_id": uid.add_core_prefix(group_id) if group_id else None,
+        "derived_from": uid.add_core_prefix(derived_from) if derived_from else None,
     }
 
 
@@ -399,7 +404,7 @@ def handle_leave(request: LeaveRequest, actor: str, core) -> dict:
     except Exception as e:
         # Convert to ValueError for consistent 400 response
         if "not found" in str(e).lower():
-            raise ValueError("No active context frame. You must enter a scope first.")
+            raise ValueError("No active context frame. You must enter a scope first.") from None
         raise
 
     # Strip prefix from scope UUID
@@ -445,7 +450,7 @@ def handle_focus(request: FocusRequest, actor: str, core) -> dict:
     except Exception as e:
         # Convert to ValueError for consistent 400 response
         if "not found" in str(e).lower():
-            raise ValueError("No active context frame. You must enter a scope first.")
+            raise ValueError("No active context frame. You must enter a scope first.") from None
         raise
 
     # Strip prefix from scope UUID
