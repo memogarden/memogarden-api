@@ -21,6 +21,7 @@ from ..schemas.semantic import (
     EditRequest,
     ForgetRequest,
     GetRequest,
+    LinkRequest,
     QueryRequest,
 )
 
@@ -274,4 +275,50 @@ def handle_query(request: QueryRequest, actor: str) -> dict:
         "total": total,
         "start_index": request.start_index,
         "count": len(results),
+    }
+
+
+def handle_link(request: LinkRequest, actor: str) -> dict:
+    """Handle link verb - create user relation with time horizon (RFC-002).
+
+    Creates a user relation (engagement signal) with an initial time horizon.
+    The relation will decay over time based on access patterns.
+
+    Args:
+        request: Validated LinkRequest
+        actor: Authenticated user/agent UUID
+
+    Returns:
+        dict with created relation details
+
+    Raises:
+        ValueError: If relation kind is invalid
+    """
+    core = get_core()
+
+    # Create the user relation
+    relation_uuid = core.relation.create(
+        kind=request.kind,
+        source=request.source,
+        source_type=request.source_type,
+        target=request.target,
+        target_type=request.target_type,
+        initial_horizon_days=request.initial_horizon_days,
+        evidence=request.evidence,
+        metadata=request.metadata,
+    )
+
+    # Get the created relation
+    row = core.relation.get_by_id(relation_uuid)
+
+    return {
+        "uuid": uid.add_core_prefix(row["uuid"]),
+        "kind": row["kind"],
+        "source": uid.add_core_prefix(row["source"]),
+        "source_type": row["source_type"],
+        "target": uid.add_core_prefix(row["target"]),
+        "target_type": row["target_type"],
+        "time_horizon": row["time_horizon"],
+        "last_access_at": row["last_access_at"],
+        "created_at": row["created_at"],
     }

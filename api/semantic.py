@@ -41,6 +41,7 @@ from api.schemas.semantic import (
     EditRequest,
     ForgetRequest,
     GetRequest,
+    LinkRequest,
     QueryRequest,
     SemanticRequest,
     SemanticResponse,
@@ -66,6 +67,8 @@ HANDLERS = {
     "create": core_handlers.handle_create,
     "edit": core_handlers.handle_edit,
     "forget": core_handlers.handle_forget,
+    # Relations bundle
+    "link": core_handlers.handle_link,
     # Soil bundle
     "add": soil_handlers.handle_add,
     "amend": soil_handlers.handle_amend,
@@ -321,6 +324,7 @@ def _validate_request(request_json: dict, op: str) -> SemanticRequest:
         "query": QueryRequest,
         "add": AddRequest,
         "amend": AmendRequest,
+        "link": LinkRequest,
     }
 
     schema = request_schemas.get(op)

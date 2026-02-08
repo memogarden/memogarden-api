@@ -193,7 +193,7 @@ def list_transactions():
     }
 
     core = get_core()
-    rows = core.transaction.list(filters, limit=limit, offset=offset)
+    rows = core.transaction.list_transactions(filters, limit=limit, offset=offset)
 
     return jsonify([_row_to_transaction_response(row) for row in rows])
 

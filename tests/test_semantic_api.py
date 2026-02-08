@@ -986,3 +986,223 @@ class TestQueryFactsVerb:
         assert data["ok"] is True
         assert len(data["result"]["results"]) <= 2
         assert data["result"]["count"] <= 2
+
+
+class TestLinkVerb:
+    """Tests for link verb (Relations bundle - RFC-002)."""
+
+    def test_link_entities(self, client, auth_headers):
+        """Test creating a user relation between two entities."""
+        # Create two entities
+        source_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {"name": "Source"}},
+            headers=auth_headers
+        )
+        source_uuid = source_response.get_json()["result"]["uuid"]
+
+        target_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {"name": "Target"}},
+            headers=auth_headers
+        )
+        target_uuid = target_response.get_json()["result"]["uuid"]
+
+        # Create link
+        response = client.post(
+            "/mg",
+            json={
+                "op": "link",
+                "kind": "explicit_link",
+                "source": source_uuid,
+                "source_type": "entity",
+                "target": target_uuid,
+                "target_type": "entity",
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+
+        # Verify relation structure
+        result = data["result"]
+        assert "uuid" in result
+        assert result["uuid"].startswith("core_")
+        assert result["kind"] == "explicit_link"
+        assert result["source"] == source_uuid
+        assert result["target"] == target_uuid
+        assert result["source_type"] == "entity"
+        assert result["target_type"] == "entity"
+        assert "time_horizon" in result
+        assert "last_access_at" in result
+        assert "created_at" in result
+
+    def test_link_with_custom_horizon(self, client, auth_headers):
+        """Test creating a link with custom initial time horizon."""
+        # Create entities
+        source_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {}},
+            headers=auth_headers
+        )
+        source_uuid = source_response.get_json()["result"]["uuid"]
+
+        target_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {}},
+            headers=auth_headers
+        )
+        target_uuid = target_response.get_json()["result"]["uuid"]
+
+        # Create link with 30-day horizon
+        response = client.post(
+            "/mg",
+            json={
+                "op": "link",
+                "source": source_uuid,
+                "source_type": "entity",
+                "target": target_uuid,
+                "target_type": "entity",
+                "initial_horizon_days": 30,
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+
+        # Verify time_horizon is ~30 days from now
+        from system.utils.time import current_day
+        expected_horizon = current_day() + 30
+        assert data["result"]["time_horizon"] == expected_horizon
+
+    def test_link_accepts_uuids_without_prefix(self, client, auth_headers):
+        """Test link works with UUIDs without prefix."""
+        # Create entities
+        source_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {}},
+            headers=auth_headers
+        )
+        source_uuid = source_response.get_json()["result"]["uuid"]
+
+        target_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {}},
+            headers=auth_headers
+        )
+        target_uuid = target_response.get_json()["result"]["uuid"]
+
+        # Strip prefixes
+        from system.utils import uid
+        source_stripped = uid.strip_prefix(source_uuid)
+        target_stripped = uid.strip_prefix(target_uuid)
+
+        # Create link with stripped UUIDs
+        response = client.post(
+            "/mg",
+            json={
+                "op": "link",
+                "source": source_stripped,
+                "source_type": "entity",
+                "target": target_stripped,
+                "target_type": "entity",
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+        # Response should have prefixes
+        assert data["result"]["source"] == source_uuid
+        assert data["result"]["target"] == target_uuid
+
+    def test_link_with_metadata(self, client, auth_headers):
+        """Test creating a link with metadata."""
+        # Create entities
+        source_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {}},
+            headers=auth_headers
+        )
+        source_uuid = source_response.get_json()["result"]["uuid"]
+
+        target_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {}},
+            headers=auth_headers
+        )
+        target_uuid = target_response.get_json()["result"]["uuid"]
+
+        # Create link with metadata
+        response = client.post(
+            "/mg",
+            json={
+                "op": "link",
+                "source": source_uuid,
+                "source_type": "entity",
+                "target": target_uuid,
+                "target_type": "entity",
+                "metadata": {"strength": 0.8, "context": "testing"},
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+
+    def test_link_invalid_initial_horizon_fails(self, client, auth_headers):
+        """Test creating a link with invalid initial_horizon_days fails."""
+        # Create entities
+        source_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {}},
+            headers=auth_headers
+        )
+        source_uuid = source_response.get_json()["result"]["uuid"]
+
+        target_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact", "data": {}},
+            headers=auth_headers
+        )
+        target_uuid = target_response.get_json()["result"]["uuid"]
+
+        # Try with negative horizon (should fail validation)
+        response = client.post(
+            "/mg",
+            json={
+                "op": "link",
+                "source": source_uuid,
+                "source_type": "entity",
+                "target": target_uuid,
+                "target_type": "entity",
+                "initial_horizon_days": -1,
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data["ok"] is False
+
+    def test_link_requires_source_and_target(self, client, auth_headers):
+        """Test creating a link requires both source and target."""
+        response = client.post(
+            "/mg",
+            json={
+                "op": "link",
+                "source_type": "entity",
+                "target_type": "entity",
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data["ok"] is False

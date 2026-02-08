@@ -567,3 +567,47 @@ def sample_recurrence_data():
         "valid_from": "2025-01-01T00:00:00Z",
         "valid_until": None
     }
+
+
+# ============================================================================
+# Core Database Fixture
+# ============================================================================
+
+@pytest.fixture
+def core(flask_app):
+    """
+    Get a Core instance for testing database operations directly.
+
+    This fixture provides direct access to the same database used by the Flask app,
+    ensuring integration between unit and integration tests.
+
+    Args:
+        flask_app: Flask app fixture (ensures database is initialized)
+
+    Returns:
+        Core instance with autocommit semantics
+    """
+    from system.core import get_core
+
+    # Get a core instance (autocommit mode for simple operations)
+    # This will use the mocked connection from flask_app, pointing to the temp database
+    core_instance = get_core(atomic=False)
+
+    yield core_instance
+
+    # Cleanup happens automatically when connection closes
+
+
+@pytest.fixture
+def sample_entity(core):
+    """
+    Create a sample entity for testing relations.
+
+    Args:
+        core: Core fixture
+
+    Returns:
+        UUID of created entity
+    """
+    entity_uuid = core.entity.create("Artifact")
+    return entity_uuid

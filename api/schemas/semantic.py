@@ -182,6 +182,52 @@ class AmendRequest(SemanticRequest):
     )
 
 
+class LinkRequest(SemanticRequest):
+    """Request to create a user relation (RFC-002).
+
+    Per RFC-002 v5:
+    - link: Create explicit user relation with time horizon
+
+    User relations track engagement signals and decay over time
+    based on access patterns. The time horizon determines when
+    the relation should fossilize.
+    """
+    op: Literal["link"] = "link"
+    kind: Literal["explicit_link"] = Field(
+        default="explicit_link",
+        description="Relation kind (currently only explicit_link supported)"
+    )
+    source: str = Field(
+        ...,
+        description="UUID of source entity/fact (with or without prefix)"
+    )
+    source_type: Literal["item", "entity", "artifact"] = Field(
+        ...,
+        description="Type of source"
+    )
+    target: str = Field(
+        ...,
+        description="UUID of target entity/fact (with or without prefix)"
+    )
+    target_type: Literal["item", "entity", "artifact", "fragment"] = Field(
+        ...,
+        description="Type of target"
+    )
+    initial_horizon_days: int = Field(
+        default=7,
+        description="Initial time horizon in days (default: 7)",
+        ge=1
+    )
+    evidence: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional evidence for the relation"
+    )
+    metadata: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional metadata for the relation"
+    )
+
+
 # ============================================================================
 # Response Envelope
 # ============================================================================
@@ -224,5 +270,6 @@ SemanticRequestType = (
     ForgetRequest |
     QueryRequest |
     AddRequest |
-    AmendRequest
+    AmendRequest |
+    LinkRequest
 )
