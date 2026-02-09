@@ -14,18 +14,23 @@ import json
 import logging
 
 from system.core import get_core
+from system.exceptions import ResourceNotFound
 from system.utils import uid
 
 from ..schemas.semantic import (
     CreateRequest,
     EditRequest,
     EnterRequest,
+    ExploreRequest,
     FocusRequest,
     ForgetRequest,
     GetRequest,
     LeaveRequest,
     LinkRequest,
+    QueryRelationRequest,
     QueryRequest,
+    TrackRequest,
+    UnlinkRequest,
 )
 from .decorators import with_audit
 
@@ -242,43 +247,13 @@ def handle_query(request: QueryRequest, actor: str) -> dict:
         dict with query results (results, total, start_index, count)
     """
     with get_core() as core:
-        # Build query with basic filters
-        # Session 1: Filter by type, basic pagination
-        # Future: Full DSL with operators (any, not, etc.)
-
-        # Build WHERE clause
-        where_parts = []
-        params = []
-
-        # Filter by type
-        if request.type:
-            where_parts.append("type = ?")
-            params.append(request.type)
-
-        # Filter by superseded status (default: exclude superseded)
-        where_parts.append("superseded_by IS NULL")
-
-        # Build full query
-        where_clause = " AND ".join(where_parts) if where_parts else "1=1"
-        query = f"""
-            SELECT * FROM entity
-            WHERE {where_clause}
-            ORDER BY created_at DESC
-            LIMIT ? OFFSET ?
-        """
-
-        params.extend([request.count, request.start_index])
-
-        # Execute query
-        # TODO: Add public API method to Core for querying entities with filters
-        # This is a temporary workaround accessing private connection until
-        # Core.entity.query_with_filters() or similar public method exists.
-        rows = core._conn.execute(query, params).fetchall()
-
-        # Get total count
-        count_query = f"SELECT COUNT(*) as total FROM entity WHERE {where_clause}"
-        total_row = core._conn.execute(count_query, params[:-2]).fetchone()
-        total = total_row["total"]
+        # Use public API method to query entities
+        rows, total = core.entity.query_with_filters(
+            entity_type=request.type,
+            include_superseded=False,
+            limit=request.count,
+            offset=request.start_index,
+        )
 
         # Convert rows to response format
         results = [_row_to_entity_response(row) for row in rows]
@@ -335,6 +310,422 @@ def handle_link(request: LinkRequest, actor: str) -> dict:
         "last_access_at": row["last_access_at"],
         "created_at": row["created_at"],
     }
+
+
+# ============================================================================
+# Relations Bundle Verb Handlers (RFC-002 v5)
+# ============================================================================
+
+@with_audit
+def handle_unlink(request: UnlinkRequest, actor: str) -> dict:
+    """Handle unlink verb - remove user relation.
+
+    Per RFC-002 v5:
+    - unlink: Remove a user relation
+
+    User relations can be removed by the operator who created them.
+    System relations are immutable and cannot be unlinked.
+
+    Args:
+        request: Validated UnlinkRequest
+        actor: Authenticated user/agent UUID
+
+    Returns:
+        dict with deleted relation UUID
+
+    Raises:
+        ResourceNotFound: If relation doesn't exist
+
+    SECURITY NOTE: Currently does NOT verify that actor created the relation.
+    TODO: Add created_by field to user_relation schema and implement authorization check.
+    """
+    with get_core() as core:
+        # TODO: Add authorization check
+        # Verify that actor created this relation before allowing deletion
+        # This requires adding created_by field to user_relation table
+
+        # Delete the relation
+        core.relation.delete(request.target)
+
+        return {
+            "uuid": uid.add_core_prefix(request.target),
+            "deleted": True
+        }
+
+
+@with_audit
+def handle_edit_relation(request: EditRequest, actor: str) -> dict:
+    """Handle edit_relation verb - edit relation attributes.
+
+    Per RFC-002 v5:
+    - edit_relation: Edit relation attributes (time_horizon, metadata, evidence)
+
+    Args:
+        request: Validated EditRequest
+        actor: Authenticated user/agent UUID
+
+    Returns:
+        dict with updated relation details
+
+    Raises:
+        ResourceNotFound: If relation doesn't exist
+    """
+    with get_core() as core:
+        # Edit the relation
+        core.relation.edit(
+            relation_id=request.target,
+            time_horizon=request.set.get("time_horizon") if request.set else None,
+            metadata=request.set.get("metadata") if request.set else None,
+            evidence=request.set.get("evidence") if request.set else None,
+        )
+
+        # Get the updated relation
+        row = core.relation.get_by_id(request.target)
+
+        return {
+            "uuid": uid.add_core_prefix(row["uuid"]),
+            "kind": row["kind"],
+            "source": uid.add_core_prefix(row["source"]),
+            "source_type": row["source_type"],
+            "target": uid.add_core_prefix(row["target"]),
+            "target_type": row["target_type"],
+            "time_horizon": row["time_horizon"],
+            "last_access_at": row["last_access_at"],
+            "created_at": row["created_at"],
+            "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
+            "evidence": json.loads(row["evidence"]) if row["evidence"] else None,
+        }
+
+
+@with_audit
+def handle_get_relation(request: GetRequest, actor: str) -> dict:
+    """Handle get_relation verb - get relation by UUID.
+
+    Args:
+        request: Validated GetRequest
+        actor: Authenticated user/agent UUID
+
+    Returns:
+        dict with relation details
+
+    Raises:
+        ResourceNotFound: If relation doesn't exist
+    """
+    with get_core() as core:
+        row = core.relation.get_by_id(request.target)
+
+        return {
+            "uuid": uid.add_core_prefix(row["uuid"]),
+            "kind": row["kind"],
+            "source": uid.add_core_prefix(row["source"]),
+            "source_type": row["source_type"],
+            "target": uid.add_core_prefix(row["target"]),
+            "target_type": row["target_type"],
+            "time_horizon": row["time_horizon"],
+            "last_access_at": row["last_access_at"],
+            "created_at": row["created_at"],
+            "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
+            "evidence": json.loads(row["evidence"]) if row["evidence"] else None,
+        }
+
+
+@with_audit
+def handle_query_relation(request: QueryRelationRequest, actor: str) -> dict:
+    """Handle query_relation verb - query relations with filters.
+
+    Per RFC-002 v5:
+    - query_relation: Query relations with filters
+
+    Args:
+        request: Validated QueryRelationRequest
+        actor: Authenticated user/agent UUID
+
+    Returns:
+        dict with results list and count
+    """
+    with get_core() as core:
+        rows = core.relation.query(
+            source=request.source,
+            target=request.target,
+            kind=request.kind,
+            source_type=request.source_type,
+            target_type=request.target_type,
+            alive_only=request.alive_only,
+            limit=request.limit,
+        )
+
+        results = []
+        for row in rows:
+            results.append({
+                "uuid": uid.add_core_prefix(row["uuid"]),
+                "kind": row["kind"],
+                "source": uid.add_core_prefix(row["source"]),
+                "source_type": row["source_type"],
+                "target": uid.add_core_prefix(row["target"]),
+                "target_type": row["target_type"],
+                "time_horizon": row["time_horizon"],
+                "last_access_at": row["last_access_at"],
+                "created_at": row["created_at"],
+                "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
+                "evidence": json.loads(row["evidence"]) if row["evidence"] else None,
+            })
+
+        return {
+            "results": results,
+            "count": len(results),
+        }
+
+
+@with_audit
+def handle_explore(request: ExploreRequest, actor: str) -> dict:
+    """Handle explore verb - graph expansion from anchor.
+
+    Per RFC-002 v5:
+    - explore: Graph expansion from anchor entity/fact
+
+    Traverses the relation graph to find connected entities/facts.
+    Supports direction control (outgoing, incoming, both) and radius limits.
+
+    Args:
+        request: Validated ExploreRequest
+        actor: Authenticated user/agent UUID
+
+    Returns:
+        dict with nodes (entities/facts) and edges (relations)
+
+    Example:
+        # Find all entities connected to this one (1-2 hops)
+        explore(anchor="entity_xxx", radius=2)
+    """
+    from system.soil import get_soil
+
+    with get_core() as core:
+        # Track visited nodes and edges to avoid duplicates
+        visited_nodes = set()
+        visited_edges = set()
+        nodes = []
+        edges = []
+
+        # BFS traversal
+        from collections import deque
+
+        # Queue: (current_uuid, distance)
+        queue = deque([(uid.strip_prefix(request.anchor), 0)])
+
+        while queue and len(visited_nodes) < request.limit:
+            current_uuid, distance = queue.popleft()
+
+            # Check radius limit
+            if request.radius is not None and distance > request.radius:
+                break
+
+            # Skip if already visited
+            if current_uuid in visited_nodes:
+                continue
+
+            visited_nodes.add(current_uuid)
+
+            # Get incoming relations (target = current_uuid)
+            if request.direction in ("incoming", "both"):
+                incoming_rels = core.relation.list_inbound(
+                    current_uuid,
+                    alive_only=True
+                )
+                for rel_row in incoming_rels:
+                    if request.kind and rel_row["kind"] != request.kind:
+                        continue
+
+                    edge_id = f"{rel_row['uuid']}"
+                    if edge_id not in visited_edges:
+                        visited_edges.add(edge_id)
+                        edges.append({
+                            "uuid": uid.add_core_prefix(rel_row["uuid"]),
+                            "kind": rel_row["kind"],
+                            "source": uid.add_core_prefix(rel_row["source"]),
+                            "source_type": rel_row["source_type"],
+                            "target": uid.add_core_prefix(rel_row["target"]),
+                            "target_type": rel_row["target_type"],
+                            "direction": "incoming",
+                        })
+
+                        # Add source to queue for next hop
+                        source_uuid = rel_row["source"]
+                        if source_uuid not in visited_nodes:
+                            queue.append((source_uuid, distance + 1))
+
+            # Get outgoing relations (source = current_uuid)
+            if request.direction in ("outgoing", "both"):
+                outgoing_rels = core.relation.list_outbound(
+                    current_uuid,
+                    alive_only=True
+                )
+                for rel_row in outgoing_rels:
+                    if request.kind and rel_row["kind"] != request.kind:
+                        continue
+
+                    edge_id = f"{rel_row['uuid']}"
+                    if edge_id not in visited_edges:
+                        visited_edges.add(edge_id)
+                        edges.append({
+                            "uuid": uid.add_core_prefix(rel_row["uuid"]),
+                            "kind": rel_row["kind"],
+                            "source": uid.add_core_prefix(rel_row["source"]),
+                            "source_type": rel_row["source_type"],
+                            "target": uid.add_core_prefix(rel_row["target"]),
+                            "target_type": rel_row["target_type"],
+                            "direction": "outgoing",
+                        })
+
+                        # Add target to queue for next hop
+                        target_uuid = rel_row["target"]
+                        if target_uuid not in visited_nodes:
+                            queue.append((target_uuid, distance + 1))
+
+        # Get node details for all visited nodes
+        # Note: This combines both Core entities and Soil items
+        for node_uuid in visited_nodes:
+            # Try to get from Core first
+            try:
+                entity_row = core.entity.get_by_id(node_uuid)
+                nodes.append({
+                    "uuid": uid.add_core_prefix(entity_row["uuid"]),
+                    "layer": "core",
+                    "type": entity_row["type"],
+                })
+                continue
+            except ResourceNotFound:
+                # Not a Core entity, try Soil
+                pass
+            except Exception as e:
+                # Log unexpected errors
+                logger.warning(f"Error looking up Core entity {node_uuid}: {e}")
+                pass
+
+            # Try to get from Soil
+            try:
+                with get_soil() as soil:
+                    item = soil.get_item(node_uuid)
+                    if item:
+                        nodes.append({
+                            "uuid": uid.add_soil_prefix(item.uuid),
+                            "layer": "soil",
+                            "type": item._type,
+                        })
+            except ResourceNotFound:
+                # Item not found in Soil either - skip
+                pass
+            except Exception as e:
+                # Log unexpected errors
+                logger.warning(f"Error looking up Soil item {node_uuid}: {e}")
+                pass
+
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "count": len(nodes),
+        }
+
+
+@with_audit
+def handle_track(request: TrackRequest, actor: str) -> dict:
+    """Handle track verb - trace causal chain from entity back to originating facts.
+
+    Per RFC-005 v7.1:
+    - track: Trace entity lineage through derived_from links
+
+    Traces the causal chain showing how an entity was created and what sources
+    it was derived from. Handles diamond ancestry naturally (same source referenced
+    multiple times).
+
+    Args:
+        request: Validated TrackRequest
+        actor: Authenticated user/agent UUID
+
+    Returns:
+        dict with target and chain (tree structure with kind markers)
+
+    Example:
+        # Trace all sources for this entity
+        track(target="ent_xxx", depth=3)
+    """
+    from system.soil import get_soil
+
+    # Strip prefix from target UUID
+    target_uuid = uid.strip_prefix(request.target)
+
+    with get_core() as core:
+        # Get the target entity
+        entity_row = core.entity.get_by_id(target_uuid)
+
+        # Build the derivation tree
+        # For now, track derived_from links (entity-to-entity derivation)
+        # Future: Track through EntityDelta items for fact-level lineage
+
+        visited = set()  # Track visited entities to avoid cycles
+        depth_limit = request.depth
+
+        def build_tree(entity_uuid: str, current_depth: int) -> dict:
+            """Recursively build derivation tree for an entity."""
+            # Check depth limit
+            if depth_limit is not None and current_depth >= depth_limit:
+                return {
+                    "kind": "entity",
+                    "id": uid.add_core_prefix(entity_uuid),
+                    "sources": [],
+                }
+
+            # Avoid cycles
+            if entity_uuid in visited:
+                return {
+                    "kind": "entity",
+                    "id": uid.add_core_prefix(entity_uuid),
+                    "sources": [],  # Already visited, no sources
+                }
+
+            visited.add(entity_uuid)
+
+            # Get entity details
+            try:
+                entity = core.entity.get_by_id(entity_uuid)
+            except ResourceNotFound:
+                return {
+                    "kind": "entity",
+                    "id": uid.add_core_prefix(entity_uuid),
+                    "sources": [],  # Entity not found
+                }
+
+            sources = []
+
+            # Check for derived_from link (entity-to-entity derivation)
+            # sqlite3.Row doesn't have .get(), use direct key access
+            try:
+                derived_from = entity["derived_from"]
+            except (KeyError, IndexError):
+                derived_from = None
+
+            if derived_from:
+                derived_uuid = uid.strip_prefix(derived_from)
+                # Recursively trace the parent entity
+                parent_tree = build_tree(derived_uuid, current_depth + 1)
+                sources.append(parent_tree)
+
+            # Future: Query EntityDelta items for fact-level sources
+            # For now, only track derived_from chain
+
+            return {
+                "kind": "entity",
+                "id": uid.add_core_prefix(entity_uuid),
+                "type": entity["type"],  # Direct access, type is always present
+                "sources": sources,
+            }
+
+        # Build the tree starting from target
+        tree = build_tree(target_uuid, 0)
+
+        return {
+            "target": uid.add_core_prefix(target_uuid),
+            "chain": [tree],  # Wrap in array for consistent format
+        }
 
 
 # ============================================================================

@@ -39,12 +39,16 @@ from api.schemas.semantic import (
     AmendRequest,
     CreateRequest,
     EditRequest,
+    ExploreRequest,
     ForgetRequest,
     GetRequest,
     LinkRequest,
+    QueryRelationRequest,
     QueryRequest,
     SemanticRequest,
     SemanticResponse,
+    TrackRequest,
+    UnlinkRequest,
     EnterRequest,
     LeaveRequest,
     FocusRequest,
@@ -70,8 +74,14 @@ HANDLERS = {
     "create": core_handlers.handle_create,
     "edit": core_handlers.handle_edit,
     "forget": core_handlers.handle_forget,
+    "track": core_handlers.handle_track,
     # Relations bundle
     "link": core_handlers.handle_link,
+    "unlink": core_handlers.handle_unlink,
+    "edit_relation": core_handlers.handle_edit_relation,
+    "get_relation": core_handlers.handle_get_relation,
+    "query_relation": core_handlers.handle_query_relation,
+    "explore": core_handlers.handle_explore,
     # Soil bundle
     "add": soil_handlers.handle_add,
     "amend": soil_handlers.handle_amend,
@@ -87,7 +97,9 @@ def _get_handler(op: str, request_json: dict):
 
     Some operations route to different handlers based on request parameters:
     - get: Routes based on target UUID prefix (soil_ → fact, core_ → entity)
+    - get_relation: Routes to handle_get_relation
     - query: Routes based on target_type field (fact → soil, entity/relation → core)
+    - edit_relation: Routes to handle_edit_relation
     """
     if op == "get":
         # Route based on target UUID prefix
@@ -332,6 +344,12 @@ def _validate_request(request_json: dict, op: str) -> SemanticRequest:
         "add": AddRequest,
         "amend": AmendRequest,
         "link": LinkRequest,
+        "unlink": UnlinkRequest,
+        "edit_relation": EditRequest,
+        "get_relation": GetRequest,
+        "query_relation": QueryRelationRequest,
+        "explore": ExploreRequest,
+        "track": TrackRequest,
         "enter": EnterRequest,
         "leave": LeaveRequest,
         "focus": FocusRequest,

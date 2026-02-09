@@ -13,7 +13,6 @@ Response envelope (error):
     {"ok": false, "actor": "usr_xxx", "timestamp": "...", "error": {...}}
 """
 
-from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -36,7 +35,7 @@ class SemanticRequest(BaseModel):
         "add", "amend",
         "link", "unlink", "edit_relation", "get_relation", "query_relation", "explore",
         "enter", "leave", "focus", "rejoin",
-        "search",
+        "track", "search",
         "register"
     ] = Field(..., description="Operation verb")
     bypass_semantic_api: bool = Field(default=False, description="If True, skip audit logging (internal use)")
@@ -145,9 +144,9 @@ class AddRequest(SemanticRequest):
         default_factory=dict,
         description="Item data (type-specific fields)"
     )
-    canonical_at: datetime | None = Field(
+    canonical_at: str | None = Field(
         default=None,
-        description="User-controllable subjective time (defaults to realized_at)"
+        description="User-controllable subjective time as ISO 8601 string (defaults to realized_at)"
     )
     metadata: dict[str, Any] | None = Field(
         default=None,
@@ -175,9 +174,9 @@ class AmendRequest(SemanticRequest):
         ...,
         description="New/corrected data for the Item"
     )
-    canonical_at: datetime | None = Field(
+    canonical_at: str | None = Field(
         default=None,
-        description="Updated canonical time (defaults to original)"
+        description="Updated canonical time as ISO 8601 string (defaults to original)"
     )
     metadata: dict[str, Any] | None = Field(
         default=None,
@@ -277,6 +276,115 @@ class FocusRequest(SemanticRequest):
     )
 
 
+class UnlinkRequest(SemanticRequest):
+    """Request to unlink/remove a user relation (RFC-002).
+
+    Per RFC-002 v5:
+    - unlink: Remove a user relation
+
+    User relations can be removed by the operator who created them.
+    System relations are immutable and cannot be unlinked.
+    """
+    op: Literal["unlink"] = "unlink"  # type: ignore[var-annotated]
+    target: str = Field(
+        ...,
+        description="UUID of the relation to remove (with or without core_ prefix)"
+    )
+
+
+class QueryRelationRequest(SemanticRequest):
+    """Request to query user relations with filters (RFC-002).
+
+    Allows filtering relations by source, target, kind, and type.
+    """
+    op: Literal["query_relation"] = "query_relation"  # type: ignore[var-annotated]
+    source: str | None = Field(
+        default=None,
+        description="Filter by source UUID (with or without prefix)"
+    )
+    target: str | None = Field(
+        default=None,
+        description="Filter by target UUID (with or without prefix)"
+    )
+    kind: str | None = Field(
+        default=None,
+        description="Filter by relation kind (e.g., 'explicit_link')"
+    )
+    source_type: str | None = Field(
+        default=None,
+        description="Filter by source type (item, entity, artifact)"
+    )
+    target_type: str | None = Field(
+        default=None,
+        description="Filter by target type (item, entity, artifact, fragment)"
+    )
+    alive_only: bool = Field(
+        default=True,
+        description="If True, only return alive relations (time_horizon >= today)"
+    )
+    limit: int = Field(
+        default=100,
+        description="Maximum number of results",
+        ge=1,
+        le=1000
+    )
+
+
+class ExploreRequest(SemanticRequest):
+    """Request to explore/graph expand from an anchor (RFC-002).
+
+    Traverses the relation graph to find connected entities/facts.
+    """
+    op: Literal["explore"] = "explore"  # type: ignore[var-annotated]
+    anchor: str = Field(
+        ...,
+        description="UUID of the starting entity/fact (with or without prefix)"
+    )
+    direction: Literal["outgoing", "incoming", "both"] = Field(
+        default="both",
+        description="Direction of traversal"
+    )
+    radius: int | None = Field(
+        default=None,
+        description="Maximum hop distance (None = unlimited)",
+        ge=1
+    )
+    kind: str | None = Field(
+        default=None,
+        description="Filter by relation kind"
+    )
+    limit: int = Field(
+        default=100,
+        description="Maximum number of results",
+        ge=1,
+        le=1000
+    )
+
+
+class TrackRequest(SemanticRequest):
+    """Request to track causal chain from entity back to originating facts (RFC-005 v7.1).
+
+    Traces entity lineage through EntityDelta records to source facts.
+    Enables audit/reconstruction workflows.
+
+    Response format is a tree structure with 'kind' markers:
+    - kind: 'entity' | 'fact' | 'relation'
+    - sources: Array of source nodes (recursive)
+
+    Handles diamond ancestry naturally (same fact referenced multiple times).
+    """
+    op: Literal["track"] = "track"  # type: ignore[var-annotated]
+    target: str = Field(
+        ...,
+        description="Entity UUID to track (with or without core_ prefix)"
+    )
+    depth: int | None = Field(
+        default=None,
+        description="Hop limit for traversal (None = unlimited)",
+        ge=1
+    )
+
+
 # ============================================================================
 # Response Envelope
 # ============================================================================
@@ -294,7 +402,7 @@ class SemanticResponse(BaseModel):
 
     ok: bool = Field(..., description="True if operation succeeded, false otherwise")
     actor: str = Field(..., description="Actor UUID (usr_xxx or agt_xxx)")
-    timestamp: datetime = Field(..., description="ISO 8601 timestamp")
+    timestamp: str = Field(..., description="ISO 8601 timestamp string")
     result: dict[str, Any] | None = Field(default=None, description="Operation result (on success)")
     error: dict[str, Any] | None = Field(default=None, description="Error details (on failure)")
 
@@ -321,6 +429,10 @@ SemanticRequestType = (
     AddRequest |
     AmendRequest |
     LinkRequest |
+    UnlinkRequest |
+    QueryRelationRequest |
+    ExploreRequest |
+    TrackRequest |
     EnterRequest |
     LeaveRequest |
     FocusRequest
