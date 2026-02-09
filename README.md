@@ -61,6 +61,12 @@ poetry run pytest
 
 ## Production Deployment
 
+### Supported Distributions
+
+The installation script supports:
+- **Debian-based**: Raspberry Pi OS, Ubuntu, Debian
+- **Arch-based**: Arch Linux ARM, Manjaro ARM
+
 ### Quick Deploy (Raspberry Pi)
 
 Run the deployment script on your Raspberry Pi:
