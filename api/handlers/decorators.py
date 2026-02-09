@@ -1,17 +1,33 @@
 """Shared decorators for Semantic API verb handlers.
 
-Session 6.5 Update: Context Manager Enforcement
-------------------------------------------------
+Session 6.6: ActionResult Schema Enhancement (RFC-005 v7.1)
+------------------------------------------------------------
+Structured error capture with error.code, error.message, error.details:
+- error.code: Machine-readable error type (validation_error, not_found,
+  lock_conflict, permission_denied, internal_error)
+- error.message: Human-readable error description
+- error.details: Optional structured error context
+- error_type: Full exception class name (e.g., "system.exceptions.ResourceNotFound")
+- error_traceback: Full Python traceback for debugging
+
+Exception types map to error codes:
+- ValidationError → validation_error
+- ResourceNotFound → not_found
+- LockConflictError → lock_conflict
+- PermissionDenied → permission_denied
+- All other exceptions → internal_error
+
+Session 6.5: Context Manager Enforcement
+-----------------------------------------
 As of Session 6.5, Core and Soil enforce context manager usage at runtime.
 Handlers MUST use `with get_core() as core:` and `with get_soil() as soil:`.
 Connection lifecycle (commit/rollback/close) is managed by the context managers.
 
 The old cleanup decorators (with_core_cleanup, with_soil_cleanup) have been removed.
 
-Session 6: Audit Facts
-----------------------
-The with_audit decorator adds audit logging for all Semantic API operations via
-Action and ActionResult facts per RFC-005 v7 Section 7:
+Session 6: Audit Facts (RFC-005 v7 Section 7)
+----------------------------------------------
+The with_audit decorator adds audit logging for all Semantic API operations:
 - Action fact: Created immediately when operation starts
 - ActionResult fact: Created when operation completes (success/failure)
 - result_of relation: Links ActionResult to Action
@@ -20,6 +36,7 @@ Action and ActionResult facts per RFC-005 v7 Section 7:
 
 import json
 import time
+import traceback
 from functools import wraps
 
 from system.core import get_core
@@ -27,6 +44,13 @@ from system.soil import get_soil
 from system.soil.item import Item, current_day, generate_soil_uuid
 from system.soil.relation import SystemRelation
 from system.utils import isodatetime, uid
+from system.exceptions import (
+    MemoGardenError,
+    ValidationError,
+    ResourceNotFound,
+    LockConflictError,
+    PermissionDenied,
+)
 
 
 # ============================================================================
@@ -151,6 +175,13 @@ def with_audit(handler_func):
             duration_ms = int((time.time() - start_time) * 1000)
             actionresult_uuid = generate_soil_uuid()
 
+            # Capture structured error information (RFC-005 v7.1)
+            error_code = _get_error_code(e)
+            error_message = str(e)
+            error_details = _extract_error_details(e)
+            error_type = f"{e.__class__.__module__}.{e.__class__.__name__}"
+            error_traceback = traceback.format_exc()
+
             # Only create ActionResult if Action was created successfully
             if action_uuid:
                 try:
@@ -161,10 +192,16 @@ def with_audit(handler_func):
                         canonical_at=isodatetime.now(),
                         data={
                             "result": None,
-                            "error": str(e),
+                            "error": {
+                                "code": error_code,
+                                "message": error_message,
+                                "details": error_details,
+                            },
                             "result_summary": _generate_result_summary(operation, None, success=False, error=e),
                             "duration_ms": duration_ms,
                             "status": "error",
+                            "error_type": error_type,
+                            "error_traceback": error_traceback,
                         }
                     )
 
@@ -292,3 +329,52 @@ def _generate_result_summary(operation: str, result, success: bool, error: Excep
             return f"{operation} completed"
 
     return f"{operation} completed"
+
+
+def _get_error_code(exception: Exception) -> str:
+    """Map exception type to error code per RFC-005 v7.1.
+
+    Args:
+        exception: Exception to classify
+
+    Returns:
+        Error code string (validation_error, not_found, lock_conflict,
+        permission_denied, or internal_error)
+    """
+    # Map specific exception types to error codes
+    if isinstance(exception, ValidationError):
+        return "validation_error"
+    elif isinstance(exception, ResourceNotFound):
+        return "not_found"
+    elif isinstance(exception, LockConflictError):
+        return "lock_conflict"
+    elif isinstance(exception, PermissionDenied):
+        return "permission_denied"
+    else:
+        # Default to internal_error for unknown exceptions
+        return "internal_error"
+
+
+def _extract_error_details(exception: Exception) -> dict | None:
+    """Extract structured error details from exception.
+
+    Args:
+        exception: Exception to extract details from
+
+    Returns:
+        Dictionary with error details, or None if no details available
+    """
+    # Check if exception has a details attribute (MemoGardenError)
+    if hasattr(exception, 'details') and exception.details is not None:
+        return exception.details
+
+    # For validation errors, try to extract field names
+    if isinstance(exception, ValidationError):
+        return {"validation_error": str(exception)}
+
+    # For resource not found, try to extract resource type
+    if isinstance(exception, ResourceNotFound):
+        return {"resource": str(exception)}
+
+    # No structured details available
+    return None

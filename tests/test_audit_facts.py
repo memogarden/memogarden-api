@@ -223,6 +223,10 @@ class TestAuditFacts:
             assert failed_result is not None, "ActionResult for failed get not found"
             assert failed_result.data["status"] == "error"
             assert failed_result.data["error"] is not None
+            # Session 6.6: error is now an object with code, message, details
+            assert isinstance(failed_result.data["error"], dict)
+            assert "code" in failed_result.data["error"]
+            assert "message" in failed_result.data["error"]
             assert "duration_ms" in failed_result.data
 
     def test_bypass_semantic_api_flag(self, client, auth_headers):
@@ -387,3 +391,216 @@ class TestAuditFacts:
             assert relation.evidence is not None
             assert relation.evidence.get("source") == "system_inferred"
             assert relation.evidence.get("method") == "audit_logging"
+
+
+# ============================================================================
+# Session 6.6: Structured Error Capture Tests
+# ============================================================================
+
+class TestStructuredErrorCapture:
+    """Test structured error capture in ActionResult facts (RFC-005 v7.1)."""
+
+    def test_not_found_error_has_structured_error(self, client, auth_headers):
+        """Test that not_found error has code, message, and details."""
+        # Try to get a non-existent entity
+        fake_uuid = "core_00000000-0000-0000-0000-000000000000"
+        response = client.post(
+            "/mg",
+            json={
+                "op": "get",
+                "target": fake_uuid
+            },
+            headers=auth_headers
+        )
+
+        # Should fail (404)
+        assert response.status_code == 404
+
+        # Verify structured error in ActionResult
+        with get_soil() as soil:
+            # Find the failed action
+            action_items = [i for i in soil.list_items() if i._type == "Action"]
+            failed_get = None
+            for action in action_items:
+                if action.data.get("operation") == "get":
+                    params = action.data.get("params", {})
+                    if isinstance(params, dict) and params.get("target") == fake_uuid:
+                        failed_get = action
+                        break
+
+            assert failed_get is not None, "Action fact for failed get not found"
+
+            # Find the ActionResult
+            actionresult_items = [i for i in soil.list_items() if i._type == "ActionResult"]
+            relations = soil.get_relations(kind="result_of")
+            failed_result = None
+            for relation in relations:
+                if relation.target == failed_get.uuid:
+                    for ar in actionresult_items:
+                        if ar.uuid == relation.source:
+                            failed_result = ar
+                            break
+                if failed_result:
+                    break
+
+            assert failed_result is not None
+            assert failed_result.data["status"] == "error"
+
+            # Verify structured error format (RFC-005 v7.1)
+            error = failed_result.data["error"]
+            assert error is not None
+            assert isinstance(error, dict), "Error should be an object"
+            assert "code" in error, "Error should have 'code' field"
+            assert "message" in error, "Error should have 'message' field"
+            assert error["code"] == "not_found"
+            assert error["message"] is not None
+            assert isinstance(error["message"], str)
+
+            # Verify error_type and error_traceback are present
+            assert "error_type" in failed_result.data
+            assert "error_traceback" in failed_result.data
+            assert failed_result.data["error_type"] is not None
+            assert failed_result.data["error_traceback"] is not None
+
+    def test_validation_error_has_validation_code(self, client, auth_headers):
+        """Test that validation errors have validation_error code.
+
+        Note: Since the API doesn't yet have field-level validation,
+        this test verifies that when a ValidationError is raised,
+        it gets properly classified with the validation_error code.
+        """
+        from api.handlers.decorators import _get_error_code
+        from system.exceptions import ValidationError
+
+        # Test error code mapping for ValidationError
+        exc = ValidationError("Invalid field value")
+        code = _get_error_code(exc)
+        assert code == "validation_error"
+
+        # Also verify error details extraction works
+        from api.handlers.decorators import _extract_error_details
+        exc_with_details = ValidationError(
+            "Invalid field",
+            details={"field": "amount", "expected": "positive", "got": -100}
+        )
+        details = _extract_error_details(exc_with_details)
+        assert details is not None
+        assert details["field"] == "amount"
+        assert details["expected"] == "positive"
+        assert details["got"] == -100
+
+    def test_permission_denied_error_structure(self, client, auth_headers):
+        """Test that permission_denied errors have correct structure.
+
+        Note: This test creates a scenario that would trigger permission denied.
+        Since we don't have full permissions implemented yet, we test the
+        error code mapping function directly.
+        """
+        from api.handlers.decorators import _get_error_code
+        from system.exceptions import PermissionDenied
+
+        # Test error code mapping
+        exc = PermissionDenied("Access denied")
+        code = _get_error_code(exc)
+        assert code == "permission_denied"
+
+    def test_lock_conflict_error_structure(self):
+        """Test that lock_conflict errors have correct structure."""
+        from api.handlers.decorators import _get_error_code
+        from system.exceptions import LockConflictError
+
+        # Test error code mapping
+        exc = LockConflictError("Entity was modified by another transaction")
+        code = _get_error_code(exc)
+        assert code == "lock_conflict"
+
+    def test_internal_error_fallback(self):
+        """Test that unknown exceptions map to internal_error."""
+        from api.handlers.decorators import _get_error_code
+
+        # Test with generic exception
+        exc = ValueError("Some unknown error")
+        code = _get_error_code(exc)
+        assert code == "internal_error"
+
+    def test_error_details_extraction(self):
+        """Test that error details are extracted correctly."""
+        from api.handlers.decorators import _extract_error_details
+        from system.exceptions import ValidationError, ResourceNotFound
+
+        # Test MemoGardenError with details
+        exc1 = ValidationError("Invalid field", details={"field": "amount", "value": -100})
+        details1 = _extract_error_details(exc1)
+        assert details1 is not None
+        assert details1["field"] == "amount"
+        assert details1["value"] == -100
+
+        # Test ResourceNotFound (extracts resource info)
+        exc2 = ResourceNotFound("Entity core_abc123 not found")
+        details2 = _extract_error_details(exc2)
+        assert details2 is not None
+        assert "resource" in details2
+
+        # Test generic exception (no details)
+        exc3 = ValueError("Generic error")
+        details3 = _extract_error_details(exc3)
+        assert details3 is None
+
+    def test_error_details_in_actionresult(self, client, auth_headers):
+        """Test that error details are stored in ActionResult.data."""
+        # Try to get a non-existent entity
+        fake_uuid = "core_00000000-0000-0000-0000-000000000000"
+        response = client.post(
+            "/mg",
+            json={
+                "op": "get",
+                "target": fake_uuid
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 404
+
+        # Verify error details in ActionResult
+        with get_soil() as soil:
+            actionresult_items = [i for i in soil.list_items() if i._type == "ActionResult"]
+            error_results = [ar for ar in actionresult_items if ar.data.get("status") == "error"]
+            assert len(error_results) >= 1
+
+            latest_error = error_results[-1]
+            error = latest_error.data["error"]
+
+            # error.details may or may not be present depending on exception type
+            # but error.code and error.message must be present
+            assert "code" in error
+            assert "message" in error
+
+    def test_successful_operation_has_no_error(self, client, auth_headers):
+        """Test that successful operations have error: null."""
+        response = client.post(
+            "/mg",
+            json={
+                "op": "create",
+                "type": "Transaction",
+                "data": {
+                    "date": "2026-02-08",
+                    "amount": 100.00,
+                    "currency": "USD",
+                    "account": "Test",
+                    "category": "Test",
+                }
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+
+        # Verify error is null for successful operations
+        with get_soil() as soil:
+            actionresult_items = [i for i in soil.list_items() if i._type == "ActionResult"]
+            success_results = [ar for ar in actionresult_items if ar.data.get("status") == "success"]
+            assert len(success_results) >= 1
+
+            latest_success = success_results[-1]
+            assert latest_success.data["error"] is None
+            assert latest_success.data["result"] is not None
