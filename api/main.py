@@ -36,12 +36,79 @@ CORS(app, origins=settings.cors_origins, supports_credentials=True)
 
 # Database initialization (runs once on app startup)
 def initialize_database():
-    """Initialize database on app startup."""
+    """Initialize database on app startup.
+
+    This function performs greenfield database initialization:
+    1. Creates databases if they don't exist (RFC-004 path resolution)
+    2. Initializes schemas (applies migrations)
+    3. Runs consistency checks (RFC-008)
+    4. Checks for admin user existence
+
+    The system is always-available - startup succeeds even if databases
+    are missing (they will be created automatically).
+
+    Raises:
+        Exception: If database initialization fails (prevents app startup)
+    """
+    from system.host.environment import get_db_path
+    from system.soil.database import Soil
+    from system.transaction_coordinator import TransactionCoordinator
+    import os
+
     try:
+        # Get database paths (RFC-004)
+        soil_db_path = get_db_path('soil')
+        core_db_path = get_db_path('core')
+
+        # Check if databases exist
+        soil_exists = os.path.exists(soil_db_path)
+        core_exists = os.path.exists(core_db_path)
+
+        if not soil_exists or not core_exists:
+            logger.info("Databases not found. Creating new databases...")
+            logger.info(f"Soil database: {soil_db_path}")
+            logger.info(f"Core database: {core_db_path}")
+
+            # Create parent directories if needed
+            soil_dir = os.path.dirname(soil_db_path)
+            core_dir = os.path.dirname(core_db_path)
+            if soil_dir:
+                os.makedirs(soil_dir, exist_ok=True)
+            if core_dir:
+                os.makedirs(core_dir, exist_ok=True)
+
+        # Initialize Core database (creates if missing, applies migrations)
         init_db()
-        logger.info("Database initialized successfully")
+        logger.info("Core database initialized")
+
+        # Initialize Soil database (creates if missing, applies migrations)
+        from system.soil.database import get_soil
+        with get_soil(str(soil_db_path)) as soil:
+            soil.init_schema()
+        logger.info("Soil database initialized")
+
+        if not soil_exists or not core_exists:
+            logger.info("New databases created successfully")
+        else:
+            logger.info("Existing databases loaded")
+
+        # Run consistency checks (RFC-008)
+        logger.info("Running consistency checks...")
+        coordinator = TransactionCoordinator(
+            soil_db_path=soil_db_path,
+            core_db_path=core_db_path
+        )
+        system_status = coordinator.check_consistency()
+
+        if system_status.value == "normal":
+            logger.info("Consistency checks passed")
+        else:
+            logger.warning(f"System status: {system_status.value}")
+            logger.warning("   Consistency issues detected. Check /status endpoint for details.")
 
         # Check if admin user exists
+        # NOTE: Using _create_connection() temporarily until Core has public API for this
+        # TODO: Add core.user.has_admin() public method to Core
         from .middleware import service
 
         conn = _create_connection()
@@ -52,6 +119,7 @@ def initialize_database():
                 )
         finally:
             conn.close()
+
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
         raise
@@ -134,8 +202,75 @@ def handle_internal_error(error):
 # Health check endpoint
 @app.route("/health")
 def health():
-    """Health check endpoint."""
+    """Simple health check endpoint.
+
+    Returns 200 if the server is running. For detailed status, use /status.
+    """
     return jsonify({"status": "ok"})
+
+
+# Status endpoint with consistency checks
+@app.route("/status")
+def status():
+    """System status endpoint with database consistency checks.
+
+    Returns:
+        - status: System status (normal, inconsistent, read_only, safe_mode)
+        - databases: Database connection status
+        - consistency: Consistency check results (if issues found)
+
+    See: RFC-008 v1.2 Transaction Semantics
+    """
+    from system.transaction_coordinator import TransactionCoordinator
+    from system.host.environment import get_db_path
+    import os
+
+    # Get database paths (RFC-004)
+    soil_db = str(get_db_path('soil'))
+    core_db = str(get_db_path('core'))
+
+    # Check if database files exist
+    soil_exists = os.path.exists(soil_db)
+    core_exists = os.path.exists(core_db)
+
+    result = {
+        "status": "ok",
+        "databases": {
+            "soil": "connected" if soil_exists else "missing",
+            "core": "connected" if core_exists else "missing",
+            "paths": {
+                "soil": str(soil_db),
+                "core": str(core_db),
+            }
+        }
+    }
+
+    # Run consistency checks if databases exist
+    if soil_exists and core_exists:
+        try:
+            coordinator = TransactionCoordinator(
+                soil_db_path=soil_db,
+                core_db_path=core_db
+            )
+            system_status = coordinator.check_consistency()
+            result["consistency"] = {
+                "status": system_status.value,
+            }
+
+            # Update overall status based on consistency check
+            if system_status.value != "normal":
+                result["status"] = system_status.value
+                result["warning"] = "Consistency issues detected"
+
+        except Exception as e:
+            logger.error(f"Consistency check failed: {e}")
+            result["consistency"] = {
+                "status": "error",
+                "error": str(e)
+            }
+            result["status"] = "error"
+
+    return jsonify(result)
 
 
 # Register API blueprints
