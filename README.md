@@ -66,7 +66,7 @@ poetry run pytest
 Run the deployment script on your Raspberry Pi:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/memogarden/memogarden/main/scripts/deploy-memogarden.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/memogarden/memogarden/refs/heads/main/scripts/deploy-memogarden.sh | sudo bash
 ```
 
 Or manually:
