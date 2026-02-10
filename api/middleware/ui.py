@@ -26,20 +26,20 @@ auth_views_bp = Blueprint("auth_views", __name__, template_folder='../templates'
 
 
 # ============================================================================
-# Admin Registration Page (localhost only, one-time)
+# Operator Account Setup (localhost only, one-time)
 # ============================================================================
 
 ADMIN_REGISTER_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>MemoGarden - Admin Setup</title>
+    <title>MemoGarden Setup</title>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-gray-50 min-h-screen flex items-center justify-center px-4">
     <div class="bg-white shadow-md rounded-lg p-8 max-w-md w-full">
-        <h1 class="text-3xl font-bold text-gray-800 mb-2 text-center">MemoGarden Admin Setup</h1>
-        <p class="text-gray-600 text-center mb-6">Create your admin account to get started</p>
+        <h1 class="text-3xl font-bold text-gray-800 mb-2 text-center">Welcome to MemoGarden</h1>
+        <p class="text-gray-600 text-center mb-6">Let's create your account to get started</p>
 
         {% if message %}
         <div class="bg-blue-100 text-blue-700 border border-blue-400 rounded-lg p-4 mb-4">
@@ -89,7 +89,7 @@ ADMIN_REGISTER_HTML = """
                 type="submit"
                 class="w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition font-medium"
             >
-                Create Admin Account
+                Create My Account
             </button>
         </form>
 
@@ -167,7 +167,7 @@ def _is_localhost_request() -> bool:
     from flask import request
 
     if settings.bypass_localhost_check:
-        return False
+        return True
 
     remote_addr = request.remote_addr or ""
     return remote_addr in {"127.0.0.1", "::1", "localhost"}
@@ -176,36 +176,36 @@ def _is_localhost_request() -> bool:
 @auth_views_bp.route("/admin/register", methods=["GET"])
 def admin_register_page():
     """
-    Display admin registration page (localhost only).
+    Display operator account setup page (localhost only).
 
     This page is only accessible:
     1. From localhost (127.0.0.1, ::1)
     2. When no users exist in the database
 
     Returns:
-        HTML page with admin registration form
+        HTML page with account setup form
 
     Error Responses:
         403 JSON: If not localhost
-        200 HTML: If admin already exists (shows error in HTML)
+        200 HTML: If account already exists (shows error in HTML)
     """
     from flask import request
 
     # Check localhost access - return JSON error for API compatibility
     if not _is_localhost_request():
-        logger.warning(f"Admin registration attempt from non-localhost: {request.remote_addr}")
+        logger.warning(f"Account setup attempt from non-localhost: {request.remote_addr}")
         return jsonify({
             "error": {
                 "type": "Forbidden",
-                "message": "Admin registration is only accessible from localhost"
+                "message": "Account setup is only accessible from localhost"
             }
         }), 403
 
     # Check if any users exist
     core = get_core()
     try:
-        if service.has_admin_user(core._conn):
-            logger.info("Admin already exists, redirecting to login")
+        if core.has_admin_user():
+            logger.info("Account already exists, redirecting to login")
             from flask import redirect
             return redirect('/login?existing=true')
 
