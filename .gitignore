@@ -67,3 +67,5 @@ data/
 *.tmp
 *.temp
 .ruff_cache/
+.env
+.env.example
