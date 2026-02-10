@@ -363,7 +363,6 @@ def test_get_transaction(client, auth_headers):
 
 - **conftest.py** - Test fixtures and configuration
 - **architecture.md** - Testing philosophy (in memogarden-core/docs)
-- **test-regression-soil-uri-bug.md** - Root cause analysis of URI bug
 - **pytest documentation** - https://docs.pytest.org/
 
 ---

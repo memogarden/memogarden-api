@@ -17,6 +17,7 @@ import hashlib
 import os
 import sqlite3
 import tempfile
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -52,8 +53,6 @@ def guard_project_dir():
     See Also:
         TEST_DECISIONS.md - Rationale and documentation for this guard.
     """
-    from pathlib import Path
-
     project_dir = Path(__file__).parent.parent
 
     # Patterns for files that are allowed to exist in project directory
@@ -65,6 +64,8 @@ def guard_project_dir():
         "api", "system", "tests", "scripts", "docs", "plan",
         # Files that might be created during normal development
         "*.db", "*.db-shm", "*.db-wal",
+        # Malformed SQLite URIs from test failures (when uri=True is missing)
+        "file:*",
     }
 
     def is_ignored(path: Path) -> bool:

@@ -63,8 +63,9 @@ Thumbs.db
 *.db-wal
 data/
 
-# Test artifacts (SQLite URI-style filenames from test failures)
-file:*
+# Test artifacts (malformed SQLite URIs from test failures)
+file:*.db
+file:*.db?*
 
 # Temporary files
 *.tmp
