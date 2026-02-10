@@ -31,6 +31,80 @@ os.environ["BYPASS_LOCALHOST_CHECK"] = "true"
 from system.utils import isodatetime  # noqa: E402
 
 # ============================================================================
+# Project Directory Guard
+# ============================================================================
+
+@pytest.fixture(scope="session", autouse=True)
+def guard_project_dir():
+    """Fail if tests pollute the project directory with temporary files.
+
+    This fixture runs automatically at the start and end of each test session
+    to detect if tests have created files in the project directory (where
+    this conftest.py is located).
+
+    Files matching known ignore patterns (.git, __pycache__, etc.) are excluded
+    from the check.
+
+    Raises:
+        RuntimeError: If new files are detected in the project directory after
+            the test session completes.
+
+    See Also:
+        TEST_DECISIONS.md - Rationale and documentation for this guard.
+    """
+    from pathlib import Path
+
+    project_dir = Path(__file__).parent.parent
+
+    # Patterns for files that are allowed to exist in project directory
+    ignore_patterns = {
+        ".git", ".gitignore", "pyproject.toml", "poetry.lock",
+        "__pycache__", ".pytest_cache", ".coverage", "*.pyc",
+        ".ruff_cache", ".venv", "venv", "node_modules",
+        # Subdirectories that are part of the project
+        "api", "system", "tests", "scripts", "docs", "plan",
+        # Files that might be created during normal development
+        "*.db", "*.db-shm", "*.db-wal",
+    }
+
+    def is_ignored(path: Path) -> bool:
+        """Check if a path matches any of the ignore patterns."""
+        # Check if path name matches any pattern
+        for pattern in ignore_patterns:
+            if path.match(pattern):
+                return True
+            # Check if parent directory name matches
+            if path.parent.name == pattern.lstrip("*"):
+                return True
+        return False
+
+    # Snapshot existing files in project directory (non-recursive)
+    before = {
+        f for f in project_dir.iterdir()
+        if not is_ignored(f)
+    }
+
+    yield
+
+    # Check for new files after all tests complete
+    after = {
+        f for f in project_dir.iterdir()
+        if not is_ignored(f)
+    }
+
+    new_files = after - before
+
+    if new_files:
+        # Format list of new files for error message
+        file_list = "\n  - " + "\n  - ".join(sorted(f.name for f in new_files))
+        raise RuntimeError(
+            f"Tests polluted project directory with {len(new_files)} file(s):{file_list}\n\n"
+            f"Tests must not create files in the project directory. "
+            f"Use temp directories (tempfile.mkdtemp) or in-memory databases instead."
+        )
+
+
+# ============================================================================
 # SQLite Extension Functions
 # ============================================================================
 
