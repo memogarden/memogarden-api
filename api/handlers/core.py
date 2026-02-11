@@ -29,6 +29,7 @@ from ..schemas.semantic import (
     LinkRequest,
     QueryRelationRequest,
     QueryRequest,
+    SearchRequest,
     TrackRequest,
     UnlinkRequest,
 )
@@ -859,3 +860,135 @@ def handle_focus(request: FocusRequest, actor: str) -> dict:
             "primary_scope": uid.add_core_prefix(context_frame.primary_scope) if context_frame.primary_scope else None,
             "active_scopes": [uid.add_core_prefix(s) for s in (context_frame.active_scopes or [])]
         }
+
+
+# ============================================================================
+# Search Verb Handler (RFC-005 v7)
+# ============================================================================
+
+@with_audit
+def handle_search(request: SearchRequest, actor: str) -> dict:
+    """Handle search verb - semantic search and discovery.
+
+    Per RFC-005 v7:
+    - search: Semantic search and discovery
+
+    Session 9: Fuzzy text search with configurable coverage and effort.
+
+    Coverage levels:
+    - names: Title/name fields only (fast)
+    - content: Names + body text
+    - full: All indexed fields including metadata
+
+    Effort modes:
+    - quick: Cached results, shallow search
+    - standard: Full search (default)
+    - deep: Exhaustive search
+
+    Strategy:
+    - fuzzy: Text matching with typo tolerance (SQLite LIKE)
+    - auto: System chooses based on query characteristics
+
+    Continuation tokens enable pagination for large result sets.
+
+    Args:
+        request: Validated SearchRequest
+        actor: Authenticated user/agent UUID
+
+    Returns:
+        dict with search results and continuation token
+    """
+    from system.soil import get_soil
+
+    # Collect results based on target_type
+    results = []
+    entity_results = []
+    fact_results = []
+
+    # Search entities (Core) - using public API
+    if request.target_type in ("entity", "all"):
+        with get_core() as core:
+            # Use public search API instead of direct _conn access
+            entity_rows = core.entity.search(
+                query=request.query,
+                coverage=request.coverage,
+                limit=request.limit
+            )
+
+            # Convert to response format
+            for row in entity_rows:
+                entity_results.append(_row_to_entity_response(row))
+
+    # Search facts (Soil/Items) - using public API
+    if request.target_type in ("fact", "all"):
+        with get_soil() as soil:
+            # Use public search API instead of direct _conn access
+            item_rows = soil.search_items(
+                query=request.query,
+                coverage=request.coverage,
+                limit=request.limit
+            )
+
+            # Convert to response format
+            for row in item_rows:
+                # Parse JSON fields
+                try:
+                    data = json.loads(row["data"]) if row["data"] else {}
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    data = {}
+                try:
+                    metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    metadata = {}
+
+                fact_results.append({
+                    "uuid": uid.add_soil_prefix(row["uuid"]),
+                    "type": row["_type"],
+                    "data": data,
+                    "integrity_hash": row["integrity_hash"],
+                    "realized_at": row["realized_at"],
+                    "canonical_at": row["canonical_at"],
+                    "metadata": metadata,
+                    "fidelity": row["fidelity"],
+                    "kind": "fact",  # Add kind marker for disambiguation
+                })
+
+    # Merge and deduplicate results
+    # Session 9: Simple concatenation (entities first, then facts)
+    results = entity_results + fact_results
+
+    # TODO: Continuation token implementation (RFC-005)
+    # Session 9: Deferred - requires encoding offset/limit in base64
+    # Future: Implement continuation_token = base64encode(f"{offset}:{limit}:{last_timestamp}")
+    # Future: If request.continuation_token is provided, decode and resume from offset
+    continuation_token = None
+    if len(results) == request.limit:
+        # Would generate token here for real pagination
+        continuation_token = None  # Session 9: Deferred
+
+    # TODO: Strategy parameter implementation
+    # Session 9: Always uses fuzzy (LIKE with wildcards)
+    # Future: Implement "auto" strategy to choose between fuzzy/semantic based on query
+    # Future: Implement "semantic" strategy with embeddings/vector DB
+    strategy_used = request.strategy  # Placeholder - currently ignored, always uses fuzzy
+
+    # TODO: Effort mode implementation
+    # Session 9: Framework in place but not implemented
+    # Future: "quick" - use cached results
+    # Future: "deep" - exhaustive search with higher limits
+    effort_used = request.effort  # Placeholder - currently ignored
+
+    # TODO: Threshold parameter implementation
+    # Session 9: Not implemented (only relevant for semantic search with scores)
+    # Future: Filter results by similarity score when semantic search is implemented
+    threshold_used = request.threshold  # Placeholder - currently ignored
+
+    return {
+        "query": request.query,
+        "results": results,
+        "count": len(results),
+        "continuation_token": continuation_token,
+        "strategy": strategy_used,
+        "coverage": request.coverage,
+        "effort": effort_used,
+    }

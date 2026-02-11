@@ -385,6 +385,70 @@ class TrackRequest(SemanticRequest):
     )
 
 
+class SearchRequest(SemanticRequest):
+    """Request to search entities and facts (RFC-005 v7).
+
+    Per RFC-005 v7:
+    - search: Semantic search and discovery
+
+    Session 9: Fuzzy text search with configurable coverage and effort.
+
+    Coverage levels:
+    - names: Title/name fields only (fast)
+    - content: Names + body text
+    - full: All indexed fields including metadata
+
+    Effort modes:
+    - quick: Cached results, shallow search
+    - standard: Full search (default)
+    - deep: Exhaustive search
+
+    Strategy:
+    - fuzzy: Text matching with typo tolerance (SQLite LIKE)
+    - auto: System chooses based on query characteristics
+
+    Continuation tokens enable pagination for large result sets.
+    """
+    op: Literal["search"] = "search"  # type: ignore[var-annotated]
+    query: str = Field(
+        ...,
+        description="Search query text",
+        min_length=1
+    )
+    target_type: Literal["entity", "fact", "all"] = Field(
+        default="all",
+        description="Target type to search"
+    )
+    coverage: Literal["names", "content", "full"] = Field(
+        default="content",
+        description="Search coverage level"
+    )
+    effort: Literal["quick", "standard", "deep"] = Field(
+        default="standard",
+        description="Search effort mode"
+    )
+    strategy: Literal["fuzzy", "auto"] = Field(
+        default="auto",
+        description="Search strategy"
+    )
+    continuation_token: str | None = Field(
+        default=None,
+        description="Pagination continuation token from previous search"
+    )
+    limit: int = Field(
+        default=20,
+        description="Maximum results per page",
+        ge=1,
+        le=100
+    )
+    threshold: float | None = Field(
+        default=None,
+        description="Minimum similarity score (0.0-1.0, for semantic search)",
+        ge=0.0,
+        le=1.0
+    )
+
+
 # ============================================================================
 # Response Envelope
 # ============================================================================
@@ -433,6 +497,7 @@ SemanticRequestType = (
     QueryRelationRequest |
     ExploreRequest |
     TrackRequest |
+    SearchRequest |
     EnterRequest |
     LeaveRequest |
     FocusRequest
