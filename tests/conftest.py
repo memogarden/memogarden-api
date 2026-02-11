@@ -62,8 +62,6 @@ def guard_project_dir():
         ".ruff_cache", ".venv", "venv", "node_modules",
         # Subdirectories that are part of the project
         "api", "system", "tests", "scripts", "docs", "plan",
-        # Files that might be created during normal development
-        "*.db", "*.db-shm", "*.db-wal",
         # Malformed SQLite URIs from test failures (when uri=True is missing)
         "file:*",
     }
@@ -279,9 +277,9 @@ def flask_app():
     with patch('system.core._create_connection', _mock_create_connection):
         # Patch Soil.__init__ to use test database
         with patch.object(Soil, '__init__', _mock_soil_init):
-            from api.main import app
+            from api.main import create_app
 
-            app.config["TESTING"] = True
+            app = create_app(test_config={"TESTING": True})
 
             yield app
 
@@ -291,8 +289,6 @@ def flask_app():
     # Cleanup keeper connection (in-memory database auto-cleans)
     if _keeper_conn is not None:
         _keeper_conn.close()
-
-    # No temp file cleanup needed - using shared in-memory database (Session 5 fix)
 
 
 @pytest.fixture
