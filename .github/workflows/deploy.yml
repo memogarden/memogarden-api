@@ -1,0 +1,113 @@
+name: Deploy to RPi
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  deploy:
+    name: Deploy to Raspberry Pi
+    runs-on: ubuntu-latest
+    timeout-minutes: 15  # Give enough time for tests + deploy
+
+    steps:
+      - name: Trigger RPi Deploy Webhook
+        id: webhook
+        run: |
+          # Trigger the deploy webhook
+          response=$(curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.RPI_DEPLOY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            "${{ secrets.RPI_WEBHOOK_URL }}/webhook/deploy")
+
+          # Log the response
+          echo "Webhook response:"
+          echo "$response"
+
+          # Check if webhook was accepted
+          status=$(echo "$response" | jq -r '.status // empty')
+
+          if [ "$status" = "deploying" ]; then
+            echo "✓ Deploy started successfully on RPi"
+            echo "status=deploying" >> $GITHUB_OUTPUT
+          else
+            echo "✗ Failed to trigger deploy"
+            echo "$response"
+            exit 1
+          fi
+
+      - name: Wait for Deploy to Complete
+        id: wait
+        run: |
+          # Wait for deploy to complete (max 5 minutes)
+          max_attempts=60
+          attempt=1
+
+          echo "Waiting for deploy to complete..."
+
+          while [ $attempt -le $max_attempts ]; do
+            # Check deploy status
+            response=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.RPI_DEPLOY_TOKEN }}" \
+              "${{ secrets.RPI_WEBHOOK_URL }}/webhook/status")
+
+            # Check logs for completion
+            if echo "$response" | jq -r '.last_deploy_log' | grep -q "Deploy successful"; then
+              echo "✓ Deploy completed successfully"
+              echo "status=success" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+
+            # Check for failures
+            if echo "$response" | jq -r '.last_deploy_log' | grep -q "ERROR\|error\|failed"; then
+              echo "✗ Deploy failed"
+              echo "$response" | jq -r '.last_deploy_log' | tail -20
+              echo "status=failed" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+
+            echo "Attempt $attempt/$max_attempts: Deploy in progress..."
+            sleep 5
+            attempt=$((attempt + 1))
+          done
+
+          echo "✗ Deploy timed out"
+          echo "status=timeout" >> $GITHUB_OUTPUT
+          exit 1
+
+      - name: Deploy Summary
+        if: always()
+        run: |
+          status="${{ steps.wait.outputs.status }}"
+          echo "### Deploy Status: $status" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$status" = "success" ]; then
+            echo "✅ Deployment completed successfully" >> $GITHUB_STEP_SUMMARY
+          elif [ "$status" = "failed" ]; then
+            echo "❌ Deployment failed (check logs on RPi)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⏱️ Deployment timed out" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Notify on Failure
+        if: failure()
+        run: |
+          # Create GitHub issue on failure
+          gh issue create \
+            --title "Deploy to RPi failed: ${{ github.sha }}" \
+            --label "deployment" \
+            --body "Deploy failed for commit ${{ github.sha }}.
+
+          **Commit:** ${{ github.sha }}
+          **Author:** ${{ github.actor }}
+          **Branch:** ${{ github.ref_name }}
+
+          Check RPi logs for details:
+          \`\`\`
+          ssh rpi 'journalctl -u memogarden-webhook -n 50'
+          journalctl -u memogarden-deploy -n 50
+          \`\`\`"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
