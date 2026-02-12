@@ -41,8 +41,8 @@ jobs:
       - name: Wait for Deploy to Complete
         id: wait
         run: |
-          # Wait for deploy to complete (max 5 minutes)
-          max_attempts=60
+          # Wait for deploy to complete (max 15 minutes)
+          max_attempts=180
           attempt=1
 
           echo "Waiting for deploy to complete..."
@@ -53,27 +53,52 @@ jobs:
               -H "Authorization: Bearer ${{ secrets.RPI_DEPLOY_TOKEN }}" \
               "${{ secrets.RPI_WEBHOOK_URL }}/webhook/status")
 
-            # Check logs for completion
-            if echo "$response" | jq -r '.last_deploy_log' | grep -q "Deploy successful"; then
+            # Get the deploy status from the structured response
+            deploy_status=$(echo "$response" | jq -r '.deploy.status // empty')
+
+            # Check for successful completion
+            if [ "$deploy_status" = "success" ]; then
               echo "✓ Deploy completed successfully"
               echo "status=success" >> $GITHUB_OUTPUT
               exit 0
             fi
 
-            # Check for failures
-            if echo "$response" | jq -r '.last_deploy_log' | grep -q "ERROR\|error\|failed"; then
+            # Check for failed completion
+            if [ "$deploy_status" = "failed" ]; then
               echo "✗ Deploy failed"
-              echo "$response" | jq -r '.last_deploy_log' | tail -20
+              echo "Last deploy logs:"
+              echo "$response" | jq -r '.current_deploy_log // "No logs available"' | tail -30
               echo "status=failed" >> $GITHUB_OUTPUT
               exit 1
             fi
 
-            echo "Attempt $attempt/$max_attempts: Deploy in progress..."
+            # If status is "idle", the deploy may not have started yet or already finished
+            # Check last_complete timestamp to distinguish
+            last_complete=$(echo "$response" | jq -r '.deploy.last_complete // empty')
+            last_start=$(echo "$response" | jq -r '.deploy.last_start // empty')
+
+            if [ "$deploy_status" = "idle" ] && [ -n "$last_complete" ] && [ -n "$last_start" ]; then
+              # Parse timestamps and check if complete is after start
+              # If so, deploy finished but we missed the status transition
+              if [ "$last_complete" \> "$last_start" ]; then
+                echo "⚠ Deploy finished but status unclear, checking logs..."
+                current_log=$(echo "$response" | jq -r '.current_deploy_log // ""')
+                if echo "$current_log" | grep -q "Deploy successful"; then
+                  echo "✓ Deploy completed successfully (detected from logs)"
+                  echo "status=success" >> $GITHUB_OUTPUT
+                  exit 0
+                fi
+              fi
+            fi
+
+            echo "Attempt $attempt/$max_attempts: Deploy in progress... (status: $deploy_status)"
             sleep 5
             attempt=$((attempt + 1))
           done
 
           echo "✗ Deploy timed out"
+          echo "Last deploy logs:"
+          echo "$response" | jq -r '.current_deploy_log // "No logs available"' | tail -30
           echo "status=timeout" >> $GITHUB_OUTPUT
           exit 1
 
