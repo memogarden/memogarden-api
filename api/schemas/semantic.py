@@ -37,7 +37,8 @@ class SemanticRequest(BaseModel):
         "enter", "leave", "focus", "rejoin",
         "track", "search",
         "register",
-        "commit_artifact", "get_artifact_at_commit", "diff_commits"
+        "commit_artifact", "get_artifact_at_commit", "diff_commits",
+        "fold"
     ] = Field(..., description="Operation verb")
     bypass_semantic_api: bool = Field(default=False, description="If True, skip audit logging (internal use)")
 
@@ -572,6 +573,37 @@ class DiffCommitsRequest(SemanticRequest):
     )
 
 
+class FoldRequest(SemanticRequest):
+    """Request to fold a conversation branch.
+
+    Per Project Studio spec (§6.3):
+    - fold: Collapse conversation branch with summary
+    - Adds summary object to ConversationLog
+    - Sets collapsed=true on the log
+    - Branch remains visible and can continue (messages can be appended after fold)
+
+    Per RFC-005: fold is a single-word verb applicable to any entity/fact.
+    """
+    op: Literal["fold"] = "fold"  # type: ignore[var-annotated]
+    target: str = Field(
+        ...,
+        description="UUID of ConversationLog to fold (with or without core_ prefix)"
+    )
+    summary_content: str = Field(
+        ...,
+        description="Summary text for collapsed branch",
+        min_length=1
+    )
+    author: Literal["operator", "agent", "system"] = Field(
+        ...,
+        description="Who created the summary"
+    )
+    fragment_ids: list[str] = Field(
+        default_factory=list,
+        description="Fragment IDs referenced in the summary"
+    )
+
+
 # ============================================================================
 # Type aliases for request validation
 # ============================================================================
@@ -595,5 +627,6 @@ SemanticRequestType = (
     FocusRequest |
     CommitArtifactRequest |
     GetArtifactAtCommitRequest |
-    DiffCommitsRequest
+    DiffCommitsRequest |
+    FoldRequest
 )

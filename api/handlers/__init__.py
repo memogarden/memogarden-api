@@ -32,6 +32,10 @@ from .artifact import (
     handle_get_artifact_at_commit,
     handle_diff_commits,
 )
+from .conversation import (
+    handle_fold,
+    handle_get_conversation,
+)
 from .soil import handle_add, handle_amend, handle_get_fact, handle_query_facts
 
 __all__ = [
@@ -64,4 +68,7 @@ __all__ = [
     "handle_commit_artifact",
     "handle_get_artifact_at_commit",
     "handle_diff_commits",
+    # Conversation bundle (Session 18)
+    "handle_fold",
+    "handle_get_conversation",
 ]
