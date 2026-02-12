@@ -34,6 +34,7 @@ from pydantic import ValidationError
 
 from api.handlers import core as core_handlers
 from api.handlers import soil as soil_handlers
+from api.handlers import artifact as artifact_handlers
 from api.schemas.semantic import (
     AddRequest,
     AmendRequest,
@@ -53,6 +54,9 @@ from api.schemas.semantic import (
     SemanticResponse,
     TrackRequest,
     UnlinkRequest,
+    CommitArtifactRequest,
+    GetArtifactAtCommitRequest,
+    DiffCommitsRequest,
 )
 from system.exceptions import (
     AuthenticationError,
@@ -91,6 +95,10 @@ HANDLERS = {
     "enter": core_handlers.handle_enter,
     "leave": core_handlers.handle_leave,
     "focus": core_handlers.handle_focus,
+    # Artifact delta bundle (Session 17)
+    "commit_artifact": artifact_handlers.handle_commit_artifact,
+    "get_artifact_at_commit": artifact_handlers.handle_get_artifact_at_commit,
+    "diff_commits": artifact_handlers.handle_diff_commits,
 }
 
 
@@ -356,6 +364,9 @@ def _validate_request(request_json: dict, op: str) -> SemanticRequest:
         "enter": EnterRequest,
         "leave": LeaveRequest,
         "focus": FocusRequest,
+        "commit_artifact": CommitArtifactRequest,
+        "get_artifact_at_commit": GetArtifactAtCommitRequest,
+        "diff_commits": DiffCommitsRequest,
     }
 
     schema = request_schemas.get(op)

@@ -36,7 +36,8 @@ class SemanticRequest(BaseModel):
         "link", "unlink", "edit_relation", "get_relation", "query_relation", "explore",
         "enter", "leave", "focus", "rejoin",
         "track", "search",
-        "register"
+        "register",
+        "commit_artifact", "get_artifact_at_commit", "diff_commits"
     ] = Field(..., description="Operation verb")
     bypass_semantic_api: bool = Field(default=False, description="If True, skip audit logging (internal use)")
 
@@ -481,6 +482,97 @@ class QueryResult(BaseModel):
 
 
 # ============================================================================
+# Artifact Delta Request Types (Session 17)
+# ============================================================================
+
+class CommitArtifactRequest(SemanticRequest):
+    """Request to commit artifact delta with optimistic locking.
+
+    Per Project Studio spec (§6.2):
+    - commit_artifact: Apply delta operations to artifact
+    - Uses optimistic locking via hash-based conflict detection
+    - Creates ArtifactDelta Item in Soil with triggers relation
+
+    Delta operations syntax:
+    - +15:^abc     Add fragment abc at line 15
+    - -23           Remove line 23
+    - ~18:^b2e→^c3d   Replace line 18
+    - >12@30        Move line 12 to position 30
+    """
+    op: Literal["commit_artifact"] = "commit_artifact"  # type: ignore[var-annotated]
+    artifact: str = Field(
+        ...,
+        description="UUID of artifact to modify (with or without core_ prefix)"
+    )
+    ops: str = Field(
+        ...,
+        description="Delta operations string (multi-line, one op per line)",
+        min_length=1
+    )
+    references: list[str] = Field(
+        default_factory=list,
+        description="List of fragment/artifact UUIDs referenced in operations"
+    )
+    based_on_hash: str = Field(
+        ...,
+        description="Current artifact hash for optimistic locking (8-char SHA prefix)",
+        min_length=8,
+        max_length=8
+    )
+    source_message: str | None = Field(
+        default=None,
+        description="Optional UUID of source Message (for triggers relation)"
+    )
+
+
+class GetArtifactAtCommitRequest(SemanticRequest):
+    """Request to retrieve artifact state at specific commit.
+
+    Per Project Studio spec (§6.2):
+    - get_artifact_at_commit: Retrieve artifact content as of commit hash
+    - Enables historical reconstruction and rollback
+    """
+    op: Literal["get_artifact_at_commit"] = "get_artifact_at_commit"  # type: ignore[var-annotated]
+    artifact: str = Field(
+        ...,
+        description="UUID of artifact (with or without core_ prefix)"
+    )
+    commit_hash: str = Field(
+        ...,
+        description="Target commit hash (8-character SHA prefix)",
+        min_length=8,
+        max_length=8
+    )
+
+
+class DiffCommitsRequest(SemanticRequest):
+    """Request to compare two artifact commits.
+
+    Per Project Studio spec (§6.2):
+    - diff_commits: Compare two commits with line-by-line diff
+    - Returns structured diff for UI rendering
+    - Supports merge conflict visualization
+    """
+    op: Literal["diff_commits"] = "diff_commits"  # type: ignore[var-annotated]
+    artifact: str = Field(
+        ...,
+        description="UUID of artifact (with or without core_ prefix)"
+    )
+    commit_a: str = Field(
+        ...,
+        description="First commit hash (8-character SHA prefix)",
+        min_length=8,
+        max_length=8
+    )
+    commit_b: str = Field(
+        ...,
+        description="Second commit hash (8-character SHA prefix)",
+        min_length=8,
+        max_length=8
+    )
+
+
+# ============================================================================
 # Type aliases for request validation
 # ============================================================================
 
@@ -500,5 +592,8 @@ SemanticRequestType = (
     SearchRequest |
     EnterRequest |
     LeaveRequest |
-    FocusRequest
+    FocusRequest |
+    CommitArtifactRequest |
+    GetArtifactAtCommitRequest |
+    DiffCommitsRequest
 )
