@@ -103,6 +103,7 @@ HANDLERS = {
     "diff_commits": artifact_handlers.handle_diff_commits,
     # Conversation bundle (Session 18)
     "fold": conversation_handlers.handle_fold,
+    "get_conversation": conversation_handlers.handle_get_conversation,
 }
 
 
@@ -372,6 +373,7 @@ def _validate_request(request_json: dict, op: str) -> SemanticRequest:
         "get_artifact_at_commit": GetArtifactAtCommitRequest,
         "diff_commits": DiffCommitsRequest,
         "fold": FoldRequest,
+        "get_conversation": GetRequest,
     }
 
     schema = request_schemas.get(op)

@@ -34,11 +34,12 @@ class SemanticRequest(BaseModel):
         "create", "edit", "forget", "get", "query",
         "add", "amend",
         "link", "unlink", "edit_relation", "get_relation", "query_relation", "explore",
-        "enter", "leave", "focus", "rejoin",
+        "enter", "leave", "focus",
+        # "rejoin",  # TODO: Not yet implemented (RFC-003 v4)
         "track", "search",
-        "register",
+        # "register",  # TODO: Not yet implemented (RFC-005 v7)
         "commit_artifact", "get_artifact_at_commit", "diff_commits",
-        "fold"
+        "fold", "get_conversation"
     ] = Field(..., description="Operation verb")
     bypass_semantic_api: bool = Field(default=False, description="If True, skip audit logging (internal use)")
 
