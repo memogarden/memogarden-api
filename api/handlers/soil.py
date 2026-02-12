@@ -6,14 +6,14 @@ Implements the Soil bundle verbs from RFC-005 v7:
 - get: Get fact by UUID
 - query: Query facts with filters
 
-Session 2: Baseline item types only (Note, Message, Email, ToolCall, etc.)
+Session 2: Baseline fact types only (Note, Message, Email, ToolCall, etc.)
 """
 
 import json
 import logging
 
-from system.soil import Item, get_soil
-from system.soil.item import current_day, generate_soil_uuid
+from system.soil import Fact, get_soil
+from system.soil.fact import current_day, generate_soil_uuid
 from system.utils import isodatetime, uid
 
 from ..schemas.semantic import (
@@ -26,8 +26,8 @@ from .decorators import with_audit
 
 logger = logging.getLogger(__name__)
 
-# Baseline item types that can be added via Semantic API
-# Session 2: These are the types defined in memogarden/schemas/types/items/
+# Baseline fact types that can be added via Semantic API
+# Session 2: These are the types defined in memogarden/schemas/types/facts/
 BASELINE_ITEM_TYPES = {
     "Note",
     "Message",
@@ -42,8 +42,8 @@ BASELINE_ITEM_TYPES = {
 # Helper Functions
 # ============================================================================
 
-def _item_to_fact_response(item) -> dict:
-    """Convert an Item object to fact response dict.
+def _fact_to_response(item) -> dict:
+    """Convert a Fact object to fact response dict.
 
     Adds soil_ prefix to UUIDs and includes all fact fields.
     """
@@ -115,9 +115,9 @@ def _row_to_fact_response(row) -> dict:
 
 @with_audit
 def handle_add(request: AddRequest, actor: str) -> dict:
-    """Handle add verb - add a new fact (Item) to Soil.
+    """Handle add verb - add a new fact (Fact) to Soil.
 
-    Session 2: Supports baseline item types only.
+    Session 2: Supports baseline fact types only.
     Facts are immutable once created. Use `amend` to create superseding facts.
 
     Args:
@@ -144,8 +144,8 @@ def handle_add(request: AddRequest, actor: str) -> dict:
         if canonical_at is None:
             canonical_at = now
 
-        # Create Item
-        item = Item(
+        # Create Fact
+        item = Fact(
             uuid=generate_soil_uuid(),
             _type=request.type,
             realized_at=now,
@@ -157,12 +157,12 @@ def handle_add(request: AddRequest, actor: str) -> dict:
         )
 
         # Create item in Soil
-        item_uuid = soil.create_item(item)
+        item_uuid = soil.create_fact(item)
 
         # Fetch created item
-        item = soil.get_item(item_uuid)
+        item = soil.get_fact(item_uuid)
 
-        return _item_to_fact_response(item)
+        return _fact_to_response(item)
 
 
 @with_audit
@@ -186,7 +186,7 @@ def handle_amend(request: AmendRequest, actor: str) -> dict:
         target_id = uid.strip_prefix(request.target)
 
         # Get original item
-        original = soil.get_item(target_id)
+        original = soil.get_fact(target_id)
         if original is None:
             from system.exceptions import ResourceNotFound
             raise ResourceNotFound(
@@ -220,8 +220,8 @@ def handle_amend(request: AmendRequest, actor: str) -> dict:
         if request.metadata:
             new_metadata.update(request.metadata)
 
-        # Create new Item with amended data
-        amended_item = Item(
+        # Create new Fact with amended data
+        amended_item = Fact(
             uuid=generate_soil_uuid(),
             _type=original._type,
             realized_at=now,
@@ -233,7 +233,7 @@ def handle_amend(request: AmendRequest, actor: str) -> dict:
         )
 
         # Create amended item
-        amended_uuid = soil.create_item(amended_item)
+        amended_uuid = soil.create_fact(amended_item)
 
         # Update original to mark as superseded
         soil.mark_superseded(
@@ -245,7 +245,7 @@ def handle_amend(request: AmendRequest, actor: str) -> dict:
         # Create supersedes relation
         from system.soil.relation import SystemRelation
         relation = SystemRelation(
-            uuid=generate_soil_uuid(),  # Uses module-level import from system.soil.item
+            uuid=generate_soil_uuid(),  # Uses module-level import from system.soil.fact
             kind="supersedes",
             source=amended_uuid,
             source_type="item",
@@ -260,9 +260,9 @@ def handle_amend(request: AmendRequest, actor: str) -> dict:
         soil.create_relation(relation)
 
         # Fetch amended item
-        amended = soil.get_item(amended_uuid)
+        amended = soil.get_fact(amended_uuid)
 
-        return _item_to_fact_response(amended)
+        return _fact_to_response(amended)
 
 
 @with_audit
@@ -280,7 +280,7 @@ def handle_get_fact(request: GetRequest, actor: str) -> dict:
         dict with fact data
     """
     with get_soil() as soil:
-        item = soil.get_item(request.target)
+        item = soil.get_fact(request.target)
 
         if item is None:
             from system.exceptions import ResourceNotFound
@@ -289,7 +289,7 @@ def handle_get_fact(request: GetRequest, actor: str) -> dict:
                 details={"target": request.target}
             )
 
-        return _item_to_fact_response(item)
+        return _fact_to_response(item)
 
 
 @with_audit

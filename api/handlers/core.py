@@ -634,7 +634,7 @@ def handle_explore(request: ExploreRequest, actor: str) -> dict:
             # Try to get from Soil
             try:
                 with get_soil() as soil:
-                    item = soil.get_item(node_uuid)
+                    item = soil.get_fact(node_uuid)
                     if item:
                         nodes.append({
                             "uuid": uid.add_soil_prefix(item.uuid),
@@ -642,7 +642,7 @@ def handle_explore(request: ExploreRequest, actor: str) -> dict:
                             "type": item._type,
                         })
             except ResourceNotFound:
-                # Item not found in Soil either - skip
+                # Fact not found in Soil either - skip
                 pass
             except Exception as e:
                 # Log unexpected errors
@@ -948,7 +948,7 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
             for entity in entity_rows:
                 entity_results.append(_add_core_prefix(entity))
 
-    # Search facts (Soil/Items) - using public API
+    # Search facts (Soil/Facts) - using public API
     if request.target_type in ("fact", "all"):
         with get_soil() as soil:
             # Use public search API instead of direct _conn access

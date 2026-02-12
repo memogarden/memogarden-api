@@ -9,7 +9,7 @@ Tests the Action and ActionResult fact creation per RFC-005 v7 Section 7:
 
 import pytest
 from system.soil import get_soil
-from system.soil.item import generate_soil_uuid
+from system.soil.fact import generate_soil_uuid
 
 
 class TestAuditFacts:

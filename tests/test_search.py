@@ -112,13 +112,13 @@ class TestSearchVerb:
 
     def test_search_facts_by_content(self, client, auth_headers):
         """Test searching facts by content."""
-        from system.soil.item import Item, generate_soil_uuid
+        from system.soil.fact import Fact, generate_soil_uuid
         from system.utils import isodatetime
 
         with get_soil() as soil:
-            # Create test facts using Item dataclass
+            # Create test facts using Fact dataclass
             now = isodatetime.now()
-            item1 = Item(
+            item1 = Fact(
                 uuid=generate_soil_uuid(),
                 _type="Note",
                 realized_at=now,
@@ -126,9 +126,9 @@ class TestSearchVerb:
                 data={"text": "Meeting Notes - Discussed budget planning for Q1"},
                 metadata=None
             )
-            soil.create_item(item1)
+            soil.create_fact(item1)
 
-            item2 = Item(
+            item2 = Fact(
                 uuid=generate_soil_uuid(),
                 _type="Note",
                 realized_at=now,
@@ -136,7 +136,7 @@ class TestSearchVerb:
                 data={"text": "Shopping List - Buy groceries and coffee"},
                 metadata=None
             )
-            soil.create_item(item2)
+            soil.create_fact(item2)
 
         # Search for "budget"
         response = client.post(
@@ -163,7 +163,7 @@ class TestSearchVerb:
 
     def test_search_all_target_type(self, client, auth_headers):
         """Test searching across both entities and facts."""
-        from system.soil.item import Item, generate_soil_uuid
+        from system.soil.fact import Fact, generate_soil_uuid
         from system.utils import isodatetime
 
         with get_core() as core:
@@ -174,9 +174,9 @@ class TestSearchVerb:
             )
 
         with get_soil() as soil:
-            # Create test fact using Item dataclass
+            # Create test fact using Fact dataclass
             now = isodatetime.now()
-            item = Item(
+            item = Fact(
                 uuid=generate_soil_uuid(),
                 _type="Note",
                 realized_at=now,
@@ -184,7 +184,7 @@ class TestSearchVerb:
                 data={"text": "Project Notes - Draft report outline"},
                 metadata=None
             )
-            soil.create_item(item)
+            soil.create_fact(item)
 
         # Search for "project" across all types
         response = client.post(

@@ -41,7 +41,7 @@ from functools import wraps
 
 from system.core import get_core
 from system.soil import get_soil
-from system.soil.item import Item, current_day, generate_soil_uuid
+from system.soil.fact import Fact, current_day, generate_soil_uuid
 from system.soil.relation import SystemRelation
 from system.utils import isodatetime, uid
 from system.exceptions import (
@@ -105,7 +105,7 @@ def with_audit(handler_func):
 
         # Create Action fact immediately (separate context for immediate commit)
         action_uuid = generate_soil_uuid()
-        action_item = Item(
+        action_item = Fact(
             uuid=action_uuid,
             _type="Action",
             realized_at=isodatetime.now(),
@@ -122,7 +122,7 @@ def with_audit(handler_func):
 
         # Use separate context for Action (immediate commit so other agents can see "in progress")
         with get_soil() as soil:
-            soil.create_item(action_item)
+            soil.create_fact(action_item)
             # Commits on __exit__
 
         try:
@@ -133,7 +133,7 @@ def with_audit(handler_func):
             duration_ms = int((time.time() - start_time) * 1000)
             actionresult_uuid = generate_soil_uuid()
 
-            actionresult_item = Item(
+            actionresult_item = Fact(
                 uuid=actionresult_uuid,
                 _type="ActionResult",
                 realized_at=isodatetime.now(),
@@ -149,7 +149,7 @@ def with_audit(handler_func):
 
             # Create ActionResult and relation in single transaction
             with get_soil() as soil:
-                soil.create_item(actionresult_item)
+                soil.create_fact(actionresult_item)
 
                 # Create result_of relation
                 relation = SystemRelation(
@@ -185,7 +185,7 @@ def with_audit(handler_func):
             # Only create ActionResult if Action was created successfully
             if action_uuid:
                 try:
-                    actionresult_item = Item(
+                    actionresult_item = Fact(
                         uuid=actionresult_uuid,
                         _type="ActionResult",
                         realized_at=isodatetime.now(),
@@ -207,7 +207,7 @@ def with_audit(handler_func):
 
                     # Create ActionResult and relation in single transaction
                     with get_soil() as soil:
-                        soil.create_item(actionresult_item)
+                        soil.create_fact(actionresult_item)
 
                         # Create result_of relation
                         relation = SystemRelation(
