@@ -54,10 +54,39 @@ BASELINE_ENTITY_TYPES = {
 # Helper Functions
 # ============================================================================
 
+def _add_core_prefix(entity: dict) -> dict:
+    """Add core_ prefix to entity UUID fields.
+
+    Args:
+        entity: Entity dict from Core API (has parsed JSON data)
+
+    Returns:
+        Entity dict with prefixed UUIDs
+    """
+    result = entity.copy()
+
+    # Add core_ prefix to UUID fields
+    result["uuid"] = uid.add_core_prefix(entity["uuid"])
+
+    if entity.get("superseded_by"):
+        result["superseded_by"] = uid.add_core_prefix(entity["superseded_by"])
+
+    if entity.get("group_id"):
+        result["group_id"] = uid.add_core_prefix(entity["group_id"])
+
+    if entity.get("derived_from"):
+        result["derived_from"] = uid.add_core_prefix(entity["derived_from"])
+
+    return result
+
+
 def _row_to_entity_response(row, entity_type: str = "Entity") -> dict:
     """Convert a database row to entity response dict.
 
     Adds core_ prefix to UUIDs and includes all entity fields.
+
+    Note: This is kept for backward compatibility but _add_core_prefix
+    should be used for dicts returned by Core API.
     """
     entity_uuid = row["uuid"]
 
@@ -130,13 +159,13 @@ def handle_create(request: CreateRequest, actor: str) -> dict:
     with get_core() as core:
         entity_uuid = core.entity.create(
             entity_type=request.type,
-            data=json.dumps(request.data) if request.data else json.dumps({}),
+            data=request.data if request.data else {},
         )
 
-        # Fetch created entity
-        row = core.entity.get_by_id(entity_uuid)
+        # Fetch created entity (now returns dict with parsed JSON)
+        entity = core.entity.get_by_id(entity_uuid)
 
-        return _row_to_entity_response(row)
+        return _add_core_prefix(entity)
 
 
 @with_audit
@@ -154,8 +183,8 @@ def handle_get(request: GetRequest, actor: str) -> dict:
         dict with entity data
     """
     with get_core() as core:
-        row = core.entity.get_by_id(request.target)
-        return _row_to_entity_response(row)
+        entity = core.entity.get_by_id(request.target)
+        return _add_core_prefix(entity)
 
 
 @with_audit
@@ -199,7 +228,7 @@ def handle_edit(request: EditRequest, actor: str) -> dict:
         # Fetch updated entity
         row = core.entity.get_by_id(entity_id)
 
-        return _row_to_entity_response(row)
+        return _add_core_prefix(row)
 
 
 @with_audit
@@ -230,7 +259,7 @@ def handle_forget(request: ForgetRequest, actor: str) -> dict:
         # Return the original entity (now superseded)
         row = core.entity.get_by_id(entity_id)
 
-        return _row_to_entity_response(row)
+        return _add_core_prefix(row)
 
 
 @with_audit
@@ -256,8 +285,8 @@ def handle_query(request: QueryRequest, actor: str) -> dict:
             offset=request.start_index,
         )
 
-        # Convert rows to response format
-        results = [_row_to_entity_response(row) for row in rows]
+        # Convert rows to response format (already dicts with parsed JSON)
+        results = [_add_core_prefix(entity) for entity in rows]
 
         return {
             "results": results,
@@ -915,9 +944,9 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
                 limit=request.limit
             )
 
-            # Convert to response format
-            for row in entity_rows:
-                entity_results.append(_row_to_entity_response(row))
+            # Convert to response format (already dicts with parsed JSON)
+            for entity in entity_rows:
+                entity_results.append(_add_core_prefix(entity))
 
     # Search facts (Soil/Items) - using public API
     if request.target_type in ("fact", "all"):
