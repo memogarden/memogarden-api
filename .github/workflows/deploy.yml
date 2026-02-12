@@ -96,6 +96,7 @@ jobs:
         run: |
           # Create GitHub issue on failure
           gh issue create \
+            --repo memogarden/memogarden-api \
             --title "Deploy to RPi failed: ${{ github.sha }}" \
             --label "deployment" \
             --body "Deploy failed for commit ${{ github.sha }}.

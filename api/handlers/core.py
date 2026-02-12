@@ -209,11 +209,10 @@ def handle_edit(request: EditRequest, actor: str) -> dict:
     entity_id = uid.strip_prefix(request.target)
 
     with get_core() as core:
-        # Get current entity state
+        # Get current entity state (Core API returns dict with parsed JSON data)
         current = core.entity.get_by_id(entity_id)
-        # sqlite3.Row doesn't have .get(), use direct access
-        data_value = current["data"]
-        current_data = json.loads(data_value) if data_value else {}
+        # Data is already a dict (parsed by Core API)
+        current_data = current.get("data") or {}
 
         # Apply set operations
         if request.set:
