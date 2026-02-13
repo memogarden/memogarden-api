@@ -123,42 +123,54 @@ def handle_verb(request: Request, actor: str, core) -> dict:
 
 ### ⚠️ Standard Test Execution (MUST follow)
 
-**IMPORTANT:** Always run tests using `poetry run pytest` to ensure the correct Poetry environment is used. Both `memogarden-api` and `memogarden-system` use the same Poetry environment at `/workspaces/memogarden/.venv`.
+**IMPORTANT:** Always use the standardized `run_tests.sh` script for test execution. This ensures consistent behavior across environments and provides grep-able output for automation.
 
 ```bash
-# From project root, use the test script (recommended)
-./scripts/test.sh
+# From project root
+./memogarden-api/run_tests.sh
 
 # Or change to API directory first
-cd memogarden-api && poetry run pytest
-```
-
-**Option 2: Use the test script (from project root)**
-
-```bash
-# Script handles directory change automatically
-./scripts/test.sh
-
-# With arguments (passed through to pytest)
-./scripts/test.sh -xvs
-./scripts/test.sh tests/test_context.py::test_enter_scope_adds_to_active_set
+cd memogarden-api && ./run_tests.sh
 ```
 
 **Standard Commands:**
 
-| Task | Command (from memogarden-api) | Command (from root using script) |
-|------|-------------------------------|-----------------------------------|
-| Run all tests | `poetry run pytest` | `./scripts/test.sh` |
-| Run with verbose output | `poetry run pytest -xvs` | `./scripts/test.sh -xvs` |
-| Run specific test file | `poetry run pytest tests/test_semantic_api.py` | `./scripts/test.sh tests/test_semantic_api.py` |
-| Run specific test | `poetry run pytest tests/test_context.py::test_enter_scope_adds_to_active_set -xvs` | `./scripts/test.sh tests/test_context.py::test_enter_scope_adds_to_active_set -xvs` |
-| Run with coverage | `poetry run pytest --cov=api --cov-report=html` | `./scripts/test.sh --cov=api --cov-report=html` |
-| Stop on first failure | `poetry run pytest -x` | `./scripts/test.sh -x` |
+| Task | Command |
+|------|---------|
+| Run all tests | `./run_tests.sh` |
+| Run with verbose output | `./run_tests.sh -xvs` |
+| Run specific test file | `./run_tests.sh tests/test_semantic_api.py` |
+| Run specific test | `./run_tests.sh tests/test_context.py::test_enter_scope_adds_to_active_set -xvs` |
+| Run with coverage | `./run_tests.sh --cov=api --cov-report=html` |
+| Stop on first failure | `./run_tests.sh -x` |
+| Get summary only (for agents) | `./run_tests.sh --tb=no -q 2>&1 | tail -n 6` |
 
-**Why this matters:**
-- Running from the root directory causes pytest to collect tests from other directories (e.g., `hacm/tests/`), leading to import errors
-- Using `poetry run pytest` ensures the correct Poetry environment is used (doesn't rely on venv activation)
-- The `memogarden-api/pyproject.toml` configures test discovery correctly
+**Why use run_tests.sh:**
+- Ensures correct Poetry environment is used
+- Works from any directory (changes to project dir automatically)
+- Provides grep-able output with test run ID and summary
+- Last 6 lines always contain summary (use `tail -n 6` for quick status check)
+
+**For quick status check (agents):**
+```bash
+# Get just the summary (6 lines) without full test output
+./run_tests.sh --tb=no -q 2>&1 | tail -n 6
+```
+
+**Example output summary:**
+```
+╔═══════════════════════════════════════════════════════════╗
+║  Test Summary                                               ║
+╠═══════════════════════════════════════════════════════════╣
+║  Status: PASSED                                            ║
+║  Tests: 165 passed                                      ║
+║  Duration: 8.14s                                        ║
+║  Test Run ID: 20260213-064712                                  ║
+╚═══════════════════════════════════════════════════════════╝
+```
+
+**Legacy method (deprecated):**
+The old `scripts/test.sh` script is still available but deprecated. Use `run_tests.sh` instead.
 
 ## Writing Tests
 

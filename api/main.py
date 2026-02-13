@@ -297,6 +297,7 @@ def _register_routes(app):
 def _register_blueprints(app):
     """Register blueprints for the app."""
     from . import semantic
+    from . import events
     from .middleware import api as auth_api
     from .middleware import ui as auth_ui
     from .v1 import api_v1_bp
@@ -312,6 +313,10 @@ def _register_blueprints(app):
 
     # Semantic API (/mg endpoint)
     app.register_blueprint(semantic.semantic_bp)
+
+    # Server-Sent Events (/mg/events endpoint)
+    # Session 20A: SSE Infrastructure
+    app.register_blueprint(events.events_bp)
 
 
 # Legacy global app for backward compatibility (will be removed)
