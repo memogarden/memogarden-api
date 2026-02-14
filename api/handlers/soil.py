@@ -267,7 +267,7 @@ def handle_amend(request: AmendRequest, actor: str) -> dict:
         )
 
         # Create supersedes relation
-        from system.soil.relation import SystemRelation
+        from system.soil import SystemRelation
         relation = SystemRelation(
             uuid=generate_soil_uuid(),  # Uses module-level import from system.soil.fact
             kind="supersedes",
