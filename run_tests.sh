@@ -63,9 +63,22 @@ done
 # INVOKE CENTRALIZED ENTRYPOINT
 # ============================================================================
 
-# Change to this script's directory before calling entrypoint
+# Get this script's directory before changing directories
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Find MemoGarden root: go up two levels from subproject directory
+MG_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Validate we're in the right place (should end with "memogarden")
+if [[ ! "$MG_ROOT" =~ memogarden$ ]]; then
+    echo "ERROR: Unexpected project root: $MG_ROOT" >&2
+    echo "Path should end with 'memogarden'" >&2
+    exit 1
+fi
+
+# Change to subproject directory before calling entrypoint
 # This ensures poetry finds the correct pyproject.toml
-cd "$(dirname "${BASH_SOURCE[0]}")"
+cd "$SCRIPT_DIR"
 
 # Call the centralized test entrypoint with all arguments
-exec /workspaces/memogarden/scripts/test_entrypoint.sh "${PYTEST_ARGS[@]}"
+exec "$MG_ROOT/scripts/test_entrypoint.sh" "${PYTEST_ARGS[@]}"
