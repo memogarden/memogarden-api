@@ -10,7 +10,7 @@ Tests the Relations bundle verbs from RFC-002:
 
 import pytest
 from system.core import get_core
-from system.utils import uid
+from utils import uid
 
 
 class TestUnlinkVerb:

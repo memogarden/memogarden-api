@@ -29,7 +29,7 @@ os.environ["JWT_SECRET_KEY"] = "test-secret-key"
 os.environ["BYPASS_LOCALHOST_CHECK"] = "true"
 
 # Import isodatetime for test fixtures (must be after env vars are set)
-from system.utils import isodatetime  # noqa: E402
+from utils import datetime as isodatetime  # noqa: E402
 
 # ============================================================================
 # Project Directory Guard
@@ -462,7 +462,7 @@ def test_user_app(flask_app):
 
     from api.middleware.service import hash_password
     from system.core import _create_connection
-    from system.utils import hash_chain
+    from utils import hash_chain
 
     user_id = str(uuid.uuid4())
     username = "testuser"
@@ -511,7 +511,7 @@ def _create_jwt_token(user_id: str, username: str, is_admin: bool = True) -> str
     """Helper function to create a JWT token for testing."""
     import jwt
 
-    from system.utils import isodatetime
+    from utils import datetime as isodatetime
 
     now_ts = isodatetime.now_unix()
     expiry_ts = now_ts + (30 * 24 * 60 * 60)  # 30 days
@@ -561,7 +561,7 @@ def auth_headers_apikey(test_user_app):
 
     from api.middleware.api_keys import get_api_key_prefix, hash_api_key
     from system.core import _create_connection
-    from system.utils import hash_chain, secret
+    from utils import hash_chain, secret
 
     # Generate API key
     api_key_id = str(uuid.uuid4())

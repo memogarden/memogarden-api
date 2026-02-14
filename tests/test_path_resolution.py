@@ -106,7 +106,7 @@ class TestCorePathResolution:
 
     def test_core_uses_explicit_path(self, tmp_path):
         """Test that Core uses explicit path when provided."""
-        from system.config import Settings
+        from utils.config import Settings
         from system.core import _create_connection
 
         db_path = tmp_path / "test_core.db"
@@ -126,7 +126,7 @@ class TestCorePathResolution:
 
     def test_core_uses_env_var_path(self, tmp_path, monkeypatch):
         """Test that Core uses environment variable path when database_path is None."""
-        from system.config import Settings
+        from utils.config import Settings
         from system.core import _create_connection
 
         db_path = tmp_path / "env_core.db"
@@ -148,7 +148,7 @@ class TestCorePathResolution:
 
     def test_core_uses_data_dir_path(self, tmp_path, monkeypatch):
         """Test that Core uses data directory path when database_path is None."""
-        from system.config import Settings
+        from utils.config import Settings
         from system.core import _create_connection
 
         data_dir = tmp_path / "data"

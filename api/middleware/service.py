@@ -13,7 +13,7 @@ import sqlite3
 
 import bcrypt
 
-from system.utils import isodatetime, uid
+from utils import datetime as isodatetime, uid
 
 from ..config import settings
 from .schemas import UserCreate, UserResponse
@@ -114,7 +114,7 @@ def create_user(conn: sqlite3.Connection, data: UserCreate, is_admin: bool = Tru
     # Include required fields for new schema (hash, version, data)
     import json
 
-    from system.utils import hash_chain
+    from utils import hash_chain
     entity_hash = hash_chain.compute_entity_hash(
         entity_type="User",
         created_at=now,

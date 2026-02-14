@@ -31,7 +31,7 @@ from system.core.context import (
     PRIMITIVE_TYPES,
 )
 from system.exceptions import ResourceNotFound, ValidationError
-from system.utils import isodatetime
+from utils import datetime as isodatetime
 
 
 # ============================================================================

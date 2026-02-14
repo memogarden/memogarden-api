@@ -10,7 +10,7 @@ from flask import Flask
 
 from system.core import get_core
 from system.soil import get_soil
-from system.utils import uid
+from utils import uid
 
 
 # ============================================================================
@@ -113,7 +113,7 @@ class TestSearchVerb:
     def test_search_facts_by_content(self, client, auth_headers):
         """Test searching facts by content."""
         from system.soil.fact import Fact, generate_soil_uuid
-        from system.utils import isodatetime
+        from utils import datetime as isodatetime
 
         with get_soil() as soil:
             # Create test facts using Fact dataclass
@@ -164,7 +164,7 @@ class TestSearchVerb:
     def test_search_all_target_type(self, client, auth_headers):
         """Test searching across both entities and facts."""
         from system.soil.fact import Fact, generate_soil_uuid
-        from system.utils import isodatetime
+        from utils import datetime as isodatetime
 
         with get_core() as core:
             # Create test entity

@@ -12,7 +12,7 @@ from datetime import timedelta
 
 import jwt
 
-from system.utils import isodatetime
+from utils import datetime as isodatetime
 
 from ..config import settings
 from .schemas import TokenPayload, UserResponse

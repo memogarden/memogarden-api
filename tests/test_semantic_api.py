@@ -1097,7 +1097,7 @@ class TestLinkVerb:
         target_uuid = target_response.get_json()["result"]["uuid"]
 
         # Strip prefixes
-        from system.utils import uid
+        from utils import uid
         source_stripped = uid.strip_prefix(source_uuid)
         target_stripped = uid.strip_prefix(target_uuid)
 

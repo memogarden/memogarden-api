@@ -5,6 +5,10 @@ Implements Semantic API verbs for artifact delta operations:
 - commit_artifact: Apply delta operations with optimistic locking
 - get_artifact_at_commit: Retrieve artifact state at commit
 - diff_commits: Compare two commits with line-by-line diff
+
+Session 20B: Event Integration
+Publishes SSE events for artifact delta operations:
+- artifact_delta: Published when artifact is modified via commit
 """
 
 import logging
@@ -12,7 +16,7 @@ import logging
 from system.core import get_core
 from system.core.artifact import ConflictError
 from system.exceptions import ResourceNotFound
-from system.utils import uid
+from utils import uid
 from .decorators import with_audit
 
 from ..schemas.semantic import (
@@ -20,6 +24,7 @@ from ..schemas.semantic import (
     DiffCommitsRequest,
     GetArtifactAtCommitRequest,
 )
+from ..events import publish_artifact_delta
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +69,8 @@ def handle_commit_artifact(request: CommitArtifactRequest, actor: str) -> dict:
     - Uses optimistic locking via hash-based conflict detection
     - Creates triggers relation from source Message
 
+    Session 20B: Publishes artifact_delta SSE event for real-time updates.
+
     Args:
         request: Validated CommitArtifactRequest
         actor: Authenticated user/agent UUID
@@ -84,6 +91,19 @@ def handle_commit_artifact(request: CommitArtifactRequest, actor: str) -> dict:
                 references=request.references,
                 based_on_hash=request.based_on_hash,
                 source_message_uuid=request.source_message,
+            )
+
+            # Session 20B: Publish SSE event for artifact delta
+            # Extract scope UUID from artifact for event routing
+            artifact_entity = core.entity.get_by_id(uid.strip_prefix(request.artifact))
+            scope_uuid = artifact_entity.get("data", {}).get("scope_uuid") if artifact_entity else None
+
+            publish_artifact_delta(
+                artifact_uuid=request.artifact,
+                commit_hash=result["new_hash"],
+                ops=request.ops,
+                actor=actor,
+                scope_uuid=scope_uuid,
             )
 
             # delta_uuid already has soil_ prefix from Soil

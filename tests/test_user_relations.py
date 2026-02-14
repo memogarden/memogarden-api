@@ -13,8 +13,8 @@ import pytest
 from datetime import date, timedelta
 
 from system.core.relation import RelationOperations, SAFETY_COEFFICIENT, USER_RELATION_KINDS
-from system.utils import uid
-from system.utils.time import EPOCH, current_day, day_to_date
+from utils import uid
+from utils.time import EPOCH, current_day, day_to_date
 from system.exceptions import ResourceNotFound
 
 

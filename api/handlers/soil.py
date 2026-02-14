@@ -7,6 +7,10 @@ Implements the Soil bundle verbs from RFC-005 v7:
 - query: Query facts with filters
 
 Session 2: Baseline fact types only (Note, Message, Email, ToolCall, etc.)
+
+Session 20B: Event Integration
+Publishes SSE events for fact operations:
+- message_sent: Published when Message fact is added
 """
 
 import json
@@ -14,7 +18,7 @@ import logging
 
 from system.soil import Fact, get_soil
 from system.soil.fact import current_day, generate_soil_uuid
-from system.utils import isodatetime, uid
+from utils import datetime as isodatetime, uid
 
 from ..schemas.semantic import (
     AddRequest,
@@ -22,6 +26,7 @@ from ..schemas.semantic import (
     GetRequest,
     QueryRequest,
 )
+from ..events import publish_message_sent
 from .decorators import with_audit
 
 logger = logging.getLogger(__name__)
@@ -120,6 +125,8 @@ def handle_add(request: AddRequest, actor: str) -> dict:
     Session 2: Supports baseline fact types only.
     Facts are immutable once created. Use `amend` to create superseding facts.
 
+    Session 20B: Publishes message_sent SSE event for Message facts.
+
     Args:
         request: Validated AddRequest
         actor: Authenticated user/agent UUID
@@ -161,6 +168,24 @@ def handle_add(request: AddRequest, actor: str) -> dict:
 
         # Fetch created item
         item = soil.get_fact(item_uuid)
+
+        # Session 20B: Publish SSE event for Message facts
+        if request.type == "Message":
+            # Extract conversation log UUID from Message data
+            log_uuid = request.data.get("log_uuid")
+            sender = request.data.get("sender", "unknown")
+            content = request.data.get("description", "")
+            fragments = request.data.get("fragments", [])
+            scope_uuid = request.data.get("scope_uuid")
+
+            publish_message_sent(
+                log_uuid=log_uuid,
+                message_uuid=item_uuid,
+                sender=sender,
+                content=content,
+                fragments=fragments,
+                scope_uuid=scope_uuid,
+            )
 
         return _fact_to_response(item)
 

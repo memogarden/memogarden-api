@@ -9,6 +9,7 @@ packages = [{include = "api"}]
 [tool.poetry.dependencies]
 python = "^3.13"
 memogarden-system = {path = "../memogarden-system", develop = true}
+memogarden-utils = {path = "../memogarden-utils", develop = true}
 flask = "^3.0.0"
 flask-cors = "^5.0.0"
 gunicorn = "^21.2.0"
@@ -34,7 +35,7 @@ ignore = ["E501"]  # Line too long (handled by formatter)
 
 # isort configuration
 [tool.ruff.lint.isort]
-known-first-party = ["api", "system"]
+known-first-party = ["api", "system", "utils"]
 
 [tool.ruff.format]
 quote-style = "double"
