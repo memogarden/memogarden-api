@@ -29,7 +29,7 @@ import logging
 from flask import Blueprint, g, jsonify, request
 
 from system.core import get_core
-from system.utils import uid
+from utils import uid
 
 from ...schemas.transaction import ConflictResponse, TransactionCreate, TransactionUpdate
 from ...validation import validate_request

@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from system.config import Settings, get_config_path
+from utils.config import Settings, get_config_path
 
 
 def _get_default_verb() -> str:

@@ -10,7 +10,7 @@ Tests the Relations bundle verbs from RFC-002:
 
 import pytest
 from system.core import get_core
-from system.utils import uid
+from utils import uid
 
 
 class TestUnlinkVerb:
@@ -96,7 +96,7 @@ class TestEditRelationVerb:
         original_horizon = create_response.get_json()["result"]["time_horizon"]
 
         # Edit the time horizon
-        from system.utils.time import current_day
+        from utils.time import current_day
         new_horizon = current_day() + 30
 
         edit_response = client.post(

@@ -10,7 +10,7 @@ Confines bcrypt dependency for API key hashing to this module only.
 import sqlite3
 from datetime import datetime
 
-from system.utils import isodatetime, secret
+from utils import datetime as isodatetime, secret
 
 from .schemas import APIKeyCreate, APIKeyListResponse, APIKeyResponse
 from .service import hash_password  # Reuse password hashing for API keys
@@ -143,7 +143,7 @@ def create_api_key(conn: sqlite3.Connection, user_id: str, data: APIKeyCreate) -
     # Include required fields for new schema (hash, version, data)
     import json
 
-    from system.utils import hash_chain
+    from utils import hash_chain
     entity_hash = hash_chain.compute_entity_hash(
         entity_type="ApiKey",
         created_at=now,

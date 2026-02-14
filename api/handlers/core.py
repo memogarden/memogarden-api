@@ -8,6 +8,13 @@ Implements the Core bundle verbs from RFC-005 v7:
 - query: Query entities with filters
 
 Session 1: Baseline entity types only (Transaction, Recurrence, etc.)
+
+Session 20B: Event Integration
+Publishes SSE events for context and scope operations:
+- context_updated: Published when ContextFrame containers change
+- frame_updated: Published when participant's head_item_uuid changes
+- scope_created: Published when new Scope entity is created
+- scope_modified: Published when Scope entity data changes
 """
 
 import json
@@ -15,7 +22,7 @@ import logging
 
 from system.core import get_core
 from system.exceptions import ResourceNotFound
-from system.utils import uid
+from utils import uid
 
 from ..schemas.semantic import (
     CreateRequest,
@@ -34,6 +41,12 @@ from ..schemas.semantic import (
     UnlinkRequest,
 )
 from .decorators import with_audit
+
+from ..events import (
+    publish_context_updated,
+    publish_frame_updated,
+)
+from ..events import publish_event
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +155,8 @@ def handle_create(request: CreateRequest, actor: str) -> dict:
     Session 1: Supports baseline entity types only.
     Future: Will support registered custom schemas.
 
+    Session 20B: Publishes scope_created SSE event for Scope entities.
+
     Args:
         request: Validated CreateRequest
         actor: Authenticated user/agent UUID
@@ -166,6 +181,18 @@ def handle_create(request: CreateRequest, actor: str) -> dict:
 
         # Fetch created entity (now returns dict with parsed JSON)
         entity = core.entity.get_by_id(entity_uuid)
+
+        # Session 20B: Publish SSE event for Scope creation
+        if request.type == "Scope":
+            publish_event(
+                "scope_created",
+                {
+                    "scope_uuid": uid.add_core_prefix(entity_uuid),
+                    "label": request.data.get("label", ""),
+                    "actor": actor,
+                },
+                scope_uuid=uid.add_core_prefix(entity_uuid),
+            )
 
         return _add_core_prefix(entity)
 
@@ -199,6 +226,8 @@ def handle_edit(request: EditRequest, actor: str) -> dict:
     set: handles both add-new and update-existing
     unset: removes fields from entity.data
 
+    Session 20B: Publishes scope_modified SSE event for Scope entities.
+
     Args:
         request: Validated EditRequest
         actor: Authenticated user/agent UUID
@@ -228,6 +257,17 @@ def handle_edit(request: EditRequest, actor: str) -> dict:
 
         # Fetch updated entity
         row = core.entity.get_by_id(entity_id)
+
+        # Session 20B: Publish SSE event for Scope modification
+        if row.get("type") == "Scope":
+            publish_event(
+                "scope_modified",
+                {
+                    "scope_uuid": uid.add_core_prefix(entity_id),
+                    "actor": actor,
+                },
+                scope_uuid=uid.add_core_prefix(entity_id),
+            )
 
         return _add_core_prefix(row)
 

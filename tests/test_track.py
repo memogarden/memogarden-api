@@ -8,7 +8,7 @@ import pytest
 from flask import Flask
 
 from system.core import get_core
-from system.utils import uid
+from utils import uid
 
 
 # ============================================================================
