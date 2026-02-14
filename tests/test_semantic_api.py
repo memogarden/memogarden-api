@@ -1075,7 +1075,7 @@ class TestLinkVerb:
         assert data["ok"] is True
 
         # Verify time_horizon is ~30 days from now
-        from system.utils.time import current_day
+        from utils.time import current_day
         expected_horizon = current_day() + 30
         assert data["result"]["time_horizon"] == expected_horizon
 
