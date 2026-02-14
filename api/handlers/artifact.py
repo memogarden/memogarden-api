@@ -14,8 +14,7 @@ Publishes SSE events for artifact delta operations:
 import logging
 
 from system.core import get_core
-from system.core.artifact import ConflictError
-from system.exceptions import ResourceNotFound
+from system.exceptions import ConflictError, ResourceNotFound
 from utils import uid
 from .decorators import with_audit
 
