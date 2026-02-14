@@ -17,7 +17,7 @@ import json
 import logging
 
 from system.soil import Fact, current_day, generate_soil_uuid, get_soil
-from utils import datetime as isodatetime, uid
+from utils import isodatetime, uid
 
 from ..schemas.semantic import (
     AddRequest,

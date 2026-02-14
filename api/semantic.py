@@ -68,7 +68,7 @@ from system.exceptions import (
 from system.exceptions import (
     ValidationError as MGValidationError,
 )
-from utils import datetime as isodatetime
+from utils import isodatetime
 
 logger = logging.getLogger(__name__)
 

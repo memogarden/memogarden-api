@@ -29,7 +29,7 @@ os.environ["JWT_SECRET_KEY"] = "test-secret-key"
 os.environ["BYPASS_LOCALHOST_CHECK"] = "true"
 
 # Import isodatetime for test fixtures (must be after env vars are set)
-from utils import datetime as isodatetime  # noqa: E402
+from utils import isodatetime  # noqa: E402
 
 # ============================================================================
 # Project Directory Guard
@@ -397,6 +397,10 @@ def db_conn():
 
 from api.config import settings  # noqa: E402 (must import after db fixtures)
 
+# Override bcrypt work factor for faster tests (4 vs 12 = ~16x faster)
+# This reduces per-test auth fixture time from ~300ms to ~20ms
+settings.bcrypt_work_factor = 4
+
 
 @pytest.fixture
 def test_user(db_conn):
@@ -511,7 +515,7 @@ def _create_jwt_token(user_id: str, username: str, is_admin: bool = True) -> str
     """Helper function to create a JWT token for testing."""
     import jwt
 
-    from utils import datetime as isodatetime
+    from utils import isodatetime
 
     now_ts = isodatetime.now_unix()
     expiry_ts = now_ts + (30 * 24 * 60 * 60)  # 30 days

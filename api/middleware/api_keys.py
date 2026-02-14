@@ -10,7 +10,7 @@ Confines bcrypt dependency for API key hashing to this module only.
 import sqlite3
 from datetime import datetime
 
-from utils import datetime as isodatetime, secret
+from utils import isodatetime, secret
 
 from .schemas import APIKeyCreate, APIKeyListResponse, APIKeyResponse
 from .service import hash_password  # Reuse password hashing for API keys

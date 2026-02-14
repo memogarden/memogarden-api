@@ -13,7 +13,7 @@ import sqlite3
 
 import bcrypt
 
-from utils import datetime as isodatetime, uid
+from utils import isodatetime, uid
 
 from ..config import settings
 from .schemas import UserCreate, UserResponse

@@ -22,7 +22,7 @@ import logging
 from flask import Blueprint, jsonify, request
 
 from system.core import get_core
-from utils import datetime as isodatetime, recurrence
+from utils import isodatetime, recurrence
 
 from ...schemas.recurrence import RecurrenceCreate, RecurrenceUpdate
 from ...validation import validate_request

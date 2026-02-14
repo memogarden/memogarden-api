@@ -19,7 +19,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Dict, Set, Optional
 
-from flask import Blueprint, Response, g, request, stream_with_context
+from flask import Blueprint, Response, current_app, g, request, stream_with_context
 
 from api.middleware.decorators import auth_required
 from system.exceptions import AuthenticationError
@@ -290,11 +290,15 @@ def events_stream():
 
     def generate():
         """Generator function for SSE stream."""
+        # Use shorter timeout in testing to avoid long waits
+        # Production uses 30s keepalive, tests use 3s
+        timeout = 3 if current_app.config.get("TESTING") else 30
+
         try:
             while True:
                 try:
-                    # Block for up to 30 seconds waiting for event
-                    event = conn.queue.get(timeout=30)
+                    # Block for up to timeout seconds waiting for event
+                    event = conn.queue.get(timeout=timeout)
 
                     # Format SSE response
                     # Format: event: <type>\ndata: <json>\n\n

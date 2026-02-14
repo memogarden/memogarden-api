@@ -41,7 +41,7 @@ from functools import wraps
 
 from system.core import get_core
 from system.soil import Fact, SystemRelation, current_day, generate_soil_uuid, get_soil
-from utils import datetime as isodatetime, uid
+from utils import isodatetime, uid
 from system.exceptions import (
     MemoGardenError,
     ValidationError,
