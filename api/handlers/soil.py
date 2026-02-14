@@ -16,8 +16,7 @@ Publishes SSE events for fact operations:
 import json
 import logging
 
-from system.soil import Fact, get_soil
-from system.soil.fact import current_day, generate_soil_uuid
+from system.soil import Fact, current_day, generate_soil_uuid, get_soil
 from utils import datetime as isodatetime, uid
 
 from ..schemas.semantic import (

@@ -40,9 +40,7 @@ import traceback
 from functools import wraps
 
 from system.core import get_core
-from system.soil import get_soil
-from system.soil.fact import Fact, current_day, generate_soil_uuid
-from system.soil.relation import SystemRelation
+from system.soil import Fact, SystemRelation, current_day, generate_soil_uuid, get_soil
 from utils import datetime as isodatetime, uid
 from system.exceptions import (
     MemoGardenError,
