@@ -812,6 +812,8 @@ def handle_enter(request: EnterRequest, actor: str) -> dict:
     - INV-11a: Focus Separation (enter does NOT auto-focus)
     - INV-11b: Implied Focus (first scope becomes primary)
 
+    Session 20B: Publishes context_updated SSE event on enter.
+
     Args:
         request: Validated EnterRequest
         actor: Authenticated user/agent UUID
@@ -833,6 +835,15 @@ def handle_enter(request: EnterRequest, actor: str) -> dict:
         # Enter the scope
         context_frame = core.context.enter_scope(context_frame, scope_uuid)
 
+        # Session 20B: Publish SSE event for context update
+        # Get containers from updated context frame for event payload
+        containers = context_frame.containers if hasattr(context_frame, "containers") else []
+        publish_context_updated(
+            participant_uuid=actor,
+            containers=containers,
+            scope_uuid=uid.add_core_prefix(scope_uuid),
+        )
+
         return {
             "scope": uid.add_core_prefix(scope_uuid),
             "active_scopes": [uid.add_core_prefix(s) for s in (context_frame.active_scopes or [])],
@@ -847,6 +858,8 @@ def handle_leave(request: LeaveRequest, actor: str) -> dict:
     Per RFC-003 v4:
     - leave: Remove scope from active set
     - INV-8: Stream Suspension on Leave
+
+    Session 20B: Publishes frame_updated and context_updated SSE events.
 
     Args:
         request: Validated LeaveRequest
@@ -879,6 +892,23 @@ def handle_leave(request: LeaveRequest, actor: str) -> dict:
         # Leave the scope
         context_frame = core.context.leave_scope(context_frame, scope_uuid)
 
+        # Session 20B: Publish SSE events for context update
+        # Get containers from updated context frame for event payload
+        containers = context_frame.containers if hasattr(context_frame, "containers") else []
+        publish_context_updated(
+            participant_uuid=actor,
+            containers=containers,
+            scope_uuid=uid.add_core_prefix(scope_uuid),
+        )
+
+        # Get head item for frame_updated event
+        head_item_uuid = context_frame.head_item_uuid if hasattr(context_frame, "head_item_uuid") else None
+        publish_frame_updated(
+            participant_uuid=actor,
+            head_item_uuid=head_item_uuid,
+            scope_uuid=uid.add_core_prefix(scope_uuid),
+        )
+
         return {
             "scope": uid.add_core_prefix(scope_uuid),
             "active_scopes": [uid.add_core_prefix(s) for s in (context_frame.active_scopes or [])],
@@ -893,6 +923,8 @@ def handle_focus(request: FocusRequest, actor: str) -> dict:
     Per RFC-003 v4:
     - focus: Switch primary scope among active scopes
     - INV-11: Explicit Scope Control (focus requires explicit action)
+
+    Session 20B: Publishes frame_updated and context_updated SSE events.
 
     Args:
         request: Validated FocusRequest
@@ -924,6 +956,23 @@ def handle_focus(request: FocusRequest, actor: str) -> dict:
 
         # Focus the scope
         context_frame = core.context.focus_scope(context_frame, scope_uuid)
+
+        # Session 20B: Publish SSE events for focus change
+        # Get containers from updated context frame for event payload
+        containers = context_frame.containers if hasattr(context_frame, "containers") else []
+        publish_context_updated(
+            participant_uuid=actor,
+            containers=containers,
+            scope_uuid=uid.add_core_prefix(scope_uuid),
+        )
+
+        # Get head item for frame_updated event
+        head_item_uuid = context_frame.head_item_uuid if hasattr(context_frame, "head_item_uuid") else None
+        publish_frame_updated(
+            participant_uuid=actor,
+            head_item_uuid=head_item_uuid,
+            scope_uuid=uid.add_core_prefix(scope_uuid),
+        )
 
         return {
             "scope": uid.add_core_prefix(scope_uuid),
