@@ -316,6 +316,77 @@ class TestEventPublishing:
         sse_manager.unregister(conn1.client_id)
         sse_manager.unregister(conn2.client_id)
 
+    def test_publish_relation_created(self):
+        """Test publish_event for relation_created."""
+        _, conn = sse_manager.register("user_1", "user1", {"core_abc"})
+
+        count = publish_event(
+            "relation_created",
+            {
+                "relation_uuid": "rel_123",
+                "kind": "part_of",
+                "source": "core_abc",
+                "target": "core_def",
+                "actor": "user_1",
+            },
+            scope_uuid=None,  # Relations are global events
+        )
+
+        assert count == 1
+
+        event = conn.queue.get(timeout=1)
+        assert event["type"] == "relation_created"
+        assert event["data"]["relation_uuid"] == "rel_123"
+        assert event["data"]["kind"] == "part_of"
+
+        sse_manager.unregister(conn.client_id)
+
+    def test_publish_relation_modified(self):
+        """Test publish_event for relation_modified (edit)."""
+        _, conn = sse_manager.register("user_1", "user1", {"core_abc"})
+
+        count = publish_event(
+            "relation_modified",
+            {
+                "relation_uuid": "rel_123",
+                "action": "edited",
+                "actor": "user_1",
+            },
+            scope_uuid=None,
+        )
+
+        assert count == 1
+
+        event = conn.queue.get(timeout=1)
+        assert event["type"] == "relation_modified"
+        assert event["data"]["relation_uuid"] == "rel_123"
+        assert event["data"]["action"] == "edited"
+
+        sse_manager.unregister(conn.client_id)
+
+    def test_publish_relation_deleted(self):
+        """Test publish_event for relation_modified (delete)."""
+        _, conn = sse_manager.register("user_1", "user1", {"core_abc"})
+
+        count = publish_event(
+            "relation_modified",
+            {
+                "relation_uuid": "rel_123",
+                "action": "deleted",
+                "actor": "user_1",
+            },
+            scope_uuid=None,
+        )
+
+        assert count == 1
+
+        event = conn.queue.get(timeout=1)
+        assert event["type"] == "relation_modified"
+        assert event["data"]["relation_uuid"] == "rel_123"
+        assert event["data"]["action"] == "deleted"
+
+        sse_manager.unregister(conn.client_id)
+
 
 # ============================================================================
 # SSE Endpoint Integration Tests

@@ -45,8 +45,8 @@ from .decorators import with_audit
 from ..events import (
     publish_context_updated,
     publish_frame_updated,
+    publish_event,
 )
-from ..events import publish_event
 
 logger = logging.getLogger(__name__)
 
@@ -344,6 +344,8 @@ def handle_link(request: LinkRequest, actor: str) -> dict:
     Creates a user relation (engagement signal) with an initial time horizon.
     The relation will decay over time based on access patterns.
 
+    Session 20B: Publishes relation_created SSE event.
+
     Args:
         request: Validated LinkRequest
         actor: Authenticated user/agent UUID
@@ -370,17 +372,30 @@ def handle_link(request: LinkRequest, actor: str) -> dict:
         # Get the created relation
         row = core.relation.get_by_id(relation_uuid)
 
+        # Session 20B: Publish SSE event for relation creation
+        publish_event(
+            "relation_created",
+            {
+                "relation_uuid": uid.add_core_prefix(relation_uuid),
+                "kind": request.kind,
+                "source": uid.add_core_prefix(request.source),
+                "target": uid.add_core_prefix(request.target),
+                "actor": actor,
+            },
+            scope_uuid=None,  # Relations are cross-scope, global event
+        )
+
         return {
             "uuid": uid.add_core_prefix(row["uuid"]),
             "kind": row["kind"],
             "source": uid.add_core_prefix(row["source"]),
             "source_type": row["source_type"],
-        "target": uid.add_core_prefix(row["target"]),
-        "target_type": row["target_type"],
-        "time_horizon": row["time_horizon"],
-        "last_access_at": row["last_access_at"],
-        "created_at": row["created_at"],
-    }
+            "target": uid.add_core_prefix(row["target"]),
+            "target_type": row["target_type"],
+            "time_horizon": row["time_horizon"],
+            "last_access_at": row["last_access_at"],
+            "created_at": row["created_at"],
+        }
 
 
 # ============================================================================
@@ -396,6 +411,8 @@ def handle_unlink(request: UnlinkRequest, actor: str) -> dict:
 
     User relations can be removed by the operator who created them.
     System relations are immutable and cannot be unlinked.
+
+    Session 20B: Publishes relation_modified SSE event on unlink.
 
     Args:
         request: Validated UnlinkRequest
@@ -418,6 +435,17 @@ def handle_unlink(request: UnlinkRequest, actor: str) -> dict:
         # Delete the relation
         core.relation.delete(request.target)
 
+        # Session 20B: Publish SSE event for relation deletion
+        publish_event(
+            "relation_modified",
+            {
+                "relation_uuid": uid.add_core_prefix(request.target),
+                "action": "deleted",
+                "actor": actor,
+            },
+            scope_uuid=None,  # Relations are cross-scope, global event
+        )
+
         return {
             "uuid": uid.add_core_prefix(request.target),
             "deleted": True
@@ -430,6 +458,8 @@ def handle_edit_relation(request: EditRequest, actor: str) -> dict:
 
     Per RFC-002 v5:
     - edit_relation: Edit relation attributes (time_horizon, metadata, evidence)
+
+    Session 20B: Publishes relation_modified SSE event on edit.
 
     Args:
         request: Validated EditRequest
@@ -452,6 +482,17 @@ def handle_edit_relation(request: EditRequest, actor: str) -> dict:
 
         # Get the updated relation
         row = core.relation.get_by_id(request.target)
+
+        # Session 20B: Publish SSE event for relation edit
+        publish_event(
+            "relation_modified",
+            {
+                "relation_uuid": uid.add_core_prefix(request.target),
+                "action": "edited",
+                "actor": actor,
+            },
+            scope_uuid=None,  # Relations are cross-scope, global event
+        )
 
         return {
             "uuid": uid.add_core_prefix(row["uuid"]),
