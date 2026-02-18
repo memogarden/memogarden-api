@@ -64,6 +64,8 @@ def guard_project_dir():
         "api", "system", "tests", "scripts", "docs", "plan",
         # Malformed SQLite URIs from test failures (when uri=True is missing)
         "file:*",
+        # Database files (may be created during path resolution tests)
+        "*.db",
     }
 
     def is_ignored(path: Path) -> bool:
