@@ -40,15 +40,6 @@ export DEPENDENCY_CHECK="from system import get_core"
 # Optional: Additional environment variables for tests
 # export MY_VAR="value"
 
-# IMPORTANT: Clear any stale VIRTUAL_ENV set by VSCode's Python extension
-# The extension may cache interpreter paths that point to non-existent directories
-# See: docs/history/test-runner-failure-investigation-2026-02-14.md
-unset VIRTUAL_ENV
-
-# Then set VIRTUAL_ENV to the correct project-local .venv path
-# This ensures Poetry uses the right virtualenv for this project
-export VIRTUAL_ENV="/home/kureshii/memogarden/memogarden-api/.venv"
-
 # ============================================================================
 # PARSE SCRIPT OPTIONS
 # ============================================================================
@@ -74,6 +65,16 @@ done
 
 # Get this script's directory before changing directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# IMPORTANT: Clear any stale VIRTUAL_ENV set by VSCode's Python extension
+# The extension may cache interpreter paths that point to non-existent directories
+# See: docs/history/test-runner-failure-investigation-2026-02-14.md
+unset VIRTUAL_ENV
+
+# Then set VIRTUAL_ENV to the correct project-local .venv path
+# This ensures Poetry uses the right virtualenv for this project
+# Use SCRIPT_DIR so this works inside and outside devcontainer
+export VIRTUAL_ENV="$SCRIPT_DIR/.venv"
 
 # Find MemoGarden root: go up two levels from subproject directory
 MG_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
