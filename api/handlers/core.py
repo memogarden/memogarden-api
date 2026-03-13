@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 # Baseline entity types that can be created via Semantic API
 # Session 1: These are the types defined in memogarden/schemas/types/entities/
 # Session 18: Added ConversationLog for Project Studio
+# Session 24: Added Scope for Project Studio scope management
 BASELINE_ENTITY_TYPES = {
     "Transaction",
     "Recurrence",
@@ -62,6 +63,7 @@ BASELINE_ENTITY_TYPES = {
     "Agent",
     "Entity",  # Generic entity type
     "ConversationLog",  # Session 18: Project Studio conversation
+    "Scope",  # Session 24: Project Studio scope management
 }
 
 
