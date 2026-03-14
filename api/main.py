@@ -17,6 +17,7 @@ from system.exceptions import (
     ResourceNotFound,
     ValidationError,
 )
+from .config import _get_default_verb
 
 # Configure logging
 logging.basicConfig(
@@ -44,7 +45,7 @@ def initialize_database():
     """
     try:
         # Initialize both databases via System public API
-        system_info = init_system()
+        system_info = init_system(verb=_get_default_verb())
 
         if not system_info['databases_existed']:
             logger.info("New databases created successfully")
@@ -206,7 +207,7 @@ def _register_routes(app):
         See: RFC-008 v1.2 Transaction Semantics
         """
         # Get database paths from system info
-        system_info = init_system()
+        system_info = init_system(verb=_get_default_verb())
         soil_db = system_info['soil_db_path']
         core_db = system_info['core_db_path']
 
