@@ -2,6 +2,8 @@
 
 import logging
 import os
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -19,12 +21,55 @@ from system.exceptions import (
 )
 from .config import _get_default_verb
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
+
+def _setup_logging():
+    """Configure logging with file and console handlers.
+
+    Log file location (checked in order):
+    1. MEMOGARDEN_LOG_FILE environment variable
+    2. memogarden-api/logs/memogarden.log (default)
+
+    Uses rotating file handler:
+    - Max 10MB per file
+    - Keeps 5 backup files (memogarden.log.1, .2, etc.)
+    """
+    # Get log file path from env var or use default
+    log_file = os.environ.get("MEMOGARDEN_LOG_FILE")
+    if not log_file:
+        # Default: logs directory next to this file
+        log_dir = Path(__file__).parent.parent / "logs"
+        log_dir.mkdir(exist_ok=True)
+        log_file = log_dir / "memogarden.log"
+
+    log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    # Clear any existing handlers
+    root_logger.handlers.clear()
+
+    # Console handler (stderr) - for terminal visibility
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.setFormatter(logging.Formatter(log_format))
+    root_logger.addHandler(console)
+
+    # File handler with rotation - for persistent logs
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=5,
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter(log_format))
+    root_logger.addHandler(file_handler)
+
+    return logging.getLogger(__name__)
+
+
+logger = _setup_logging()
 
 
 # Database initialization (runs once on app startup)

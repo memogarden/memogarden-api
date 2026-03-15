@@ -235,7 +235,7 @@ class TestEventPublishing:
         count = publish_artifact_delta(
             artifact_uuid="art_123",
             commit_hash="hash_456",
-            ops="+5:^abc",
+            ops="+5:new line content",
             actor="user_1",
             scope_uuid="core_abc"
         )
@@ -246,7 +246,7 @@ class TestEventPublishing:
         assert event["type"] == "artifact_delta"
         assert event["data"]["artifact_uuid"] == "art_123"
         assert event["data"]["commit_hash"] == "hash_456"
-        assert event["data"]["ops"] == "+5:^abc"
+        assert event["data"]["ops"] == "+5:new line content"
         assert event["data"]["actor"] == "user_1"
 
         sse_manager.unregister(conn.client_id)

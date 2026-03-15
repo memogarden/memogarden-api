@@ -73,3 +73,7 @@ file:*.db?*
 .ruff_cache/
 .env
 .env.example
+
+# Logs
+logs/
+*.log
