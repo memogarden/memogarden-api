@@ -15,6 +15,7 @@ from system import (
 )
 from system.exceptions import (
     AuthenticationError,
+    LockConflictError,
     MemoGardenError,
     ResourceNotFound,
     ValidationError,
@@ -150,6 +151,13 @@ def create_app(test_config=None):
         with app.app_context():
             initialize_database()
 
+            # Provider runtime bookkeeping (RFC-004 §12.2): a server restart
+            # interrupts any in-flight provider run; release the single-flight
+            # lock so the next heartbeat can run the provider again.
+            from .provider_registry import cleanup_orphaned_runs
+
+            cleanup_orphaned_runs()
+
     # Register error handlers
     _register_error_handlers(app)
 
@@ -203,6 +211,23 @@ def _register_error_handlers(app):
         if error.details:
             response["error"]["details"] = error.details
         return jsonify(response), 401
+
+    @app.errorhandler(LockConflictError)
+    def handle_lock_conflict_error(error):
+        """Handle lock conflicts (e.g. duplicate provider, run in flight) as 409.
+
+        The envelope type is "ConflictError" so REST clients (mg_client) map
+        it to their 409-conflict exception class.
+        """
+        response = {
+            "error": {
+                "type": "ConflictError",
+                "message": error.message
+            }
+        }
+        if error.details:
+            response["error"]["details"] = error.details
+        return jsonify(response), 409
 
     @app.errorhandler(MemoGardenError)
     def handle_memo_garden_error(error):

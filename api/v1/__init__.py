@@ -14,6 +14,7 @@ from flask import Blueprint
 
 from ..middleware.decorators import _authenticate_request
 from .core import recurrences, transactions
+from .providers import providers_bp
 
 # Create the ApiV1 blueprint
 api_v1_bp = Blueprint("api_v1", __name__, url_prefix="/api/v1")
@@ -47,6 +48,7 @@ def authenticate():
 api_v1_bp.register_blueprint(transactions.transactions_bp)
 api_v1_bp.register_blueprint(recurrences.recurrences_bp)
 
-# Soil blueprints will be registered here when document storage is implemented
+# Register the providers registry blueprint (RFC-004 §12.2)
+api_v1_bp.register_blueprint(providers_bp)
 
 __all__ = ["api_v1_bp"]
