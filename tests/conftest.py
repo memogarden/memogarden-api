@@ -66,6 +66,10 @@ def guard_project_dir():
         "file:*",
         # Database files (may be created during path resolution tests)
         "*.db",
+        # Created by api.main._setup_logging at first app import
+        "logs",
+        # Logs directory contents
+        "memogarden.log*",
     }
 
     def is_ignored(path: Path) -> bool:

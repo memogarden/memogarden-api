@@ -297,3 +297,117 @@ class TestOrphanCleanup:
             assert row["status"] == "failed"
         finally:
             conn.close()
+
+
+class TestOriginPin:
+    """Origin pin: registration only activates operator-placed code."""
+
+    @pytest.fixture
+    def pinned_roots(self, tmp_path, monkeypatch):
+        """A provider root dir with MEMOGARDEN_PROVIDER_ROOTS pointed at it."""
+        root = tmp_path / "providers"
+        root.mkdir()
+        monkeypatch.setenv("MEMOGARDEN_PROVIDER_ROOTS", str(root))
+        return root
+
+    def test_unpinned_allows_any_importable(self, client, auth_headers, dummy_module, monkeypatch):
+        monkeypatch.delenv("MEMOGARDEN_PROVIDER_ROOTS", raising=False)
+        monkeypatch.delenv("MEMOGARDEN_DATA_DIR", raising=False)
+        response = _register(client, auth_headers, _payload(dummy_module))
+        assert response.status_code == 201
+
+    def test_file_in_root_registers_by_bare_name(self, client, auth_headers, pinned_roots):
+        (pinned_roots / "plugprov.py").write_text(
+            "class PlugProvider:\n"
+            "    def __init__(self, config=None):\n"
+            "        self.config = config or {}\n"
+            "    def sync(self, since=None):\n"
+            "        return iter(())\n"
+        )
+        response = _register(
+            client, auth_headers,
+            _payload("plugprov", **{"class": "PlugProvider"}),
+        )
+        assert response.status_code == 201
+        assert response.get_json()["capabilities"] == ["sync"]
+
+    def test_package_dir_in_root_registers(self, client, auth_headers, pinned_roots):
+        pkg = pinned_roots / "pkgprov"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text(
+            "class PkgProvider:\n"
+            "    def __init__(self, config=None):\n"
+            "        self.config = config or {}\n"
+            "    def sync(self, since=None):\n"
+            "        return iter(())\n"
+        )
+        response = _register(
+            client, auth_headers,
+            _payload("pkgprov", **{"class": "PkgProvider"}),
+        )
+        assert response.status_code == 201
+
+    def test_origin_rejects_module_outside_roots(self, client, auth_headers, pinned_roots, tmp_path, monkeypatch):
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        module_name = f"outside_provider_{uuid.uuid4().hex[:8]}"
+        (outside / f"{module_name}.py").write_text(
+            "class OutsideProvider:\n"
+            "    def __init__(self, config=None):\n"
+            "        self.config = config or {}\n"
+            "    def sync(self, since=None):\n"
+            "        return iter(())\n"
+        )
+        monkeypatch.syspath_prepend(str(outside))
+        response = _register(
+            client, auth_headers,
+            _payload(module_name, **{"class": "OutsideProvider"}),
+        )
+        assert response.status_code == 400
+        error = response.get_json()["error"]
+        assert "provider roots" in error["message"]
+        assert "origin" in error["details"]
+
+    def test_symlinked_origin_resolves_under_root(self, client, auth_headers, pinned_roots, tmp_path, monkeypatch):
+        real = tmp_path / "real-checkout"
+        real.mkdir()
+        module_name = "linkprov"
+        (real / f"{module_name}.py").write_text(
+            "class LinkProvider:\n"
+            "    def __init__(self, config=None):\n"
+            "        self.config = config or {}\n"
+            "    def sync(self, since=None):\n"
+            "        return iter(())\n"
+        )
+        (pinned_roots / f"{module_name}.py").symlink_to(real / f"{module_name}.py")
+        response = _register(
+            client, auth_headers,
+            _payload(module_name, **{"class": "LinkProvider"}),
+        )
+        assert response.status_code == 400  # realpath origin is outside the root
+
+    def test_runtime_recheck_marks_run_failed(self, client, auth_headers, dummy_module, tmp_path, monkeypatch):
+        # Register while unpinned, then tighten the roots: the run must refuse.
+        monkeypatch.delenv("MEMOGARDEN_PROVIDER_ROOTS", raising=False)
+        monkeypatch.delenv("MEMOGARDEN_DATA_DIR", raising=False)
+        _register(client, auth_headers, _payload(dummy_module))
+
+        roots = tmp_path / "tightened-providers"
+        roots.mkdir()
+        monkeypatch.setenv("MEMOGARDEN_PROVIDER_ROOTS", str(roots))
+
+        client.post("/api/v1/providers/testprov/run", headers=auth_headers)
+        manifest = _wait_for_finish(client, auth_headers, "testprov")
+        assert manifest["last_status"] == "failed"
+
+        from system.core import _create_connection
+
+        conn = _create_connection()
+        try:
+            row = conn.execute(
+                "SELECT detail FROM provider_runs WHERE id = ?",
+                (manifest["last_run_id"],),
+            ).fetchone()
+            assert "provider roots" in json.loads(row["detail"])["error"]
+        finally:
+            conn.close()
