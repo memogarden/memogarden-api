@@ -8,6 +8,9 @@ Environment Variables:
     MEMOGARDEN_WORKERS    - Number of worker processes (default: 2)
     MEMOGARDEN_TIMEOUT    - Worker timeout in seconds (default: 30)
     MEMOGARDEN_BIND       - Bind address (default: 127.0.0.1:5000)
+    MEMOGARDEN_PID_FILE   - PID file path (default: /var/run/memogarden/memogarden.pid)
+    MEMOGARDEN_ACCESS_LOG - Access log path (default: /var/log/memogarden/access.log)
+    MEMOGARDEN_ERROR_LOG  - Error log path (default: /var/log/memogarden/error.log)
     MEMOGARDEN_LOG_LEVEL  - Log level (default: INFO)
 
 See: https://docs.gunicorn.org/en/stable/settings.html
@@ -64,7 +67,9 @@ proc_name = "memogarden"
 daemon = False
 
 # PID file
-pidfile = "/var/run/memogarden/memogarden.pid"
+# Appliance defaults target root-owned paths; user-session deployments
+# override via environment (see scripts/install-user-service.sh).
+pidfile = os.getenv("MEMOGARDEN_PID_FILE", "/var/run/memogarden/memogarden.pid")
 
 # User and group to run as
 # Commented out - systemd service handles this
@@ -82,10 +87,10 @@ umask = 0o007
 loglevel = os.getenv("MEMOGARDEN_LOG_LEVEL", "INFO")
 
 # Access log
-accesslog = "/var/log/memogarden/access.log"
+accesslog = os.getenv("MEMOGARDEN_ACCESS_LOG", "/var/log/memogarden/access.log")
 
 # Error log
-errorlog = "/var/log/memogarden/error.log"
+errorlog = os.getenv("MEMOGARDEN_ERROR_LOG", "/var/log/memogarden/error.log")
 
 # Log format
 access_log_format = '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s" %(D)s'
