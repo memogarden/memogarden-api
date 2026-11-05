@@ -2,20 +2,30 @@
 
 The registry lives in the `providers` table in core.db — an infrastructure
 table alongside api_keys, deliberately outside the entity/delta machinery.
-This module owns CRUD and registration-time validation: the provider module
-must be importable in the server environment and its class must conform to
-the Provider Protocol (PRD: sync() yielding Facts; create_relations optional).
+This module owns CRUD and registration-time validation:
+
+- the provider module must be importable in the server environment (sys.path
+  first, then loaded as a plugin file from the provider roots), and
+- its origin must resolve under an allowlisted provider root (the origin
+  pin: registration activates operator-placed code, it does not load
+  arbitrary code), and
+- its class must conform to the Provider Protocol (PRD: sync() yielding
+  Facts; create_relations optional).
 
 Connection handling follows the api_keys middleware precedent: raw SQL via
 get_core()._conn (see api/middleware/api.py).
 """
 
 import importlib
+import importlib.util
 import json
 import logging
+import os
 import sqlite3
+import sys
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from system.core import get_core
 from system.exceptions import LockConflictError, ResourceNotFound, ValidationError
@@ -35,27 +45,123 @@ _COLUMNS = (
 )
 
 
+def provider_roots() -> list[Path]:
+    """Allowlisted provider roots for the origin pin (RFC-004 §12.2).
+
+    Resolution order:
+    1. ``MEMOGARDEN_PROVIDER_ROOTS`` (os.pathsep-separated) — overrides all
+    2. ``$MEMOGARDEN_DATA_DIR/providers`` — when the data dir is pinned
+       (production units pin it)
+    3. ``[]`` — unpinned: development/pytest mode, registration accepts any
+       importable module
+    """
+    env_roots = os.environ.get("MEMOGARDEN_PROVIDER_ROOTS")
+    if env_roots:
+        return [Path(p).expanduser() for p in env_roots.split(os.pathsep) if p.strip()]
+    data_dir = os.environ.get("MEMOGARDEN_DATA_DIR")
+    if data_dir:
+        return [Path(data_dir).expanduser() / "providers"]
+    return []
+
+
+def import_provider_module(module: str):
+    """Import a provider module, falling back to the provider roots.
+
+    Tries the plain sys.path import first (installed packages, Poetry
+    path-dep checkouts). If the provider module itself is missing, loads it
+    as a plugin file from the provider roots: ``<root>/<module>.py`` or
+    ``<root>/<module>/__init__.py`` — the operator drops a provider file
+    into a root and registers it by bare name.
+
+    Raises:
+        ValidationError: If the module cannot be imported or loaded
+    """
+
+    def _not_importable(detail: str) -> ValidationError:
+        return ValidationError(
+            f"module '{module}' is not importable in the server environment "
+            "(not on sys.path and not found under the provider roots)",
+            {"module": module, "detail": detail},
+        )
+
+    try:
+        return importlib.import_module(module)
+    except ModuleNotFoundError as e:
+        # A missing dependency inside the provider is a real error; only a
+        # missing provider module (same top-level name) falls through to the
+        # roots loader.
+        if (e.name or "").split(".")[0] != module.split(".")[0]:
+            raise _not_importable(str(e)) from e
+    except Exception as e:
+        raise _not_importable(str(e)) from e
+
+    for root in provider_roots():
+        for candidate in (root / f"{module}.py", root / module / "__init__.py"):
+            if not candidate.is_file():
+                continue
+            try:
+                spec = importlib.util.spec_from_file_location(module, candidate)
+                if spec is None or spec.loader is None:
+                    continue
+                loaded = importlib.util.module_from_spec(spec)
+                sys.modules[module] = loaded
+                spec.loader.exec_module(loaded)
+                return loaded
+            except Exception as e:
+                raise _not_importable(
+                    f"found at {candidate} but failed to load: {e}"
+                ) from e
+    raise _not_importable("not found on sys.path or under any provider root")
+
+
+def validate_provider_origin(module: str, mod) -> None:
+    """Origin pin: the module's source must live under a provider root.
+
+    Unpinned (no roots configured) accepts anything — development mode.
+    Realpath both sides so symlinked editable installs resolve correctly.
+
+    Raises:
+        ValidationError: If the module has no origin or lies outside every root
+    """
+    roots = provider_roots()
+    if not roots:
+        return
+    origin = getattr(mod, "__file__", None)
+    if not origin:
+        raise ValidationError(
+            f"module '{module}' has no source file (namespace package) — "
+            "provider modules must live under a provider root",
+            {"module": module, "roots": [str(r) for r in roots]},
+        )
+    origin_real = Path(origin).resolve()
+    for root in roots:
+        root_real = root.resolve()
+        if origin_real == root_real or root_real in origin_real.parents:
+            return
+    raise ValidationError(
+        f"module '{module}' is outside the provider roots — registration "
+        "only activates operator-placed code (RFC-004 §12.2 origin pin)",
+        {"module": module, "origin": str(origin_real), "roots": [str(r) for r in roots]},
+    )
+
+
 def validate_provider_class(module: str, class_name: str) -> list[str]:
     """Import the module and check Provider Protocol conformance.
 
     Args:
-        module: Importable Python module name
+        module: Importable module name (or bare name of a file under a
+            provider root)
         class_name: Class within the module
 
     Returns:
         Derived capabilities list, e.g. ["sync"] or ["sync", "create_relations"]
 
     Raises:
-        ValidationError: If the module is not importable or the class does
-            not conform to the Protocol
+        ValidationError: If the module is not importable or outside the
+            provider roots, or the class does not conform to the Protocol
     """
-    try:
-        mod = importlib.import_module(module)
-    except Exception as e:
-        raise ValidationError(
-            f"module '{module}' is not importable in the server environment",
-            {"module": module, "detail": str(e)},
-        ) from e
+    mod = import_provider_module(module)
+    validate_provider_origin(module, mod)
 
     cls = getattr(mod, class_name, None)
     if cls is None:

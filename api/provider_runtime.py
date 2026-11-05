@@ -16,7 +16,6 @@ Execution model:
   Optional create_relations(fact) returns SystemRelation objects to store.
 """
 
-import importlib
 import json
 import logging
 import threading
@@ -32,6 +31,8 @@ from .provider_registry import (
     get_due_providers,
     get_last_success_at,
     get_provider,
+    import_provider_module,
+    validate_provider_origin,
 )
 
 logger = logging.getLogger(__name__)
@@ -105,7 +106,11 @@ def _execute_run(
     started_at = isodatetime.now()
 
     try:
-        cls = getattr(importlib.import_module(module), class_name)
+        mod = import_provider_module(module)
+        # Defense in depth: roots may have tightened since registration —
+        # a run must not execute code that is no longer origin-valid.
+        validate_provider_origin(module, mod)
+        cls = getattr(mod, class_name)
         provider = cls(config=config)
 
         facts_inserted = 0
