@@ -32,12 +32,9 @@ def _authenticate_request():
     """
     Shared authentication logic for requests.
 
-    Supports three authentication forms:
-    1. JWT Token via Authorization: Bearer <jwt>
-    2. API Key via Authorization: Bearer mg_sk_... (the client SDK's
-       documented transport; a Bearer value with the mg_sk_ prefix is routed
-       to API-key verification, never JWT decode)
-    3. API Key via X-API-Key: <api_key>
+    Supports two authentication methods:
+    1. JWT Token via Authorization: Bearer <token>
+    2. API Key via X-API-Key: <api_key>
 
     Stores authenticated user information in flask.g:
     - g.user_id: User ID (UUID)
@@ -55,23 +52,6 @@ def _authenticate_request():
 
     # Try JWT token authentication first
     auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer mg_sk_"):
-        # API key in the client SDK's Bearer transport (mg_client AuthManager
-        # sends "Authorization: Bearer mg_sk_..."). Verify as an API key
-        # instead of attempting JWT decode, which would fail hard.
-        result = api_keys.verify_api_key_and_get_user(core._conn, auth_header[7:])
-        if result:
-            user_id, api_key_id = result
-            user = service.get_user_by_id(core._conn, user_id)
-            if user:
-                g.user_id = user.id
-                g.username = user.username
-                g.is_admin = user.is_admin
-                g.auth_method = "api_key"
-                return  # Authentication succeeded
-        logger.warning("Invalid API key (Bearer mg_sk_ transport)")
-        raise AuthenticationError("Invalid API key", {"code": "invalid_api_key"})
-
     if auth_header.startswith("Bearer "):
         token_str = auth_header[7:]  # Remove "Bearer " prefix
         try:
@@ -190,12 +170,9 @@ def auth_required(f):
     """
     Decorator to require authentication for endpoint access.
 
-    Supports three authentication forms:
-    1. JWT Token via Authorization: Bearer <jwt>
-    2. API Key via Authorization: Bearer mg_sk_... (the client SDK's
-       documented transport; a Bearer value with the mg_sk_ prefix is routed
-       to API-key verification, never JWT decode)
-    3. API Key via X-API-Key: <api_key>
+    Supports two authentication methods:
+    1. JWT Token via Authorization: Bearer <token>
+    2. API Key via X-API-Key: <api_key>
 
     Stores authenticated user information in flask.g:
     - g.user_id: User ID (UUID)

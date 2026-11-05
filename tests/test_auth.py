@@ -171,31 +171,3 @@ def test_get_current_user_unauthenticated(client):
     response = client.get("/auth/me")
 
     assert response.status_code == 401
-
-
-def test_bearer_api_key_authenticates(client, auth_headers_apikey):
-    """API keys sent as Authorization: Bearer mg_sk_... (client SDK
-    transport) must authenticate — issue #16."""
-    raw_key = auth_headers_apikey["X-API-Key"]
-    response = client.get("/api/v1/providers", headers={"Authorization": f"Bearer {raw_key}"})
-    assert response.status_code == 200
-
-
-def test_bearer_api_key_authenticates_semantic(client, auth_headers_apikey):
-    """The /mg semantic endpoint accepts the same Bearer mg_sk_ transport."""
-    raw_key = auth_headers_apikey["X-API-Key"]
-    response = client.post(
-        "/mg",
-        json={"op": "query", "type": "Note"},
-        headers={"Authorization": f"Bearer {raw_key}"},
-    )
-    assert response.status_code == 200
-
-
-def test_bearer_garbage_still_invalid_token(client):
-    """Non-mg_sk Bearer values keep the JWT decode path (401 invalid_token)."""
-    response = client.get(
-        "/api/v1/providers", headers={"Authorization": "Bearer notatoken"}
-    )
-    assert response.status_code == 401
-    assert response.get_json()["error"]["type"] == "AuthenticationError"
