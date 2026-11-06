@@ -21,7 +21,7 @@ import json
 import logging
 
 from system.core import get_core
-from system.exceptions import ResourceNotFound
+from system.exceptions import PermissionDenied, ResourceNotFound
 from utils import uid
 
 from ..schemas.semantic import (
@@ -54,17 +54,24 @@ logger = logging.getLogger(__name__)
 # Session 1: These are the types defined in memogarden/schemas/types/entities/
 # Session 18: Added ConversationLog for Project Studio
 # Session 24: Added Scope for Project Studio scope management
+# RFC-010: Agent/Operator are NOT creatable here — identity issuance is
+# explicit and operator-gated via the management endpoints (POST /agents,
+# JWT-only). Agents were never functional through this path; they are
+# now explicitly blocked so no key can mint or mutate identity.
 BASELINE_ENTITY_TYPES = {
     "Transaction",
     "Recurrence",
     "Artifact",
     "Label",
-    "Operator",
-    "Agent",
     "Entity",  # Generic entity type
     "ConversationLog",  # Session 18: Project Studio conversation
     "Scope",  # Session 24: Project Studio scope management
 }
+
+# RFC-010 INV-1: identity entity types cannot be created, edited, or
+# forgotten through the Semantic API — only through JWT-gated management
+# endpoints. The auth hot path stays read-only over identity state.
+IDENTITY_ENTITY_TYPES = {"Agent", "Operator"}
 
 
 # ============================================================================
@@ -168,6 +175,13 @@ def handle_create(request: CreateRequest, actor: str) -> dict:
     """
     # Validate entity type is in baseline
     if request.type not in BASELINE_ENTITY_TYPES:
+        if request.type in IDENTITY_ENTITY_TYPES:
+            # RFC-010 INV-1: identity issuance is operator-gated
+            raise PermissionDenied(
+                f"Entity type '{request.type}' cannot be created via the "
+                f"Semantic API. Identity issuance is operator-gated: "
+                f"mint agents via POST /agents (JWT only). (RFC-010)"
+            )
         raise ValueError(
             f"Entity type '{request.type}' not supported. "
             f"Baseline types: {', '.join(sorted(BASELINE_ENTITY_TYPES))}. "
@@ -240,8 +254,22 @@ def handle_edit(request: EditRequest, actor: str) -> dict:
     entity_id = uid.strip_prefix(request.target)
 
     with get_core() as core:
+        # RFC-010 INV-1: identity guard BEFORE lookup — Agent uuids are
+        # stored core_-prefixed, so the stripped lookup below would 404
+        # on them and the guard would never run
+        canonical = uid.add_core_prefix(request.target)
+        identity_row = core._conn.execute(
+            "SELECT type FROM entity WHERE uuid = ?", (canonical,)
+        ).fetchone()
+        if identity_row and identity_row["type"] in IDENTITY_ENTITY_TYPES:
+            raise PermissionDenied(
+                f"Entity type '{identity_row['type']}' cannot be edited via the "
+                f"Semantic API (RFC-010 identity protection)"
+            )
+
         # Get current entity state (Core API returns dict with parsed JSON data)
         current = core.entity.get_by_id(entity_id)
+
         # Data is already a dict (parsed by Core API)
         current_data = current.get("data") or {}
 
@@ -290,6 +318,19 @@ def handle_forget(request: ForgetRequest, actor: str) -> dict:
     entity_id = uid.strip_prefix(request.target)
 
     with get_core() as core:
+        # RFC-010: identity guard before lookup (see handle_edit) — Agent
+        # entities are stored core_-prefixed and are never deleted (§4.3;
+        # retirement is key revocation today, supersession via management later)
+        canonical = uid.add_core_prefix(request.target)
+        identity_row = core._conn.execute(
+            "SELECT type FROM entity WHERE uuid = ?", (canonical,)
+        ).fetchone()
+        if identity_row and identity_row["type"] in IDENTITY_ENTITY_TYPES:
+            raise PermissionDenied(
+                f"Entity type '{identity_row['type']}' cannot be forgotten "
+                f"(RFC-010 identity protection)"
+            )
+
         # Verify entity exists
         core.entity.get_by_id(entity_id)
 

@@ -13,21 +13,59 @@ from localhost and only when no users exist in the database.
 import logging
 import sqlite3
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, g, jsonify
 
 from system.core import get_core
-from system.exceptions import AuthenticationError
+from system.exceptions import AuthenticationError, ResourceNotFound, ValidationError
+from system.soil import Fact, generate_soil_uuid, get_soil
+from utils import isodatetime
 
 from ..validation import validate_request
 from . import api_keys, decorators, service, token
-from .decorators import _authenticate_jwt
-from .schemas import AdminRegistrationResponse, APIKeyCreate, TokenResponse, UserCreate, UserLogin
+from .decorators import _authenticate_jwt, _authenticate_request
+from .schemas import (
+    AdminRegistrationResponse,
+    AgentCreate,
+    APIKeyCreate,
+    APIKeyUpdate,
+    TokenResponse,
+    UserCreate,
+    UserLogin,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # Create blueprint
 auth_bp = Blueprint("auth", __name__)
+
+
+def _record_identity_action(operation: str, params: dict) -> None:
+    """Write an Action fact for an identity management operation (RFC-010 INV-2).
+
+    Identity issuance and binding are JWT-gated operator actions; this
+    makes each one traceable in the same audit trail as Semantic API
+    operations (actor_type "operator"). Committed immediately so the
+    mint is visible before the endpoint returns.
+    """
+    now = isodatetime.now()
+    item = Fact(
+        uuid=generate_soil_uuid(),
+        _type="Action",
+        realized_at=now,
+        canonical_at=now,
+        data={
+            "actor": getattr(g, "username", None),
+            "actor_type": "operator",
+            "operation": operation,
+            "params": params,
+            "context": None,
+            "request_id": generate_soil_uuid(),
+            "parent_action": None,
+        },
+    )
+    with get_soil() as soil:
+        soil.create_fact(item)
 
 
 # ============================================================================
@@ -208,46 +246,75 @@ def logout():
 @auth_bp.route("/auth/me", methods=["GET"])
 def get_current_user():
     """
-    Get current user info from JWT token.
+    Get the authenticated principal's identity (RFC-010 introspection).
 
-    This endpoint requires authentication via the Authorization header:
-    Authorization: Bearer <token>
+    Accepts both authentication methods and returns a shape per method:
 
-    Returns:
-        User info for authenticated user
+    - JWT (operator session): the user record plus actor_type "operator"
+    - API key, unbound: actor_type "api_key", actor = owning username
+    - API key, bound (RFC-010): actor_type "agent", actor = Agent entity
+      uuid, plus the agent's label — the canonical identity an agent uses
+      for provenance stamping
 
     Raises:
-        AuthenticationError: If token is missing or invalid
+        AuthenticationError: If no valid authentication provided
 
-    Example request:
-    ```
-    GET /auth/me
-    Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-    ```
-
-    Example response:
+    Example (JWT):
     ```json
     {
-        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "id": "550e8400-...",
         "username": "admin",
         "is_admin": true,
-        "created_at": "2025-12-29T10:30:00Z"
+        "created_at": "2025-12-29T10:30:00Z",
+        "actor_type": "operator",
+        "actor": "admin"
+    }
+    ```
+
+    Example (bound API key):
+    ```json
+    {
+        "actor_type": "agent",
+        "actor": "core_6b0f1e2a-...",
+        "label": "claude-code",
+        "key_prefix": "mg_sk_agent_9a2b",
+        "username": "admin",
+        "is_admin": true
     }
     ```
     """
-    # Authenticate via JWT (API keys not allowed for this endpoint)
-    payload = _authenticate_jwt()
-
-    # Get user from database
+    # RFC-010: identity introspection is available to both operators
+    # (JWT) and agents (API key) — an agent discovers its canonical
+    # identity here. Management endpoints below stay JWT-only.
+    _authenticate_request()
     core = get_core()
-    user = service.get_user_by_id(core._conn, payload.sub)
+
+    if g.auth_method == "api_key":
+        key = api_keys.get_api_key_by_id(core._conn, g.api_key_id)
+        result = {
+            "actor_type": g.actor_type,
+            "actor": g.actor,
+            "key_prefix": key.prefix if key else None,
+            "username": g.username,
+            "is_admin": g.is_admin,
+        }
+        if g.actor_type == "agent" and key is not None and key.agent_id:
+            agent = api_keys.get_agent(core._conn, key.agent_id, g.user_id)
+            result["label"] = agent.label
+        return jsonify(result), 200
+
+    # JWT path: user record as before, plus RFC-010 attribution fields
+    user = service.get_user_by_id(core._conn, g.user_id)
     if user is None:
         raise AuthenticationError(
             "User not found",
-            {"user_id": payload.sub}
+            {"user_id": g.user_id}
         )
 
-    return jsonify(user.model_dump()), 200
+    result = user.model_dump()
+    result["actor_type"] = g.actor_type
+    result["actor"] = g.actor
+    return jsonify(result), 200
     # Connection closes automatically via __del__
 
 
@@ -386,7 +453,6 @@ def revoke_api_key(api_key_id: str):
     }
     ```
     """
-    from ...exceptions import ResourceNotFound
 
     # Authenticate via JWT (API keys not allowed for revoking API keys)
     payload = _authenticate_jwt()
@@ -405,6 +471,133 @@ def revoke_api_key(api_key_id: str):
     logger.info(f"API key revoked: {api_key_id} by user {payload.sub}")
 
     return jsonify({"message": "API key revoked successfully"}), 200
+    # Connection closes automatically via __del__
+
+
+@auth_bp.route("/api-keys/<api_key_id>", methods=["PATCH"])
+@validate_request
+def update_api_key(data: APIKeyUpdate, api_key_id: str):
+    """
+    Bind, re-bind, or unbind an Agent entity on an API key (RFC-010).
+
+    Requires authentication via JWT token (identity issuance and binding
+    are explicit operator actions; key holders cannot modify bindings).
+
+    agent_id semantics (model_fields_set):
+    - absent: no change (400 if the body sets no fields)
+    - null: unbind — attribution reverts to the owning username with
+      actor_type "api_key"
+    - set: bind / re-bind to that Agent entity
+
+    Args:
+        data: APIKeyUpdate payload
+        api_key_id: API key to update
+
+    Returns:
+        Updated API key record (no secret material)
+
+    Raises:
+        AuthenticationError: If token is missing or invalid
+        ResourceNotFound: Key or agent not found (404)
+        ValidationError: Non-Agent target or empty body (400)
+        PermissionDenied: Agent owned by another user (403)
+        LockConflictError: Key is revoked (binding refused, 409)
+    """
+    payload = _authenticate_jwt()
+
+    if "agent_id" not in data.model_fields_set:
+        raise ValidationError(
+            "PATCH body must set agent_id (uuid to bind, null to unbind)",
+            {"expected_fields": ["agent_id"]}
+        )
+
+    core = get_core()
+    key = api_keys.bind_agent_to_key(core._conn, api_key_id, payload.sub, data.agent_id)
+    core._conn.commit()
+
+    # RFC-010 INV-2 / §5.3: (re-)attribution is explicit and auditable
+    _record_identity_action(
+        "bind",
+        {"api_key_id": api_key_id, "agent_id": data.agent_id},
+    )
+
+    logger.info(
+        f"API key binding updated: {api_key_id} -> agent {data.agent_id} "
+        f"by user {payload.sub}"
+    )
+
+    return jsonify(key.model_dump()), 200
+    # Connection closes automatically via __del__
+
+
+# ============================================================================
+# Agent Identity Endpoints (RFC-010)
+# ============================================================================
+
+
+@auth_bp.route("/agents", methods=["POST"])
+@validate_request
+def create_agent(data: AgentCreate):
+    """
+    Mint an Agent entity (RFC-010 identity issuance).
+
+    Requires authentication via JWT token — the ONLY creation path for
+    agent identity (explicit, operator-gated; authentication never
+    creates identity state, RFC-010 INV-1). Labels are unique among
+    agents.
+
+    Args:
+        data: AgentCreate payload (label, optional description)
+
+    Returns:
+        AgentResponse with the canonical agent_id (core_...) — the uuid
+        recorded as `actor` on Action facts for bound-key operations
+
+    Raises:
+        AuthenticationError: If token is missing or invalid
+        LockConflictError: Label already in use (409)
+        ValidationError: Schema violation (422 via validate_request)
+    """
+    payload = _authenticate_jwt()
+
+    core = get_core()
+    agent = api_keys.create_agent(core._conn, payload.sub, data)
+    core._conn.commit()
+
+    # RFC-010 INV-2: the mint is traceable to a JWT-authenticated operator
+    _record_identity_action(
+        "register",
+        {"resource": "agent", "agent_id": agent.agent_id, "label": agent.label},
+    )
+
+    logger.info(f"Agent minted: {agent.label} ({agent.agent_id}) by user {payload.sub}")
+
+    return jsonify(agent.model_dump()), 201
+    # Connection closes automatically via __del__
+
+
+@auth_bp.route("/agents", methods=["GET"])
+def list_agents():
+    """
+    List Agent entities owned by the authenticated user (RFC-010).
+
+    Requires authentication via JWT token. Management listing only —
+    agents as semantic-layer data are readable through the Semantic API
+    like any entity. Includes the prefixes and count of active keys
+    bound to each agent.
+
+    Returns:
+        List of AgentListResponse
+
+    Raises:
+        AuthenticationError: If token is missing or invalid
+    """
+    payload = _authenticate_jwt()
+
+    core = get_core()
+    agents = api_keys.list_agents(core._conn, payload.sub)
+
+    return jsonify([agent.model_dump() for agent in agents]), 200
     # Connection closes automatically via __del__
 
 
