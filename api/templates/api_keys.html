@@ -13,6 +13,9 @@
                     <p class="text-sm text-gray-600">API Key Management</p>
                 </div>
                 <div class="flex items-center gap-4">
+                    <a href="/agents/" class="text-sm text-gray-600 hover:text-gray-900">
+                        Agents
+                    </a>
                     <span id="userDisplay" class="text-sm text-gray-700"></span>
                     <button id="logoutBtn" class="text-sm text-gray-600 hover:text-gray-900">
                         Logout
@@ -90,7 +93,26 @@
         window.location.href = '/login';
     });
 
-    // Fetch and display API keys
+    // Fetch and display API keys (plus the agent map for binding UI)
+    let agentsById = {};
+
+    async function loadAgents() {
+        try {
+            const response = await fetch('/agents', {
+                method: 'GET',
+                headers: { 'Authorization': `Bearer ${getAuthToken()}` }
+            });
+            if (response.ok) {
+                agentsById = {};
+                for (const agent of await response.json()) {
+                    agentsById[agent.agent_id] = agent;
+                }
+            }
+        } catch (error) {
+            console.error('Error loading agents:', error);
+        }
+    }
+
     async function loadAPIKeys() {
         const token = getAuthToken();
 
@@ -114,6 +136,7 @@
                 throw new Error('Failed to load API keys');
             }
 
+            await loadAgents();
             const apiKeys = await response.json();
             displayAPIKeys(apiKeys);
 
@@ -154,15 +177,46 @@
                             ${key.expires_at ? `<p><span class="font-medium">Expires:</span> ${formatDate(key.expires_at)}</p>` : ''}
                             ${key.revoked_at ? `<p><span class="font-medium">Revoked:</span> ${formatDate(key.revoked_at)}</p>` : ''}
                         </div>
+                        <div class="mt-3 flex items-center gap-2 text-sm">
+                            <span class="font-medium text-gray-700">Agent:</span>
+                            ${key.agent_id
+                                ? `<span class="px-2 py-1 text-xs font-medium bg-purple-100 text-purple-700 rounded">🤖 ${escapeHtml(agentsById[key.agent_id]?.label || key.agent_id)}</span>`
+                                : '<span class="text-gray-400">unbound (attributes to your username)</span>'
+                            }
+                        </div>
                     </div>
-                    ${!key.revoked_at ? `
-                        <button
-                            onclick="revokeAPIKey('${key.id}')"
-                            class="btn-danger w-auto px-4 py-2 text-sm"
-                        >
-                            Revoke
-                        </button>
-                    ` : ''}
+                    <div class="flex flex-col gap-2 items-end">
+                        ${!key.revoked_at ? `
+                            <div class="flex items-center gap-2">
+                                ${Object.keys(agentsById).length
+                                    ? `<select id="agentSelect-${key.id}" class="text-sm border border-gray-300 rounded-lg px-2 py-1.5">
+                                        ${key.agent_id
+                                            ? `<option value="">Unbind agent</option>`
+                                            : `<option value="">Bind to agent…</option>`
+                                        }
+                                        ${Object.values(agentsById).map(a => `
+                                            <option value="${escapeHtml(a.agent_id)}" ${a.agent_id === key.agent_id ? 'selected' : ''}>
+                                                ${escapeHtml(a.label)}
+                                            </option>
+                                        `).join('')}
+                                    </select>
+                                    <button
+                                        onclick="applyAgentBinding('${key.id}')"
+                                        class="btn-primary w-auto px-3 py-1.5 text-sm"
+                                    >
+                                        Apply
+                                    </button>`
+                                    : `<a href="/agents/" class="text-sm text-blue-600 hover:underline">Mint an agent first</a>`
+                                }
+                            </div>
+                            <button
+                                onclick="revokeAPIKey('${key.id}')"
+                                class="btn-danger w-auto px-4 py-2 text-sm"
+                            >
+                                Revoke
+                            </button>
+                        ` : ''}
+                    </div>
                 </div>
             </div>
         `).join('');
@@ -194,6 +248,36 @@
         } catch (error) {
             console.error('Error revoking API key:', error);
             alert('Failed to revoke API key. Please try again.');
+        }
+    }
+
+    // Bind / unbind an agent on a key (RFC-010 PATCH /api-keys/<id>)
+    // Empty selection on a bound key = unbind; a picked agent = bind/re-bind
+    async function applyAgentBinding(keyId) {
+        const select = document.getElementById(`agentSelect-${keyId}`);
+        const agentId = select.value || null;
+
+        const token = getAuthToken();
+
+        try {
+            const response = await fetch(`/api-keys/${keyId}`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ agent_id: agentId })
+            });
+
+            if (response.ok) {
+                loadAPIKeys();
+            } else {
+                const error = await response.json();
+                alert('Failed to update binding: ' + (error.error?.message || 'Unknown error'));
+            }
+        } catch (error) {
+            console.error('Error updating agent binding:', error);
+            alert('Failed to update binding. Please try again.');
         }
     }
 

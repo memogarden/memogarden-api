@@ -16,6 +16,26 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # poetry path dependencies: ../memogarden-system and ../memogarden-utils.
+      # checkout places repos under $GITHUB_WORKSPACE (the repo dir); move them
+      # up one level so the ../ paths resolve.
+      - name: Checkout memogarden-utils sibling
+        uses: actions/checkout@v4
+        with:
+          repository: memogarden/memogarden-utils
+          path: memogarden-utils
+
+      - name: Checkout memogarden-system sibling
+        uses: actions/checkout@v4
+        with:
+          repository: memogarden/memogarden-system
+          path: memogarden-system
+
+      - name: Position siblings
+        run: |
+          mv "$GITHUB_WORKSPACE/memogarden-utils" "$GITHUB_WORKSPACE/../memogarden-utils"
+          mv "$GITHUB_WORKSPACE/memogarden-system" "$GITHUB_WORKSPACE/../memogarden-system"
+
       - name: Install Poetry
         run: |
           curl -sSL https://install.python-poetry.org | python3 -

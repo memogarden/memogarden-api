@@ -142,17 +142,43 @@ class APIKeyCreate(APIKeyBase):
     Optionally specify expiration date. If expires_at is omitted or null,
     the API key does not expire.
 
+    Optionally bind the key to an Agent entity (RFC-010): bound keys
+    attribute their operations to the agent (actor = agent entity uuid,
+    actor_type = "agent") instead of the bare username. The agent must
+    already exist (POST /agents) and be owned by the caller.
+
     Example:
     ```json
     {
         "name": "claude-code",
-        "expires_at": "2026-12-31T23:59:59Z"
+        "expires_at": "2026-12-31T23:59:59Z",
+        "agent_id": "core_6b0f1e2a-..."
     }
     ```
     """
 
     expires_at: datetime | None = Field(
         default=None, description="Optional expiration timestamp (ISO 8601 UTC, null for no expiry)"
+    )
+    agent_id: str | None = Field(
+        default=None,
+        description="Optional Agent entity uuid (core_...) to bind this key to (RFC-010)",
+    )
+
+
+class APIKeyUpdate(BaseModel):
+    """
+    Request body for updating an API key (PATCH /api-keys/<id>, RFC-010).
+
+    agent_id semantics follow model_fields_set:
+    - field absent: no change
+    - field null: unbind (attribution reverts to the owning username)
+    - field set: bind / re-bind to the given Agent entity
+    """
+
+    agent_id: str | None = Field(
+        default=None,
+        description="Agent entity uuid to bind, null to unbind; absent = no change",
     )
 
 
@@ -184,6 +210,9 @@ class APIKeyResponse(APIKeyBase):
         description="Full API key (only shown on creation, null in list responses)",
     )
     prefix: str = Field(..., description="API key prefix for display (e.g., 'mg_sk_agent_')")
+    agent_id: str | None = Field(
+        default=None,
+        description="Bound Agent entity uuid (core_...), null if unbound (RFC-010)")
     expires_at: datetime | None = Field(
         default=None, description="Expiration timestamp (ISO 8601 UTC, null if no expiry)")
     created_at: datetime = Field(..., description="When the API key was created (ISO 8601 UTC)")
@@ -217,6 +246,9 @@ class APIKeyListResponse(APIKeyBase):
 
     id: str = Field(..., description="UUID of the API key")
     prefix: str = Field(..., description="API key prefix for display (e.g., 'mg_sk_agent_')")
+    agent_id: str | None = Field(
+        default=None,
+        description="Bound Agent entity uuid (core_...), null if unbound (RFC-010)")
     expires_at: datetime | None = Field(
         default=None, description="Expiration timestamp (ISO 8601 UTC, null if no expiry)")
     created_at: datetime = Field(..., description="When the API key was created (ISO 8601 UTC)")
@@ -225,6 +257,92 @@ class APIKeyListResponse(APIKeyBase):
     revoked_at: datetime | None = Field(
         default=None, description="When the key was revoked (ISO 8601 UTC, null if active)")
     model_config = ConfigDict(from_attributes=True)
+
+
+# ============================================================================
+# Agent Schemas (RFC-010)
+# ============================================================================
+
+
+class AgentCreate(BaseModel):
+    """
+    Request body for minting an Agent entity (POST /agents, RFC-010).
+
+    Identity issuance is explicit and operator-gated: this endpoint is
+    JWT-only, and no code path in authentication ever creates agents.
+
+    Example:
+    ```json
+    {
+        "label": "claude-code",
+        "description": "ZCode sessions on the laptop"
+    }
+    ```
+    """
+
+    label: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Operator-facing name; unique among Agent entities",
+    )
+    description: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Free text: what this agent is and where it runs",
+    )
+
+
+class AgentResponse(BaseModel):
+    """
+    API response for a minted Agent entity.
+
+    agent_id is the canonical identity: it is the `actor` recorded on
+    Action facts for operations performed with bound keys (RFC-010).
+
+    Example:
+    ```json
+    {
+        "agent_id": "core_6b0f1e2a-...",
+        "label": "claude-code",
+        "description": "ZCode sessions on the laptop",
+        "owner": "550e8400-...",
+        "created_at": "2026-11-06T09:00:00Z"
+    }
+    ```
+    """
+
+    agent_id: str = Field(..., description="Agent entity uuid (core_...)")
+    label: str = Field(..., description="Operator-facing name")
+    description: str | None = Field(default=None, description="Free-text description")
+    owner: str = Field(..., description="Owning user id")
+    created_at: datetime = Field(..., description="When the agent was minted (ISO 8601 UTC)")
+
+
+class AgentListResponse(AgentResponse):
+    """
+    API response for listing agents (management view).
+
+    Adds the prefixes of keys currently bound to the agent. Agents as data
+    are also readable through the Semantic API like any entity.
+
+    Example:
+    ```json
+    {
+        "agent_id": "core_6b0f1e2a-...",
+        "label": "claude-code",
+        "description": "ZCode sessions on the laptop",
+        "owner": "550e8400-...",
+        "created_at": "2026-11-06T09:00:00Z",
+        "key_prefixes": ["mg_sk_agent_9a2b"],
+        "bound_key_count": 1
+    }
+    ```
+    """
+
+    key_prefixes: list[str] = Field(
+        default_factory=list, description="Prefixes of active keys bound to this agent")
+    bound_key_count: int = Field(default=0, description="Number of active keys bound")
 
 
 # ============================================================================

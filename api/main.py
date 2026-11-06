@@ -17,6 +17,7 @@ from system.exceptions import (
     AuthenticationError,
     LockConflictError,
     MemoGardenError,
+    PermissionDenied,
     ResourceNotFound,
     ValidationError,
 )
@@ -228,6 +229,20 @@ def _register_error_handlers(app):
         if error.details:
             response["error"]["details"] = error.details
         return jsonify(response), 409
+
+    @app.errorhandler(PermissionDenied)
+    def handle_permission_denied(error):
+        """Handle PermissionDenied exceptions (e.g. RFC-010 identity
+        protection on the Semantic API) as 403."""
+        response = {
+            "error": {
+                "type": "PermissionDenied",
+                "message": error.message
+            }
+        }
+        if error.details:
+            response["error"]["details"] = error.details
+        return jsonify(response), 403
 
     @app.errorhandler(MemoGardenError)
     def handle_memo_garden_error(error):

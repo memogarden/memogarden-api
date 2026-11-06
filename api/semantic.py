@@ -63,6 +63,7 @@ from api.schemas.semantic import (
 from system.exceptions import (
     AuthenticationError,
     MemoGardenError,
+    PermissionDenied,
     ResourceNotFound,
 )
 from system.exceptions import (
@@ -145,8 +146,10 @@ def authenticate():
     """
     Require authentication for all Semantic API requests.
 
-    Sets g.username and g.user_id for use in handlers.
-    The actor field in the response will be the authenticated user's ID.
+    Sets g.username, g.user_id, and the RFC-010 attribution fields
+    g.actor / g.actor_type for use in handlers and the response envelope.
+    The actor field in the response is the Agent entity uuid for
+    bound-key requests, the username otherwise.
     """
     from api.middleware.decorators import _authenticate_request
     _authenticate_request()
@@ -178,8 +181,9 @@ def semantic_api():
             "result": {...}
         }
     """
-    # Get authenticated user
-    actor = g.username
+    # Get authenticated principal (RFC-010): Agent entity uuid for
+    # bound-key requests, username otherwise
+    actor = getattr(g, "actor", g.username)
 
     # Parse request JSON
     if request.json is None:
@@ -288,6 +292,9 @@ def semantic_api():
             status_code = 400
         elif isinstance(e, AuthenticationError):
             status_code = 401
+        elif isinstance(e, PermissionDenied):
+            # RFC-010 identity protection surfaces as 403 here
+            status_code = 403
         else:
             status_code = 500
 

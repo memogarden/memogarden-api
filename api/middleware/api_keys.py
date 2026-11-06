@@ -1,18 +1,34 @@
-"""API key service for programmatic authentication.
+"""API key and agent identity service (RFC-010).
 
-This module provides API key operations:
-- API key CRUD operations
-- API key verification for authentication
+This module provides:
+- API key CRUD operations (optionally bound to an Agent entity)
+- Agent entity issuance (operator-gated identity, RFC-010)
+- API key verification for authentication (returns the agent binding)
+- Agent bind / re-bind / unbind for existing keys
 
 Confines bcrypt dependency for API key hashing to this module only.
 """
 
+import json
 import sqlite3
 from datetime import datetime
 
-from utils import isodatetime, secret
+from system.exceptions import (
+    LockConflictError,
+    PermissionDenied,
+    ResourceNotFound,
+    ValidationError,
+)
+from utils import hash_chain, isodatetime, secret, uid
 
-from .schemas import APIKeyCreate, APIKeyListResponse, APIKeyResponse
+from .schemas import (
+    AgentCreate,
+    AgentListResponse,
+    AgentResponse,
+    APIKeyCreate,
+    APIKeyListResponse,
+    APIKeyResponse,
+)
 from .service import hash_password  # Reuse password hashing for API keys
 
 # ============================================================================
@@ -139,11 +155,13 @@ def create_api_key(conn: sqlite3.Connection, user_id: str, data: APIKeyCreate) -
     key_hash = hash_api_key(plain_key)
     key_prefix = get_api_key_prefix(plain_key)
 
+    # RFC-010: validate the agent binding (explicit, operator-gated)
+    agent_entity_id = None
+    if data.agent_id is not None:
+        agent_entity_id = _validate_agent_for_user(conn, data.agent_id, user_id)
+
     # Create entity registry entry first (same ID as API key)
     # Include required fields for new schema (hash, version, data)
-    import json
-
-    from utils import hash_chain
     entity_hash = hash_chain.compute_entity_hash(
         entity_type="ApiKey",
         created_at=now,
@@ -166,9 +184,9 @@ def create_api_key(conn: sqlite3.Connection, user_id: str, data: APIKeyCreate) -
 
     # Create API key entity (foreign key to entity)
     conn.execute(
-        """INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix, expires_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (api_key_id, user_id, data.name, key_hash, key_prefix, expires_at_str, now)
+        """INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix, agent_entity_id, expires_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (api_key_id, user_id, data.name, key_hash, key_prefix, agent_entity_id, expires_at_str, now)
     )
 
     return APIKeyResponse(
@@ -176,6 +194,7 @@ def create_api_key(conn: sqlite3.Connection, user_id: str, data: APIKeyCreate) -
         name=data.name,
         key=plain_key,  # Full key only shown on creation
         prefix=key_prefix,
+        agent_id=agent_entity_id,
         expires_at=data.expires_at if isinstance(data.expires_at, datetime) else (isodatetime.to_datetime(data.expires_at) if data.expires_at else None),
         created_at=isodatetime.to_datetime(now),
         last_seen=None,
@@ -202,7 +221,7 @@ def list_api_keys(conn: sqlite3.Connection, user_id: str) -> list[APIKeyListResp
     ```
     """
     cursor = conn.execute(
-        """SELECT id, name, key_prefix, expires_at, created_at, last_seen, revoked_at
+        """SELECT id, name, key_prefix, agent_entity_id, expires_at, created_at, last_seen, revoked_at
         FROM api_keys
         WHERE user_id = ?
         ORDER BY created_at DESC""",
@@ -215,6 +234,7 @@ def list_api_keys(conn: sqlite3.Connection, user_id: str) -> list[APIKeyListResp
             id=row["id"],
             name=row["name"],
             prefix=row["key_prefix"],
+            agent_id=row["agent_entity_id"],
             expires_at=isodatetime.to_datetime(row["expires_at"]) if row["expires_at"] else None,
             created_at=isodatetime.to_datetime(row["created_at"]),
             last_seen=isodatetime.to_datetime(row["last_seen"]) if row["last_seen"] else None,
@@ -272,7 +292,7 @@ def get_api_key_by_id(conn: sqlite3.Connection, api_key_id: str) -> APIKeyListRe
     ```
     """
     cursor = conn.execute(
-        """SELECT id, name, key_prefix, expires_at, created_at, last_seen, revoked_at
+        """SELECT id, name, key_prefix, agent_entity_id, expires_at, created_at, last_seen, revoked_at
         FROM api_keys
         WHERE id = ?""",
         (api_key_id,)
@@ -286,6 +306,7 @@ def get_api_key_by_id(conn: sqlite3.Connection, api_key_id: str) -> APIKeyListRe
         id=row["id"],
         name=row["name"],
         prefix=row["key_prefix"],
+        agent_id=row["agent_entity_id"],
         expires_at=isodatetime.to_datetime(row["expires_at"]) if row["expires_at"] else None,
         created_at=isodatetime.to_datetime(row["created_at"]),
         last_seen=isodatetime.to_datetime(row["last_seen"]) if row["last_seen"] else None,
@@ -322,31 +343,36 @@ def update_last_seen(conn: sqlite3.Connection, api_key_id: str) -> None:
 # ============================================================================
 
 
-def verify_api_key_and_get_user(conn: sqlite3.Connection, plain_key: str) -> tuple[str, str] | None:
+def verify_api_key_and_get_user(conn: sqlite3.Connection, plain_key: str) -> tuple[str, str, str | None] | None:
     """
-    Verify an API key and return the user ID and API key ID.
+    Verify an API key and return the user ID, API key ID, and agent binding.
 
     Used by authentication middleware to authenticate API key requests.
+    The agent binding (RFC-010) is resolved here — read-only — so the
+    middleware can attribute the request: agent_entity_id is the bound
+    Agent entity uuid, or None for unbound keys (attribution falls back
+    to the owning username with actor_type "api_key").
 
     Args:
         conn: Database connection
-        plain_key: Plain text API key from Authorization header
+        plain_key: Plain text API key from the X-API-Key header
 
     Returns:
-        Tuple of (user_id, api_key_id) if valid, None otherwise
+        Tuple of (user_id, api_key_id, agent_entity_id) if valid,
+        None otherwise
 
     Example:
     ```python
     result = verify_api_key_and_get_user(conn, plain_key)
     if result:
-        user_id, api_key_id = result
-        print(f"Authenticated as user {user_id} with API key {api_key_id}")
+        user_id, api_key_id, agent_entity_id = result
+        print(f"Authenticated user {user_id}, agent binding: {agent_entity_id}")
     ```
     """
     # Get all active API keys and check each one
     # (We can't hash the input key and look it up because bcrypt has random salts)
     cursor = conn.execute(
-        """SELECT id, user_id, key_hash
+        """SELECT id, user_id, key_hash, agent_entity_id
         FROM api_keys
         WHERE revoked_at IS NULL"""
     )
@@ -355,6 +381,259 @@ def verify_api_key_and_get_user(conn: sqlite3.Connection, plain_key: str) -> tup
         if verify_api_key(plain_key, row["key_hash"]):
             # Update last_seen timestamp
             update_last_seen(conn, row["id"])
-            return (row["user_id"], row["id"])
+            return (row["user_id"], row["id"], row["agent_entity_id"])
 
     return None
+
+
+# ============================================================================
+# Agent Identity (RFC-010)
+# ============================================================================
+
+
+def _validate_agent_for_user(conn: sqlite3.Connection, agent_id: str, user_id: str) -> str:
+    """
+    Validate that agent_id references an Agent entity owned by user_id.
+
+    Read-only validation helper shared by key creation and binding.
+    Accepts the uuid with or without the canonical "core_" prefix and
+    returns the canonical (prefixed) form as stored in entity.uuid.
+
+    Args:
+        conn: Database connection
+        agent_id: Agent entity uuid (core_... or bare)
+        user_id: Owning user id
+
+    Returns:
+        Canonical agent entity uuid (core_...)
+
+    Raises:
+        ResourceNotFound: No Agent entity with that uuid
+        ValidationError: Entity exists but is not an Agent or not owned
+    """
+    canonical = uid.add_core_prefix(agent_id)
+    row = conn.execute(
+        "SELECT type, data FROM entity WHERE uuid = ?",
+        (canonical,)
+    ).fetchone()
+
+    if row is None:
+        raise ResourceNotFound(
+            "Agent not found",
+            {"agent_id": canonical}
+        )
+    if row["type"] != "Agent":
+        raise ValidationError(
+            "Entity exists but is not an Agent",
+            {"agent_id": canonical, "type": row["type"]}
+        )
+
+    owner = json.loads(row["data"]).get("owner")
+    if owner != user_id:
+        raise PermissionDenied(
+            "Agent is owned by a different user",
+            {"agent_id": canonical}
+        )
+
+    return canonical
+
+
+def create_agent(conn: sqlite3.Connection, user_id: str, data: AgentCreate) -> AgentResponse:
+    """
+    Mint an Agent entity (RFC-010 identity issuance).
+
+    The ONLY creation path for agent identity — callers must be
+    JWT-authenticated operator requests (enforced at the endpoint).
+    Authentication never creates agents (RFC-010 INV-1).
+
+    Args:
+        conn: Database connection
+        user_id: Owning user id
+        data: AgentCreate (label, optional description)
+
+    Returns:
+        AgentResponse for the minted agent
+
+    Raises:
+        LockConflictError: Label already used by another agent (409)
+
+    Example:
+    ```python
+    agent = create_agent(conn, user_id, AgentCreate(label="claude-code"))
+    print(agent.agent_id)  # core_...
+    ```
+    """
+    now = isodatetime.now()
+    agent_id = uid.add_core_prefix(secret.generate_uuid())
+
+    # Label uniqueness among agents (operator-facing; uuids are the real
+    # ids). Check-then-insert has a theoretical TOCTOU window under
+    # concurrent workers — acceptable at personal scale (RFC-010 Open
+    # Question 1); a partial unique index is the eventual fix.
+    collision = conn.execute(
+        "SELECT 1 FROM entity WHERE type = 'Agent' AND json_extract(data, '$.label') = ?",
+        (data.label,)
+    ).fetchone()
+    if collision:
+        raise LockConflictError(
+            "Agent label already in use",
+            {"label": data.label}
+        )
+
+    entity_data = {
+        "label": data.label,
+        "owner": user_id,
+    }
+    if data.description is not None:
+        entity_data["description"] = data.description
+
+    entity_hash = hash_chain.compute_entity_hash(
+        entity_type="Agent",
+        created_at=now,
+        updated_at=now,
+        previous_hash=None  # Initial entity has no previous hash
+    )
+    conn.execute(
+        """INSERT INTO entity (uuid, type, hash, version, created_at, updated_at, data)
+        VALUES (?, 'Agent', ?, ?, ?, ?, ?)""",
+        (agent_id, entity_hash, 1, now, now, json.dumps(entity_data))
+    )
+
+    return AgentResponse(
+        agent_id=agent_id,
+        label=data.label,
+        description=data.description,
+        owner=user_id,
+        created_at=isodatetime.to_datetime(now),
+    )
+
+
+def get_agent(conn: sqlite3.Connection, agent_id: str, user_id: str) -> AgentResponse:
+    """
+    Get an Agent entity by uuid (ownership-checked).
+
+    Args:
+        conn: Database connection
+        agent_id: Agent entity uuid
+        user_id: Owning user id
+
+    Returns:
+        AgentResponse
+
+    Raises:
+        ResourceNotFound: No Agent entity with that uuid
+        ValidationError: Not an Agent or not owned by user_id
+    """
+    canonical = _validate_agent_for_user(conn, agent_id, user_id)
+    row = conn.execute(
+        "SELECT data, created_at FROM entity WHERE uuid = ?",
+        (canonical,)
+    ).fetchone()
+    data = json.loads(row["data"])
+
+    return AgentResponse(
+        agent_id=canonical,
+        label=data["label"],
+        description=data.get("description"),
+        owner=data["owner"],
+        created_at=isodatetime.to_datetime(row["created_at"]),
+    )
+
+
+def list_agents(conn: sqlite3.Connection, user_id: str) -> list[AgentListResponse]:
+    """
+    List Agent entities owned by a user with their bound key prefixes.
+
+    Management listing only — agents as semantic-layer data are readable
+    through the Semantic API like any entity (RFC-010 §6.2).
+
+    Args:
+        conn: Database connection
+        user_id: Owning user id
+
+    Returns:
+        List of AgentListResponse (with bound key prefixes/counts)
+    """
+    cursor = conn.execute(
+        """SELECT e.uuid, e.data, e.created_at,
+               (SELECT COUNT(*) FROM api_keys k
+                WHERE k.agent_entity_id = e.uuid AND k.revoked_at IS NULL) AS bound_count,
+               (SELECT GROUP_CONCAT(k.key_prefix) FROM api_keys k
+                WHERE k.agent_entity_id = e.uuid AND k.revoked_at IS NULL) AS prefixes
+        FROM entity e
+        WHERE e.type = 'Agent' AND json_extract(e.data, '$.owner') = ?
+        ORDER BY e.created_at""",
+        (user_id,)
+    )
+
+    results = []
+    for row in cursor.fetchall():
+        data = json.loads(row["data"])
+        results.append(AgentListResponse(
+            agent_id=row["uuid"],
+            label=data["label"],
+            description=data.get("description"),
+            owner=data["owner"],
+            created_at=isodatetime.to_datetime(row["created_at"]),
+            key_prefixes=(row["prefixes"].split(",") if row["prefixes"] else []),
+            bound_key_count=row["bound_count"],
+        ))
+
+    return results
+
+
+def bind_agent_to_key(
+    conn: sqlite3.Connection,
+    api_key_id: str,
+    user_id: str,
+    agent_id: str | None,
+) -> APIKeyListResponse:
+    """
+    Bind, re-bind, or unbind an Agent entity on an existing API key.
+
+    Explicit operator action (RFC-010): this is the migration path for
+    keys that predate agent identity. Binding a revoked key is rejected;
+    attribution history lives in Action facts, never rewritten.
+
+    Args:
+        conn: Database connection
+        api_key_id: API key to update
+        user_id: Owning user id (authorization)
+        agent_id: Agent entity uuid to bind, or None to unbind
+
+    Returns:
+        Updated APIKeyListResponse
+
+    Raises:
+        ResourceNotFound: Key or agent not found
+        ValidationError: Ownership/type violation
+        LockConflictError: Key is revoked (409)
+    """
+    row = conn.execute(
+        "SELECT revoked_at FROM api_keys WHERE id = ? AND user_id = ?",
+        (api_key_id, user_id)
+    ).fetchone()
+
+    if row is None:
+        raise ResourceNotFound(
+            "API key not found",
+            {"api_key_id": api_key_id}
+        )
+    if row["revoked_at"] is not None:
+        raise LockConflictError(
+            "Cannot bind a revoked API key",
+            {"api_key_id": api_key_id}
+        )
+
+    agent_entity_id = None
+    if agent_id is not None:
+        agent_entity_id = _validate_agent_for_user(conn, agent_id, user_id)
+
+    conn.execute(
+        "UPDATE api_keys SET agent_entity_id = ? WHERE id = ? AND user_id = ?",
+        (agent_entity_id, api_key_id, user_id)
+    )
+
+    key = get_api_key_by_id(conn, api_key_id)
+    assert key is not None  # row existence verified above
+    return key

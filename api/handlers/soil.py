@@ -15,7 +15,9 @@ Publishes SSE events for fact operations:
 
 import json
 import logging
+import re
 
+from system.exceptions import ValidationError
 from system.soil import Fact, current_day, generate_soil_uuid, get_soil
 from utils import isodatetime, uid
 
@@ -339,6 +341,21 @@ def handle_query_facts(request: QueryRequest, actor: str) -> dict:
         if request.type:
             where_parts.append("_type = ?")
             params.append(request.type)
+
+        # RFC-010: equality filters on fact data fields (fully parameterized
+        # json_extract paths; dotted keys address nested fields, e.g.
+        # "params.resource"). Powers per-agent traceability:
+        #   {"op": "query", "target_type": "fact", "type": "Action",
+        #    "filters": {"actor": "core_...", "actor_type": "agent"}}
+        if request.filters:
+            for field, value in request.filters.items():
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", field):
+                    raise ValidationError(
+                        f"Invalid filter field: {field!r} (expected plain or dotted data field name)"
+                    )
+                where_parts.append("json_extract(data, ?) = ?")
+                params.append(f"$.{field}")
+                params.append(value)
 
         # Filter by superseded status (default: exclude superseded)
         where_parts.append("superseded_by IS NULL")

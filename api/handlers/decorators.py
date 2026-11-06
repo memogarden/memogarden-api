@@ -39,6 +39,8 @@ import time
 import traceback
 from functools import wraps
 
+from flask import g
+
 from system.core import get_core
 from system.soil import Fact, SystemRelation, current_day, generate_soil_uuid, get_soil
 from utils import isodatetime, uid
@@ -49,6 +51,16 @@ from system.exceptions import (
     LockConflictError,
     PermissionDenied,
 )
+
+
+def _current_actor_type() -> str | None:
+    """RFC-010: actor_type from the auth middleware (flask.g).
+
+    "agent" (bound API key) | "api_key" (unbound key) | "operator" (JWT).
+    Defaults to None for non-request contexts (e.g. background jobs
+    writing facts without an HTTP request).
+    """
+    return getattr(g, "actor_type", None)
 
 
 # ============================================================================
@@ -110,6 +122,7 @@ def with_audit(handler_func):
             canonical_at=isodatetime.now(),
             data={
                 "actor": actor,
+                "actor_type": _current_actor_type(),
                 "operation": operation,
                 "params": _serialize_params(request_model),
                 "context": getattr(request_model, 'context', None),
