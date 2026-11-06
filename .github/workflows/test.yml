@@ -16,6 +16,19 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # poetry path dependencies: ../memogarden-system and ../memogarden-utils
+      - name: Checkout memogarden-utils sibling
+        uses: actions/checkout@v4
+        with:
+          repository: memogarden/memogarden-utils
+          path: memogarden-utils
+
+      - name: Checkout memogarden-system sibling
+        uses: actions/checkout@v4
+        with:
+          repository: memogarden/memogarden-system
+          path: memogarden-system
+
       - name: Install Poetry
         run: |
           curl -sSL https://install.python-poetry.org | python3 -
