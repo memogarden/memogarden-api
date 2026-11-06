@@ -273,6 +273,26 @@ def api_key_new_page():
     return render_template("api_key_new.html")
 
 
+@auth_views_bp.route("/agents/", methods=["GET"])
+def agents_page():
+    """
+    Display agent identity management page (RFC-010).
+
+    NOTE the trailing slash: the JSON API owns bare `GET /agents`
+    (auth_bp list endpoint, RFC-010 contract), mirroring how the
+    /api-keys page coexists with the /api-keys/ JSON endpoint.
+
+    Lists the operator's Agent entities (with bound-key counts) and
+    provides the mint form. Identity issuance is operator-gated: this
+    page uses the JWT from localStorage client-side, same as the API-key
+    pages.
+
+    Returns:
+        HTML page for minting and viewing agents
+    """
+    return render_template("agents.html")
+
+
 # ============================================================================
 # Settings Page
 # ============================================================================

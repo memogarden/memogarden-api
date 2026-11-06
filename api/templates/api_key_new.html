@@ -13,6 +13,9 @@
                     <p class="text-sm text-gray-600">Create New API Key</p>
                 </div>
                 <div class="flex items-center gap-4">
+                    <a href="/agents/" class="text-sm text-gray-600 hover:text-gray-900">
+                        Agents
+                    </a>
                     <span id="userDisplay" class="text-sm text-gray-700"></span>
                     <a href="/api-keys" class="text-sm text-gray-600 hover:text-gray-900">
                         Back to API Keys
@@ -119,11 +122,25 @@
                     </p>
                 </div>
 
+                <div class="mb-6">
+                    <label for="agent_id" class="block text-sm font-medium text-gray-700 mb-2">
+                        Bind to Agent (Optional)
+                    </label>
+                    <select id="agent_id" name="agent_id" class="input-field">
+                        <option value="">No agent — attributes to your username</option>
+                    </select>
+                    <p class="mt-1 text-sm text-gray-500">
+                        Operations made with a bound key are attributed to the agent
+                        in the audit trail. Mint agents on the
+                        <a href="/agents/" class="text-blue-600 hover:underline">Agents</a> page.
+                    </p>
+                </div>
+
                 <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
                     <p class="text-sm text-blue-800">
-                        <strong>Usage:</strong> Use this key with the Authorization header:
+                        <strong>Usage:</strong> Agents authenticate by sending this key in the header:
                         <code class="block mt-2 bg-white px-2 py-1 rounded text-xs">
-                            Authorization: Bearer mg_sk_agent_...
+                            X-API-Key: mg_sk_agent_...
                         </code>
                     </p>
                 </div>
@@ -168,6 +185,28 @@
         window.location.href = '/login';
     });
 
+    // Load agents for the optional binding dropdown (RFC-010)
+    async function loadAgentOptions() {
+        try {
+            const response = await fetch('/agents', {
+                method: 'GET',
+                headers: { 'Authorization': `Bearer ${getAuthToken()}` }
+            });
+            if (!response.ok) return;
+
+            const agents = await response.json();
+            const select = document.getElementById('agent_id');
+            for (const agent of agents) {
+                const option = document.createElement('option');
+                option.value = agent.agent_id;
+                option.textContent = `${agent.label}${agent.bound_key_count ? ` (${agent.bound_key_count} key${agent.bound_key_count > 1 ? 's' : ''} bound)` : ''}`;
+                select.appendChild(option);
+            }
+        } catch (error) {
+            console.error('Error loading agents:', error);
+        }
+    }
+
     // Form submission handler
     document.getElementById('createApiKeyForm').addEventListener('submit', async function(e) {
         e.preventDefault();
@@ -180,6 +219,11 @@
         const expiresAt = formData.get('expires_at');
         if (expiresAt) {
             data.expires_at = new Date(expiresAt).toISOString();
+        }
+
+        const agentId = formData.get('agent_id');
+        if (agentId) {
+            data.agent_id = agentId;
         }
 
         const token = getAuthToken();
@@ -231,5 +275,7 @@
     function doneWithKey() {
         window.location.href = '/api-keys';
     }
+
+    loadAgentOptions();
 </script>
 {% endblock %}
