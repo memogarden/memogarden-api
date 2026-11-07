@@ -146,6 +146,50 @@ class TestRegistration:
         assert response.status_code == 201
         assert response.get_json()["capabilities"] == ["sync", "create_relations"]
 
+    def test_run_relations_resolve_same_run_facts(self, client, auth_headers, tmp_path, monkeypatch):
+        """The runtime commits each fact before create_relations — a provider
+        resolving a fact stored earlier in the SAME run through its own Soil
+        connection (separate transaction) must find it (tada note→task,
+        gmail reply→parent)."""
+        module_name = f"same_run_rel_{uuid.uuid4().hex[:8]}"
+        (tmp_path / f"{module_name}.py").write_text(
+            "class SameRunRelProvider:\n"
+            "    def __init__(self, config=None):\n"
+            "        self.config = config or {}\n"
+            "    def sync(self, since=None):\n"
+            "        yield {\"type\": \"Task\", \"data\": {\"source_id\": \"t1\", \"title\": \"x\"}, \"metadata\": {}}\n"
+            "        yield {\"type\": \"Note\", \"data\": {\"description\": \"n\"}, \"metadata\": {\"task_source_id\": \"t1\"}}\n"
+            "    def create_relations(self, fact):\n"
+            "        if getattr(fact, \"_type\", None) != \"Note\":\n"
+            "            return []\n"
+            "        from system.soil import generate_soil_uuid, get_soil\n"
+            "        from system.soil.relation import SystemRelation\n"
+            "        with get_soil() as soil:\n"
+            "            row = soil._get_connection().execute(\n"
+            "                \"SELECT uuid FROM item WHERE _type='Task' AND json_extract(data,'$.source_id')='t1'\"\n"
+            "            ).fetchone()\n"
+            "        if row is None:\n"
+            "            return []\n"
+            "        return [SystemRelation(\n"
+            "            uuid=generate_soil_uuid(), kind=\"contained_by\", source=fact.uuid,\n"
+            "            source_type=\"item\", target=row[\"uuid\"], target_type=\"item\",\n"
+            "            created_at=0, evidence=None, metadata=None)]\n"
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        body = _register(client, auth_headers, _payload(module_name, **{"class": "SameRunRelProvider"}))
+        assert body.status_code == 201
+        client.post("/api/v1/providers/testprov/run", headers=auth_headers)
+        manifest = _wait_for_finish(client, auth_headers, "testprov")
+        assert manifest["last_status"] == "success"
+        # The relation row itself is the proof of cross-connection visibility.
+        from system.soil import get_soil
+
+        with get_soil() as soil:
+            (relations,) = soil._get_connection().execute(
+                "SELECT COUNT(*) FROM system_relation"
+            ).fetchone()
+        assert relations == 1
+
 
 class TestListGetPatch:
     def test_list_empty(self, client, auth_headers):

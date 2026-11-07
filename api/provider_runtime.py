@@ -119,6 +119,12 @@ def _execute_run(
             for yielded in provider.sync(since=since):
                 fact = _to_fact(yielded)
                 fact_uuid = soil.create_fact(fact)
+                # Commit before create_relations: providers hold their own
+                # Soil instance (get_soil() is not cached), and a separate
+                # connection cannot see this transaction's uncommitted rows —
+                # same-run relation targets (a note's task, a reply's parent)
+                # would resolve to nothing.
+                soil.commit()
                 facts_inserted += 1
                 if callable(getattr(provider, "create_relations", None)):
                     for relation in (provider.create_relations(fact) or []):
