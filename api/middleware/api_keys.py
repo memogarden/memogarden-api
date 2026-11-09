@@ -189,6 +189,11 @@ def create_api_key(conn: sqlite3.Connection, user_id: str, data: APIKeyCreate) -
         (api_key_id, user_id, data.name, key_hash, key_prefix, agent_entity_id, expires_at_str, now)
     )
 
+    # RFC-011 §6: a key created bound to an agent inherits the agent's
+    # grant envelope at bind (creation) time
+    if agent_entity_id:
+        _merge_agent_envelope(conn, api_key_id, agent_entity_id)
+
     return APIKeyResponse(
         id=api_key_id,
         name=data.name,
@@ -358,21 +363,24 @@ def verify_api_key_and_get_user(conn: sqlite3.Connection, plain_key: str) -> tup
         plain_key: Plain text API key from the X-API-Key header
 
     Returns:
-        Tuple of (user_id, api_key_id, agent_entity_id) if valid,
-        None otherwise
+        Tuple of (user_id, api_key_id, agent_entity_id, grants) if valid,
+        None otherwise. grants is the parsed list of RFC-011 scope grants
+        (possibly empty); the middleware stores it on flask.g — a JWT
+        session instead gets None, meaning operator sovereignty (SG-11:
+        implicit all-grants).
 
     Example:
     ```python
     result = verify_api_key_and_get_user(conn, plain_key)
     if result:
-        user_id, api_key_id, agent_entity_id = result
+        user_id, api_key_id, agent_entity_id, grants = result
         print(f"Authenticated user {user_id}, agent binding: {agent_entity_id}")
     ```
     """
     # Get all active API keys and check each one
     # (We can't hash the input key and look it up because bcrypt has random salts)
     cursor = conn.execute(
-        """SELECT id, user_id, key_hash, agent_entity_id
+        """SELECT id, user_id, key_hash, agent_entity_id, grants
         FROM api_keys
         WHERE revoked_at IS NULL"""
     )
@@ -381,7 +389,8 @@ def verify_api_key_and_get_user(conn: sqlite3.Connection, plain_key: str) -> tup
         if verify_api_key(plain_key, row["key_hash"]):
             # Update last_seen timestamp
             update_last_seen(conn, row["id"])
-            return (row["user_id"], row["id"], row["agent_entity_id"])
+            grants = json.loads(row["grants"]) if row["grants"] else []
+            return (row["user_id"], row["id"], row["agent_entity_id"], grants)
 
     return None
 
@@ -628,6 +637,9 @@ def bind_agent_to_key(
     agent_entity_id = None
     if agent_id is not None:
         agent_entity_id = _validate_agent_for_user(conn, agent_id, user_id)
+        # RFC-011 §6: a bound key inherits the agent's grant envelope at
+        # bind time — the union of grants held by the agent's other keys.
+        _merge_agent_envelope(conn, api_key_id, agent_entity_id)
 
     conn.execute(
         "UPDATE api_keys SET agent_entity_id = ? WHERE id = ? AND user_id = ?",
@@ -637,3 +649,220 @@ def bind_agent_to_key(
     key = get_api_key_by_id(conn, api_key_id)
     assert key is not None  # row existence verified above
     return key
+
+
+# ============================================================================
+# Scope Grants (RFC-011 §4.3, §6)
+# ============================================================================
+
+
+def _load_grants(conn: sqlite3.Connection, api_key_id: str) -> list[dict]:
+    """Read a key's grants array (parsed)."""
+    row = conn.execute(
+        "SELECT grants FROM api_keys WHERE id = ?", (api_key_id,)
+    ).fetchone()
+    if row is None:
+        raise ResourceNotFound("API key not found", {"api_key_id": api_key_id})
+    return json.loads(row["grants"]) if row["grants"] else []
+
+
+def _save_grants(conn: sqlite3.Connection, api_key_id: str, grants: list[dict]) -> None:
+    """Persist a key's grants array."""
+    conn.execute(
+        "UPDATE api_keys SET grants = ? WHERE id = ?",
+        (json.dumps(grants), api_key_id)
+    )
+
+
+def _agent_grant_envelope(
+    conn: sqlite3.Connection, agent_id: str, exclude_key_id: str | None = None
+) -> list[dict]:
+    """Union of grants across the keys bound to an agent.
+
+    The agent's grant envelope is DERIVED (RFC-011 §4.3) — enforcement
+    reads key rows; the envelope is the union of what its keys hold, used
+    for envelope inheritance at bind time and for introspection.
+    agent_id may come prefixed or bare (canonicalized here).
+    """
+    rows = conn.execute(
+        "SELECT grants FROM api_keys "
+        "WHERE agent_entity_id = ? AND revoked_at IS NULL AND id != ?",
+        (uid.add_core_prefix(agent_id), exclude_key_id or "")
+    ).fetchall()
+    envelope: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        for g in json.loads(row["grants"]) if row["grants"] else []:
+            if g["scope_uuid"] not in seen:
+                seen.add(g["scope_uuid"])
+                envelope.append(g)
+    return envelope
+
+
+def _merge_agent_envelope(
+    conn: sqlite3.Connection, api_key_id: str, agent_entity_id: str
+) -> None:
+    """RFC-011 §6: union the agent's envelope into a key's grants.
+
+    Called when a key is created bound to an agent or (re-)bound to one —
+    future bindings inherit the envelope at bind time. Existing grants on
+    the key are preserved (union, deduped by scope).
+    """
+    envelope = _agent_grant_envelope(
+        conn, agent_entity_id, exclude_key_id=api_key_id
+    )
+    if not envelope:
+        return
+    grants = _load_grants(conn, api_key_id)
+    held = {g["scope_uuid"] for g in grants}
+    merged = grants + [g for g in envelope if g["scope_uuid"] not in held]
+    _save_grants(conn, api_key_id, merged)
+
+
+def grant_scope_to_key(
+    conn: sqlite3.Connection,
+    user_id: str,
+    api_key_id: str,
+    scope_uuid: str,
+    expires_at: str | None = None,
+) -> dict:
+    """Grant a scope to one API key (RFC-011 §6 POST /grants).
+
+    Appends a grant entry ({grant_id, scope_uuid, granted_at, expires_at}).
+    Idempotent per scope: re-granting a held scope refreshes nothing and
+    returns the existing entry (revoke + re-grant to change expiry).
+
+    Returns:
+        The grant entry as stored.
+    """
+    row = conn.execute(
+        "SELECT user_id FROM api_keys WHERE id = ?", (api_key_id,)
+    ).fetchone()
+    if row is None or row["user_id"] != user_id:
+        raise ResourceNotFound("API key not found", {"api_key_id": api_key_id})
+
+    grants = _load_grants(conn, api_key_id)
+    for g in grants:
+        if g["scope_uuid"] == scope_uuid:
+            return g
+
+    entry = {
+        "grant_id": uid.generate_uuid(),
+        "scope_uuid": scope_uuid,
+        "granted_at": isodatetime.now(),
+        "expires_at": expires_at,
+    }
+    grants.append(entry)
+    _save_grants(conn, api_key_id, grants)
+    return entry
+
+
+def grant_scope_to_agent(
+    conn: sqlite3.Connection,
+    user_id: str,
+    agent_id: str,
+    scope_uuid: str,
+    expires_at: str | None = None,
+) -> list[dict]:
+    """Grant a scope to an agent — i.e. to ALL keys bound to it (RFC-011 §6).
+
+    The operator thinks in agents; enforcement reads keys, so the grant is
+    written onto every currently-bound key. The agent's envelope (union of
+    its keys' grants) reflects the grant automatically. Future bindings
+    inherit at bind time (see bind_agent_to_key).
+
+    agent_id may come prefixed or bare; api_keys.agent_entity_id stores
+    the canonical (prefixed) form — validated via RFC-010's helper.
+
+    Returns:
+        List of grant entries created (one per bound key; empty if the
+        agent has no bound keys — the grant lands on the next binding).
+    """
+    canonical_agent_id = _validate_agent_for_user(conn, agent_id, user_id)
+
+    rows = conn.execute(
+        "SELECT id, grants FROM api_keys "
+        "WHERE agent_entity_id = ? AND user_id = ? AND revoked_at IS NULL",
+        (canonical_agent_id, user_id)
+    ).fetchall()
+
+    created: list[dict] = []
+    for row in rows:
+        grants = json.loads(row["grants"]) if row["grants"] else []
+        if any(g["scope_uuid"] == scope_uuid for g in grants):
+            continue
+        entry = {
+            "grant_id": uid.generate_uuid(),
+            "scope_uuid": scope_uuid,
+            "granted_at": isodatetime.now(),
+            "expires_at": expires_at,
+        }
+        grants.append(entry)
+        _save_grants(conn, row["id"], grants)
+        created.append(entry)
+    return created
+
+
+def revoke_grant(conn: sqlite3.Connection, user_id: str, grant_id: str) -> dict:
+    """Revoke a grant by id across the user's keys (RFC-011 §6 DELETE).
+
+    Immediate for future operations: grants are re-read per request, so
+    the next gated call fails. An in-flight session is not retroactively
+    ejected (RFC-011 §7); revoke the key itself for immediate ejection.
+
+    Returns:
+        {"api_key_id": ..., "grant": removed_entry}
+
+    Raises:
+        ResourceNotFound: No grant with this id on any of the user's keys.
+    """
+    rows = conn.execute(
+        "SELECT id, grants FROM api_keys WHERE user_id = ?", (user_id,)
+    ).fetchall()
+    for row in rows:
+        grants = json.loads(row["grants"]) if row["grants"] else []
+        kept = [g for g in grants if g.get("grant_id") != grant_id]
+        if len(kept) != len(grants):
+            removed = [g for g in grants if g.get("grant_id") == grant_id][0]
+            _save_grants(conn, row["id"], kept)
+            return {"api_key_id": row["id"], "grant": removed}
+    raise ResourceNotFound("Grant not found", {"grant_id": grant_id})
+
+
+def list_grants(
+    conn: sqlite3.Connection,
+    user_id: str,
+    key_id: str | None = None,
+    agent_id: str | None = None,
+) -> list[dict]:
+    """List grants for a key or an agent (RFC-011 §6 GET /grants).
+
+    Entries are flattened with their key attribution: each item is
+    {grant_id, scope_uuid, granted_at, expires_at, key_id}. For an agent,
+    the union over its bound keys (the envelope, attributed per key).
+    agent_id may come prefixed or bare (canonicalized internally).
+    """
+    if key_id:
+        row = conn.execute(
+            "SELECT user_id FROM api_keys WHERE id = ?", (key_id,)
+        ).fetchone()
+        if row is None or row["user_id"] != user_id:
+            raise ResourceNotFound("API key not found", {"api_key_id": key_id})
+        return [
+            {**g, "key_id": key_id} for g in _load_grants(conn, key_id)
+        ]
+
+    if agent_id:
+        canonical_agent_id = _validate_agent_for_user(conn, agent_id, user_id)
+        rows = conn.execute(
+            "SELECT id, grants FROM api_keys "
+            "WHERE agent_entity_id = ? AND user_id = ? AND revoked_at IS NULL",
+            (canonical_agent_id, user_id)
+        ).fetchall()
+        return [
+            {**g, "key_id": row["id"]}
+            for row in rows
+            for g in (json.loads(row["grants"]) if row["grants"] else [])
+        ]
+
+    raise ValidationError("Specify key_id or agent_id")

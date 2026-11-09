@@ -1209,19 +1209,25 @@ class TestLinkVerb:
 
 
 class TestSemanticAPIContextVerbs:
-    """Test Semantic API context verbs (RFC-003 v4)."""
+    """Test Semantic API context verbs (RFC-003 v5 / RFC-011).
 
-    def test_enter_scope_adds_to_active_set(self, client, auth_headers):
-        """Test enter verb adds scope to active set."""
-        # Create a scope (using Artifact as proxy)
-        scope_response = client.post(
+    These run under JWT operator sessions (SG-11 sovereignty), so the
+    grant gate is bypassed here; grant gating is covered in
+    test_rfc011_api.py.
+    """
+
+    def _create_scope(self, client, auth_headers, name):
+        response = client.post(
             "/mg",
-            json={"op": "create", "type": "Artifact", "data": {"name": "Project A"}},
+            json={"op": "create", "type": "Artifact", "data": {"name": name}},
             headers=auth_headers
         )
-        scope_uuid = scope_response.get_json()["result"]["uuid"]
+        return response.get_json()["result"]["uuid"]
 
-        # Enter scope
+    def test_enter_sets_active_scope(self, client, auth_headers):
+        """Enter adopts the scope; response carries active_scope."""
+        scope_uuid = self._create_scope(client, auth_headers, "Project A")
+
         response = client.post(
             "/mg",
             json={"op": "enter", "scope": scope_uuid},
@@ -1232,33 +1238,19 @@ class TestSemanticAPIContextVerbs:
         data = response.get_json()
         assert data["ok"] is True
 
-        # Verify response
         result = data["result"]
         assert result["scope"] == scope_uuid
-        assert scope_uuid in result["active_scopes"]
-        assert result["primary_scope"] == scope_uuid  # First scope becomes primary
+        assert result["active_scope"] == scope_uuid
+        assert result["previous_scope"] is None
 
-    def test_enter_multiple_scopes(self, client, auth_headers):
-        """Test entering multiple scopes."""
-        # Create two scopes
-        scope1_response = client.post(
-            "/mg",
-            json={"op": "create", "type": "Artifact", "data": {"name": "Project A"}},
-            headers=auth_headers
-        )
-        scope1_uuid = scope1_response.get_json()["result"]["uuid"]
+    def test_enter_is_exclusive_switch(self, client, auth_headers):
+        """INV-11a: no co-activation — second enter replaces the first,
+        with previous_scope reporting the switch."""
+        scope1_uuid = self._create_scope(client, auth_headers, "Project A")
+        scope2_uuid = self._create_scope(client, auth_headers, "Project B")
 
-        scope2_response = client.post(
-            "/mg",
-            json={"op": "create", "type": "Artifact", "data": {"name": "Project B"}},
-            headers=auth_headers
-        )
-        scope2_uuid = scope2_response.get_json()["result"]["uuid"]
-
-        # Enter first scope
         client.post("/mg", json={"op": "enter", "scope": scope1_uuid}, headers=auth_headers)
 
-        # Enter second scope
         response = client.post(
             "/mg",
             json={"op": "enter", "scope": scope2_uuid},
@@ -1266,53 +1258,32 @@ class TestSemanticAPIContextVerbs:
         )
 
         assert response.status_code == 200
-        data = response.get_json()
-        result = data["result"]
+        result = response.get_json()["result"]
+        assert result["active_scope"] == scope2_uuid
+        assert result["previous_scope"] == scope1_uuid
 
-        # Both scopes should be active
-        assert scope1_uuid in result["active_scopes"]
-        assert scope2_uuid in result["active_scopes"]
-
-        # First scope should still be primary (INV-11a: Focus Separation)
-        assert result["primary_scope"] == scope1_uuid
-
-    def test_enter_already_active_scope_fails(self, client, auth_headers):
-        """Test entering a scope that's already active fails."""
-        # Create and enter a scope
-        scope_response = client.post(
-            "/mg",
-            json={"op": "create", "type": "Artifact", "data": {"name": "Project A"}},
-            headers=auth_headers
-        )
-        scope_uuid = scope_response.get_json()["result"]["uuid"]
+    def test_enter_reenter_is_idempotent(self, client, auth_headers):
+        """RFC-011 §4.4: entering the already-active scope is a no-op."""
+        scope_uuid = self._create_scope(client, auth_headers, "Project A")
 
         client.post("/mg", json={"op": "enter", "scope": scope_uuid}, headers=auth_headers)
 
-        # Try to enter again
         response = client.post(
             "/mg",
             json={"op": "enter", "scope": scope_uuid},
             headers=auth_headers
         )
 
-        assert response.status_code == 400
-        data = response.get_json()
-        assert data["ok"] is False
-        assert "already in active set" in data["error"]["message"]
+        assert response.status_code == 200
+        result = response.get_json()["result"]
+        assert result["active_scope"] == scope_uuid
 
-    def test_leave_scope_removes_from_active_set(self, client, auth_headers):
-        """Test leave verb removes scope from active set."""
-        # Create and enter a scope
-        scope_response = client.post(
-            "/mg",
-            json={"op": "create", "type": "Artifact", "data": {"name": "Project A"}},
-            headers=auth_headers
-        )
-        scope_uuid = scope_response.get_json()["result"]["uuid"]
+    def test_leave_clears_active_scope(self, client, auth_headers):
+        """Leave releases the active scope (unscoped operation)."""
+        scope_uuid = self._create_scope(client, auth_headers, "Project A")
 
         client.post("/mg", json={"op": "enter", "scope": scope_uuid}, headers=auth_headers)
 
-        # Leave scope
         response = client.post(
             "/mg",
             json={"op": "leave", "scope": scope_uuid},
@@ -1320,25 +1291,14 @@ class TestSemanticAPIContextVerbs:
         )
 
         assert response.status_code == 200
-        data = response.get_json()
-        assert data["ok"] is True
-
-        # Verify scope removed
-        result = data["result"]
-        assert scope_uuid not in result["active_scopes"]
-        assert result["primary_scope"] is None  # Leaving primary clears it
+        result = response.get_json()["result"]
+        assert result["scope"] == scope_uuid
+        assert result["active_scope"] is None
 
     def test_leave_scope_not_active_fails(self, client, auth_headers):
-        """Test leaving a scope that's not active fails."""
-        # Create a scope (but don't enter it)
-        scope_response = client.post(
-            "/mg",
-            json={"op": "create", "type": "Artifact", "data": {"name": "Project A"}},
-            headers=auth_headers
-        )
-        scope_uuid = scope_response.get_json()["result"]["uuid"]
+        """Leaving a scope that is not active fails (400)."""
+        scope_uuid = self._create_scope(client, auth_headers, "Project A")
 
-        # Try to leave without entering (no context frame exists)
         response = client.post(
             "/mg",
             json={"op": "leave", "scope": scope_uuid},
@@ -1348,32 +1308,16 @@ class TestSemanticAPIContextVerbs:
         assert response.status_code == 400
         data = response.get_json()
         assert data["ok"] is False
-        # Either "no active context frame" or "not in active set" is acceptable
         error_msg = data["error"]["message"].lower()
-        assert "no active context frame" in error_msg or "not in active set" in error_msg
+        assert "no active context frame" in error_msg or "is not the active scope" in error_msg
 
-    def test_focus_scope_changes_primary(self, client, auth_headers):
-        """Test focus verb changes primary scope."""
-        # Create two scopes
-        scope1_response = client.post(
-            "/mg",
-            json={"op": "create", "type": "Artifact", "data": {"name": "Project A"}},
-            headers=auth_headers
-        )
-        scope1_uuid = scope1_response.get_json()["result"]["uuid"]
+    def test_focus_is_noop_alias(self, client, auth_headers):
+        """Focus is retired: responds with current active scope, no change."""
+        scope1_uuid = self._create_scope(client, auth_headers, "Project A")
+        scope2_uuid = self._create_scope(client, auth_headers, "Project B")
 
-        scope2_response = client.post(
-            "/mg",
-            json={"op": "create", "type": "Artifact", "data": {"name": "Project B"}},
-            headers=auth_headers
-        )
-        scope2_uuid = scope2_response.get_json()["result"]["uuid"]
-
-        # Enter both scopes
         client.post("/mg", json={"op": "enter", "scope": scope1_uuid}, headers=auth_headers)
-        client.post("/mg", json={"op": "enter", "scope": scope2_uuid}, headers=auth_headers)
 
-        # Focus on second scope
         response = client.post(
             "/mg",
             json={"op": "focus", "scope": scope2_uuid},
@@ -1381,38 +1325,22 @@ class TestSemanticAPIContextVerbs:
         )
 
         assert response.status_code == 200
-        data = response.get_json()
-        assert data["ok"] is True
+        result = response.get_json()["result"]
+        assert result["active_scope"] == scope1_uuid  # unchanged
 
-        # Verify primary changed
-        result = data["result"]
-        assert result["primary_scope"] == scope2_uuid
-        assert scope1_uuid in result["active_scopes"]
-        assert scope2_uuid in result["active_scopes"]
+    def test_focus_with_no_frame_reports_unscoped(self, client, auth_headers):
+        """Focus without a ContextFrame reports active_scope None (no error)."""
+        scope_uuid = self._create_scope(client, auth_headers, "Project A")
 
-    def test_focus_scope_not_active_fails(self, client, auth_headers):
-        """Test focusing on a scope that's not active fails."""
-        # Create a scope (but don't enter it)
-        scope_response = client.post(
-            "/mg",
-            json={"op": "create", "type": "Artifact", "data": {"name": "Project A"}},
-            headers=auth_headers
-        )
-        scope_uuid = scope_response.get_json()["result"]["uuid"]
-
-        # Try to focus without entering (no context frame exists)
         response = client.post(
             "/mg",
             json={"op": "focus", "scope": scope_uuid},
             headers=auth_headers
         )
 
-        assert response.status_code == 400
-        data = response.get_json()
-        assert data["ok"] is False
-        # Either "no active context frame" or "not in active set" is acceptable
-        error_msg = data["error"]["message"].lower()
-        assert "no active context frame" in error_msg or "not in active set" in error_msg
+        assert response.status_code == 200
+        result = response.get_json()["result"]
+        assert result["active_scope"] is None
 
     def test_context_verbs_require_authentication(self, client):
         """Test context verbs require authentication."""

@@ -166,6 +166,42 @@ class APIKeyCreate(APIKeyBase):
     )
 
 
+class GrantCreate(BaseModel):
+    """
+    Request body for issuing a scope grant (POST /grants, RFC-011 §6).
+
+    Exactly one of key_id / agent_id must be provided. agent_id grants
+    apply to ALL keys currently bound to that agent (future bindings
+    inherit the envelope at bind time). scope_uuid must reference an
+    existing Scope entity.
+
+    Example:
+    ```json
+    {
+        "agent_id": "core_6b0f1e2a-...",
+        "scope_uuid": "core_1c9d2e3a-...",
+        "expires_at": "2026-12-31T23:59:59Z"
+    }
+    ```
+    """
+
+    key_id: str | None = Field(
+        default=None,
+        description="API key id to grant (exclusive with agent_id)"
+    )
+    agent_id: str | None = Field(
+        default=None,
+        description="Agent entity uuid to grant (exclusive with key_id); applies to all its bound keys"
+    )
+    scope_uuid: str = Field(
+        ...,
+        description="Scope entity uuid (core_...) the principal may enter"
+    )
+    expires_at: datetime | None = Field(
+        default=None, description="Optional expiration (ISO 8601 UTC, null for no expiry)"
+    )
+
+
 class APIKeyUpdate(BaseModel):
     """
     Request body for updating an API key (PATCH /api-keys/<id>, RFC-010).

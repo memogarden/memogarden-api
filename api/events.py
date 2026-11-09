@@ -22,7 +22,9 @@ from typing import Dict, Set, Optional
 from flask import Blueprint, Response, current_app, g, request, stream_with_context
 
 from api.middleware.decorators import auth_required
+from api.middleware import scope_access
 from system.exceptions import AuthenticationError
+from utils import isodatetime, uid
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +281,23 @@ def events_stream():
 
     # Parse scope subscription
     scopes = _parse_scope_subscription(request)
+
+    # RFC-011 §4.9(5) / RFC-009 v1.1: subscriptions are grant-gated when
+    # enforcement is active — a connection may only subscribe to scopes
+    # its principal may enter. Non-granted scopes are dropped (logged);
+    # the connection still receives global (unscoped) events.
+    if scopes and scope_access.enforcement_enabled() and not scope_access.requester_has_all_scopes():
+        granted = {
+            uid.add_core_prefix(entry["scope_uuid"])
+            for entry in (getattr(g, "grants", None) or [])
+            if not entry.get("expires_at") or entry["expires_at"] > isodatetime.now()
+        }
+        dropped = scopes - granted
+        if dropped:
+            logger.warning(
+                f"SSE subscription dropped non-granted scopes for {username}: {sorted(dropped)}"
+            )
+            scopes = scopes - dropped
 
     # Register connection
     client_id, conn = sse_manager.register(user_id, username, scopes)

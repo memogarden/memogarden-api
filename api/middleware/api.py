@@ -13,21 +13,22 @@ from localhost and only when no users exist in the database.
 import logging
 import sqlite3
 
-from flask import Blueprint, g, jsonify
+from flask import Blueprint, g, jsonify, request
 
 from system.core import get_core
 from system.exceptions import AuthenticationError, ResourceNotFound, ValidationError
 from system.soil import Fact, generate_soil_uuid, get_soil
-from utils import isodatetime
+from utils import isodatetime, uid
 
 from ..validation import validate_request
-from . import api_keys, decorators, service, token
+from . import api_keys, decorators, scope_access, service, token
 from .decorators import _authenticate_jwt, _authenticate_request
 from .schemas import (
     AdminRegistrationResponse,
     AgentCreate,
     APIKeyCreate,
     APIKeyUpdate,
+    GrantCreate,
     TokenResponse,
     UserCreate,
     UserLogin,
@@ -297,10 +298,15 @@ def get_current_user():
             "key_prefix": key.prefix if key else None,
             "username": g.username,
             "is_admin": g.is_admin,
+            # RFC-011 §6: the presenting key's scope grants ([] =
+            # unscoped-only; the principal discovers its access here)
+            "grants": g.grants or [],
         }
         if g.actor_type == "agent" and key is not None and key.agent_id:
             agent = api_keys.get_agent(core._conn, key.agent_id, g.user_id)
             result["label"] = agent.label
+        # RFC-011 §4.5: the principal's active scope (access state)
+        result["active_scope"] = _prefixed_or_none(scope_access.active_scope_for(g.actor))
         return jsonify(result), 200
 
     # JWT path: user record as before, plus RFC-010 attribution fields
@@ -314,6 +320,129 @@ def get_current_user():
     result = user.model_dump()
     result["actor_type"] = g.actor_type
     result["actor"] = g.actor
+    # RFC-011 SG-11: operator sessions hold implicit all-grants
+    result["grants"] = None
+    result["active_scope"] = _prefixed_or_none(scope_access.active_scope_for(g.actor))
+    return jsonify(result), 200
+    # Connection closes automatically via __del__
+
+
+def _prefixed_or_none(scope_uuid: str | None) -> str | None:
+    """Add the core_ prefix to a plain uuid, passing None through."""
+    return uid.add_core_prefix(scope_uuid) if scope_uuid else None
+
+
+# ============================================================================
+# Scope Grant Management (RFC-011 §6)
+# ============================================================================
+
+
+@auth_bp.route("/grants", methods=["POST"])
+@validate_request
+def create_grant(data: GrantCreate):
+    """
+    Issue a scope grant — operator action, JWT-gated (RFC-011 §6).
+
+    Exactly one of key_id / agent_id. agent_id grants apply to all keys
+    currently bound to that agent; future bindings inherit at bind time.
+    Grant issuance is never implicit (RFC-010 issuance invariant): API
+    keys cannot mint, modify, or revoke grants, including their own.
+
+    Returns:
+        201 with the created grant entries
+
+    Raises:
+        AuthenticationError: Not a JWT session
+        ResourceNotFound: Unknown key/agent/scope
+        ValidationError: Neither or both of key_id/agent_id
+    """
+    payload = _authenticate_jwt()
+
+    if bool(data.key_id) == bool(data.agent_id):
+        raise ValidationError(
+            "Exactly one of key_id or agent_id is required",
+            {"key_id": data.key_id, "agent_id": data.agent_id}
+        )
+
+    scope_uuid = uid.strip_prefix(data.scope_uuid)
+
+    core = get_core()
+
+    # The scope must exist as a Scope entity
+    scope_row = core._conn.execute(
+        "SELECT uuid FROM entity WHERE uuid = ? AND type = 'Scope'",
+        (scope_uuid,)
+    ).fetchone()
+    if scope_row is None:
+        raise ResourceNotFound("Scope not found", {"scope_uuid": data.scope_uuid})
+
+    if data.key_id:
+        key_id = uid.strip_prefix(data.key_id)
+        grant = api_keys.grant_scope_to_key(
+            core._conn, payload.sub, key_id, scope_uuid, data.expires_at
+        )
+        # key_id in the response carries the caller's prefixing
+        grant = {**grant, "key_id": data.key_id}
+        created = [grant]
+    else:
+        # agent_id passes through raw — grant_scope_to_agent canonicalizes
+        created = api_keys.grant_scope_to_agent(
+            core._conn, payload.sub, data.agent_id, scope_uuid, data.expires_at
+        )
+        created = [{**g, "agent_id": data.agent_id} for g in created]
+
+    core._conn.commit()
+    return jsonify({"grants": created, "count": len(created)}), 201
+    # Connection closes automatically via __del__
+
+
+@auth_bp.route("/grants", methods=["GET"])
+def list_grants():
+    """
+    List scope grants for a key or an agent (RFC-011 §6). JWT-gated.
+
+    Query params: exactly one of key_id / agent_id.
+
+    Returns:
+        List of grant entries with key attribution
+    """
+    payload = _authenticate_jwt()
+
+    key_id = request.args.get("key_id")
+    agent_id = request.args.get("agent_id")
+    if bool(key_id) == bool(agent_id):
+        raise ValidationError(
+            "Exactly one of key_id or agent_id is required",
+            {"key_id": key_id, "agent_id": agent_id}
+        )
+
+    core = get_core()
+    grants = api_keys.list_grants(
+        core._conn, payload.sub,
+        key_id=uid.strip_prefix(key_id) if key_id else None,
+        agent_id=agent_id,
+    )
+    return jsonify(grants), 200
+    # Connection closes automatically via __del__
+
+
+@auth_bp.route("/grants/<grant_id>", methods=["DELETE"])
+def revoke_grant(grant_id: str):
+    """
+    Revoke a scope grant by id — operator action, JWT-gated (RFC-011 §6).
+
+    Immediate for future operations (grants re-read per request); an
+    in-flight session is not retroactively ejected (RFC-011 §7) — revoke
+    the key itself for that.
+
+    Returns:
+        200 with the revoked grant entry
+    """
+    payload = _authenticate_jwt()
+
+    core = get_core()
+    result = api_keys.revoke_grant(core._conn, payload.sub, grant_id)
+    core._conn.commit()
     return jsonify(result), 200
     # Connection closes automatically via __del__
 

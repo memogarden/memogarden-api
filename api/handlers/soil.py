@@ -17,7 +17,7 @@ import json
 import logging
 import re
 
-from system.exceptions import ValidationError
+from system.exceptions import PermissionDenied, ValidationError
 from system.soil import Fact, current_day, generate_soil_uuid, get_soil
 from utils import isodatetime, uid
 
@@ -28,6 +28,14 @@ from ..schemas.semantic import (
     QueryRequest,
 )
 from ..events import publish_message_sent
+from ..middleware.scope_access import (
+    active_scope_for,
+    enforcement_enabled,
+    filter_visible,
+    item_visible,
+    requester_has_all_scopes,
+    require_scope_grant,
+)
 from .decorators import with_audit
 
 logger = logging.getLogger(__name__)
@@ -152,6 +160,21 @@ def handle_add(request: AddRequest, actor: str) -> dict:
         if canonical_at is None:
             canonical_at = now
 
+        # RFC-011 §4.6: scope applied at creation. Explicit caller-supplied
+        # labels require the requester to hold grants for them (operator
+        # JWT bypasses — SG-11); otherwise the creator's active scope is
+        # inherited (SG-1 keeps unlabeled items global).
+        metadata = dict(request.metadata) if request.metadata else {}
+        explicit_scopes = metadata.get("scopes")
+        if explicit_scopes:
+            if not requester_has_all_scopes():
+                for s in explicit_scopes:
+                    require_scope_grant(uid.strip_prefix(s) if isinstance(s, str) else s)
+        elif enforcement_enabled():
+            active_scope = active_scope_for(actor)
+            if active_scope:
+                metadata["scopes"] = [active_scope]
+
         # Create Fact
         item = Fact(
             uuid=generate_soil_uuid(),
@@ -159,7 +182,7 @@ def handle_add(request: AddRequest, actor: str) -> dict:
             realized_at=now,
             canonical_at=canonical_at,
             data=request.data,
-            metadata=request.metadata,
+            metadata=metadata or None,
             integrity_hash=None,  # Will be computed by create_item
             fidelity="full",
         )
@@ -230,6 +253,19 @@ def handle_amend(request: AmendRequest, actor: str) -> dict:
                     "superseded_by": uid.add_soil_prefix(original.superseded_by),
                 }
             )
+
+        # RFC-011 §4.5: writes require the requester's active scope to be
+        # one of the item's labels (operator JWT bypasses — SG-11). The
+        # amended fact inherits the original's scope labels via the
+        # metadata merge below (SG-9 derivation inheritance).
+        if enforcement_enabled() and not requester_has_all_scopes():
+            original_scopes = (original.metadata or {}).get("scopes") or []
+            if not item_visible(original_scopes, active_scope_for(actor)):
+                raise PermissionDenied(
+                    "Item is in a scope you are not inside",
+                    {"target": request.target, "item_scopes": original_scopes,
+                     "code": "scope_write_denied"},
+                )
 
         # Get current time for realized_at
         now = isodatetime.now()
@@ -315,6 +351,17 @@ def handle_get_fact(request: GetRequest, actor: str) -> dict:
                 details={"target": request.target}
             )
 
+        # RFC-011 §4.5 read gate (SG-1/SG-5): scoped items are readable
+        # only from inside one of their scopes (operator JWT bypasses).
+        if enforcement_enabled() and not requester_has_all_scopes():
+            item_scopes = (item.metadata or {}).get("scopes") or []
+            if not item_visible(item_scopes, active_scope_for(actor)):
+                raise PermissionDenied(
+                    "Item is in a scope you are not inside",
+                    {"target": request.target, "item_scopes": item_scopes,
+                     "code": "scope_read_denied"},
+                )
+
         return _fact_to_response(item)
 
 
@@ -382,8 +429,21 @@ def handle_query_facts(request: QueryRequest, actor: str) -> dict:
         total_row = soil._get_connection().execute(count_query, params[:-2]).fetchone()
         total = total_row["total"]
 
+        # RFC-011 §4.9: filtered before the response is built — scoped
+        # items outside the requester's active scope never surface (SG-10).
+        # NOTE: exclusions after LIMIT can shorten pages; acceptable for v1
+        # (flag default off; SQL-level pre-filter is the indexed follow-up).
+        def _row_scopes(row) -> list | None:
+            try:
+                metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+            except (json.JSONDecodeError, TypeError):
+                metadata = {}
+            return metadata.get("scopes")
+
+        visible_rows = filter_visible(rows, actor, _row_scopes)
+
         # Convert rows to response format
-        results = [_row_to_fact_response(row) for row in rows]
+        results = [_row_to_fact_response(row) for row in visible_rows]
 
         return {
             "results": results,

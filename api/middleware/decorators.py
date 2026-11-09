@@ -73,6 +73,9 @@ def _authenticate_request():
             # Operator entities land (attribution unchanged from v1)
             g.actor = payload.username
             g.actor_type = "operator"
+            # RFC-011 SG-11: JWT operator sessions hold implicit all-grants
+            # (None = sovereignty bypass, not an empty grant set)
+            g.grants = None
 
             logger.debug(f"JWT authentication successful for user {g.username}")
             return  # Authentication succeeded
@@ -89,7 +92,7 @@ def _authenticate_request():
     if api_key:
         result = api_keys.verify_api_key_and_get_user(core._conn, api_key)
         if result:
-            user_id, api_key_id, agent_entity_id = result
+            user_id, api_key_id, agent_entity_id, grants = result
 
             # Get user details
             user = service.get_user_by_id(core._conn, user_id)
@@ -100,6 +103,9 @@ def _authenticate_request():
                 g.is_admin = user.is_admin
                 g.auth_method = "api_key"
                 g.api_key_id = api_key_id
+                # RFC-011 §4.3: the presenting key's scope grants ([] =
+                # unscoped-only; JWT sessions carry None = sovereignty)
+                g.grants = grants
                 # RFC-010: bound keys attribute to the Agent entity;
                 # unbound keys attribute to the owning username with
                 # actor_type "api_key" (the queryable attribution gap)

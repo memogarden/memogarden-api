@@ -234,13 +234,12 @@ class LinkRequest(SemanticRequest):
 
 
 class EnterRequest(SemanticRequest):
-    """Request to enter a scope - add to active set (RFC-003).
+    """Request to enter a scope — adopt it as the exclusive active scope
+    (RFC-003 v5 INV-11a/11b; RFC-011 §4.4).
 
-    Per RFC-003 v4:
-    - enter: Add scope to active set
-
-    INV-11a: Focus Separation - enter does NOT auto-focus
-    INV-11b: Implied Focus - first scope becomes primary automatically
+    Grant-gated: the presenting key must hold a grant on the scope
+    (operator JWT bypasses, SG-11). Entering while inside another scope
+    is an atomic switch; re-entering the active scope is a no-op.
     """
     op: Literal["enter"] = "enter"  # type: ignore[var-annotated]
     scope: str = Field(
@@ -250,12 +249,11 @@ class EnterRequest(SemanticRequest):
 
 
 class LeaveRequest(SemanticRequest):
-    """Request to leave a scope - remove from active set (RFC-003).
+    """Request to leave a scope — release the active scope (RFC-003 v5
+    INV-11; RFC-011 §4.4).
 
-    Per RFC-003 v4:
-    - leave: Remove scope from active set
-
-    INV-8: Stream Suspension on Leave - scope view-stream suspends
+    INV-8: Stream Suspension on Leave - scope view-stream suspends.
+    The named scope must be the one currently active (SG-3).
     """
     op: Literal["leave"] = "leave"  # type: ignore[var-annotated]
     scope: str = Field(
@@ -265,17 +263,16 @@ class LeaveRequest(SemanticRequest):
 
 
 class FocusRequest(SemanticRequest):
-    """Request to focus a scope - switch primary scope (RFC-003).
+    """RETIRED verb — deprecated no-op alias (RFC-003 v5 INV-11a / RFC-011).
 
-    Per RFC-003 v4:
-    - focus: Switch primary scope among active scopes
-
-    INV-11: Explicit Scope Control - focus requires explicit action
+    With exclusive activation there is no primary-vs-active distinction.
+    Responds with the current active scope; changes no state. Migrate
+    to `enter`.
     """
     op: Literal["focus"] = "focus"  # type: ignore[var-annotated]
     scope: str = Field(
         ...,
-        description="UUID of the scope to focus (must be in active set, with or without prefix)"
+        description="Ignored; kept for wire compatibility during the migration window"
     )
 
 

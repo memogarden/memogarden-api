@@ -2,6 +2,7 @@
 
 from .auth import (
     AdminRegistrationResponse,
+    GrantCreate,
     AgentCreate,
     AgentListResponse,
     AgentResponse,
@@ -19,6 +20,7 @@ from .auth import (
 )
 
 __all__ = [
+    "GrantCreate",
     "UserBase",
     "UserCreate",
     "UserLogin",

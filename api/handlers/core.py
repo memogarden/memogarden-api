@@ -24,6 +24,14 @@ from system.core import get_core
 from system.exceptions import PermissionDenied, ResourceNotFound
 from utils import uid
 
+from ..middleware.scope_access import (
+    active_scope_for,
+    enforcement_enabled,
+    filter_visible,
+    require_scope_grant,
+    requester_has_all_scopes,
+)
+
 from ..schemas.semantic import (
     CreateRequest,
     EditRequest,
@@ -889,21 +897,26 @@ def handle_track(request: TrackRequest, actor: str) -> dict:
 
 @with_audit
 def handle_enter(request: EnterRequest, actor: str) -> dict:
-    """Handle enter verb - add scope to active set.
+    """Handle enter verb - adopt a scope as the exclusive active scope.
 
-    Per RFC-003 v4:
-    - enter: Add scope to active set
-    - INV-11a: Focus Separation (enter does NOT auto-focus)
-    - INV-11b: Implied Focus (first scope becomes primary)
+    RFC-003 v5 INV-11a/11b; RFC-011 §4.4. Grant-gated at this layer
+    (RFC-011 §4.9 — enforcement reads the presenting key; operator JWT
+    sessions bypass per SG-11). Entering while inside another scope is
+    an ATOMIC SWITCH (previous_scope in the response); re-entering the
+    already-active scope is an idempotent no-op. The @with_audit wrapper
+    records the transition as an Action fact.
 
-    Session 20B: Publishes context_updated SSE event on enter.
+    Session 20B: publishes context_updated SSE event on enter.
 
     Args:
         request: Validated EnterRequest
         actor: Authenticated user/agent UUID
 
     Returns:
-        dict with scope and active_scopes
+        dict with scope, previous_scope (on switch), active_scope
+
+    Raises:
+        PermissionDenied: Key holds no grant on the scope (RFC-011 SG-4)
     """
     with get_core() as core:
         # Get user's ContextFrame
@@ -916,7 +929,13 @@ def handle_enter(request: EnterRequest, actor: str) -> dict:
         # Strip prefix from scope UUID
         scope_uuid = uid.strip_prefix(request.scope)
 
-        # Enter the scope
+        # RFC-011 SG-4: grant-gated entry (denial is audited via with_audit)
+        require_scope_grant(scope_uuid)
+
+        # Snapshot prior scope for the switch record before entering
+        previous_scope = context_frame.active_scope
+
+        # Enter the scope (exclusive; atomic switch per INV-11a)
         context_frame = core.context.enter_scope(context_frame, scope_uuid)
 
         # Session 20B: Publish SSE event for context update
@@ -930,31 +949,31 @@ def handle_enter(request: EnterRequest, actor: str) -> dict:
 
         return {
             "scope": uid.add_core_prefix(scope_uuid),
-            "active_scopes": [uid.add_core_prefix(s) for s in (context_frame.active_scopes or [])],
-            "primary_scope": uid.add_core_prefix(context_frame.primary_scope) if context_frame.primary_scope else None
+            "previous_scope": uid.add_core_prefix(previous_scope) if previous_scope else None,
+            "active_scope": uid.add_core_prefix(context_frame.active_scope) if context_frame.active_scope else None,
         }
 
 
 @with_audit
 def handle_leave(request: LeaveRequest, actor: str) -> dict:
-    """Handle leave verb - remove scope from active set.
+    """Handle leave verb - release the active scope.
 
-    Per RFC-003 v4:
-    - leave: Remove scope from active set
-    - INV-8: Stream Suspension on Leave
+    RFC-003 v5 INV-11; RFC-011 §4.4. The named scope must be the one
+    currently active (SG-3 exclusivity); afterwards the principal
+    operates unscoped (global space only, SG-1/SG-5). INV-8 stream
+    suspension follows. The @with_audit wrapper records the transition.
 
-    Session 20B: Publishes frame_updated and context_updated SSE events.
+    Session 20B: publishes frame_updated and context_updated SSE events.
 
     Args:
         request: Validated LeaveRequest
         actor: Authenticated user/agent UUID
 
     Returns:
-        dict with scope and active_scopes
+        dict with scope and active_scope (always None on success)
 
     Raises:
-        ResourceNotFound: If user has no ContextFrame
-        ValueError: If scope not in active set
+        ValueError: If no ContextFrame exists or the scope is not active
     """
     with get_core() as core:
         try:
@@ -973,7 +992,8 @@ def handle_leave(request: LeaveRequest, actor: str) -> dict:
         # Strip prefix from scope UUID
         scope_uuid = uid.strip_prefix(request.scope)
 
-        # Leave the scope
+        # Leave the scope (must be the active one — ValidationError on
+        # mismatch maps to 400 in the dispatcher)
         context_frame = core.context.leave_scope(context_frame, scope_uuid)
 
         # Session 20B: Publish SSE events for context update
@@ -995,73 +1015,33 @@ def handle_leave(request: LeaveRequest, actor: str) -> dict:
 
         return {
             "scope": uid.add_core_prefix(scope_uuid),
-            "active_scopes": [uid.add_core_prefix(s) for s in (context_frame.active_scopes or [])],
-            "primary_scope": uid.add_core_prefix(context_frame.primary_scope) if context_frame.primary_scope else None
+            "active_scope": None,
         }
 
 
 @with_audit
 def handle_focus(request: FocusRequest, actor: str) -> dict:
-    """Handle focus verb - switch primary scope among active scopes.
+    """RETIRED verb — deprecated no-op alias (RFC-003 v5 INV-11a / RFC-011).
 
-    Per RFC-003 v4:
-    - focus: Switch primary scope among active scopes
-    - INV-11: Explicit Scope Control (focus requires explicit action)
-
-    Session 20B: Publishes frame_updated and context_updated SSE events.
-
-    Args:
-        request: Validated FocusRequest
-        actor: Authenticated user/agent UUID
-
-    Returns:
-        dict with scope and primary_scope
-
-    Raises:
-        ResourceNotFound: If user has no ContextFrame
-        ValueError: If scope not in active set
+    With exclusive activation there is no primary-vs-active distinction:
+    the active scope IS the only scope. Kept for the migration window
+    only — responds with the current active scope, changes no state,
+    publishes no events. Migrate to `enter`.
     """
     with get_core() as core:
         try:
-            # Get user's ContextFrame (don't create if missing)
             context_frame = core.context.get_context_frame(
                 owner=actor,
                 owner_type="operator",
                 create_if_missing=False
             )
-        except Exception as e:
-            # Convert to ValueError for consistent 400 response
-            if "not found" in str(e).lower():
-                raise ValueError("No active context frame. You must enter a scope first.") from None
-            raise
-
-        # Strip prefix from scope UUID
-        scope_uuid = uid.strip_prefix(request.scope)
-
-        # Focus the scope
-        context_frame = core.context.focus_scope(context_frame, scope_uuid)
-
-        # Session 20B: Publish SSE events for focus change
-        # Get containers from updated context frame for event payload
-        containers = context_frame.containers if hasattr(context_frame, "containers") else []
-        publish_context_updated(
-            participant_uuid=actor,
-            containers=containers,
-            scope_uuid=uid.add_core_prefix(scope_uuid),
-        )
-
-        # Get head item for frame_updated event
-        head_item_uuid = context_frame.head_item_uuid if hasattr(context_frame, "head_item_uuid") else None
-        publish_frame_updated(
-            participant_uuid=actor,
-            head_item_uuid=head_item_uuid,
-            scope_uuid=uid.add_core_prefix(scope_uuid),
-        )
+            active_scope = context_frame.active_scope
+        except Exception:
+            active_scope = None
 
         return {
-            "scope": uid.add_core_prefix(scope_uuid),
-            "primary_scope": uid.add_core_prefix(context_frame.primary_scope) if context_frame.primary_scope else None,
-            "active_scopes": [uid.add_core_prefix(s) for s in (context_frame.active_scopes or [])]
+            "scope": uid.add_core_prefix(uid.strip_prefix(request.scope)),
+            "active_scope": uid.add_core_prefix(active_scope) if active_scope else None,
         }
 
 
@@ -1159,6 +1139,20 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
     # Merge and deduplicate results
     # Session 9: Simple concatenation (entities first, then facts)
     results = entity_results + fact_results
+
+    # RFC-011 §4.9(3): scope filtering BEFORE the response is built —
+    # scoped items outside the requester's active scope never surface as
+    # matches (a hit itself is a leak). The convenience `scope` request
+    # filter is a client-side refinement; enforcement is independent.
+    def _result_scopes(result: dict) -> list | None:
+        return (
+            (result.get("metadata") or {}).get("scopes")
+            or (result.get("data") or {}).get("scopes")
+            if isinstance(result, dict)
+            else None
+        )
+
+    results = filter_visible(results, actor, _result_scopes)
 
     # TODO: Continuation token implementation (RFC-005)
     # Session 9: Deferred - requires encoding offset/limit in base64
