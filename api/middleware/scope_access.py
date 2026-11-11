@@ -23,7 +23,7 @@ import os
 from flask import g
 
 from system.exceptions import PermissionDenied
-from utils import isodatetime
+from utils import isodatetime, uid
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -31,6 +31,14 @@ _TRUTHY = {"1", "true", "yes", "on"}
 def enforcement_enabled() -> bool:
     """Whether scope filtering is active for this deployment (RFC-011 §8)."""
     return os.environ.get("MEMOGARDEN_SCOPE_ENFORCEMENT", "").strip().lower() in _TRUTHY
+
+
+def normalize_scopes(values: list) -> list:
+    """Scope labels are stored as plain uuids (DB convention, matching the
+    active scope on ContextFrames) — callers may hand them over prefixed.
+    Normalize at the API boundary so the predicate never compares a
+    prefixed label against a plain one."""
+    return [uid.strip_prefix(v) if isinstance(v, str) else v for v in values]
 
 
 def requester_has_all_scopes() -> bool:

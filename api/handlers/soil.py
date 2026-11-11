@@ -33,6 +33,7 @@ from ..middleware.scope_access import (
     enforcement_enabled,
     filter_visible,
     item_visible,
+    normalize_scopes,
     requester_has_all_scopes,
     require_scope_grant,
 )
@@ -162,15 +163,22 @@ def handle_add(request: AddRequest, actor: str) -> dict:
 
         # RFC-011 §4.6: scope applied at creation. Explicit caller-supplied
         # labels require the requester to hold grants for them (operator
-        # JWT bypasses — SG-11); otherwise the creator's active scope is
-        # inherited (SG-1 keeps unlabeled items global).
+        # JWT bypasses — SG-11) — grant-gated only under enforcement
+        # (§8 advisory mode: flag off, nothing is checked). Otherwise the
+        # creator's active scope is inherited — ALWAYS, advisory included,
+        # so the labeling corpus is correct before the flag flips.
         metadata = dict(request.metadata) if request.metadata else {}
         explicit_scopes = metadata.get("scopes")
         if explicit_scopes:
-            if not requester_has_all_scopes():
+            # Grant checks are an enforcement activity — §8 advisory mode
+            # (flag off) accepts labels unchecked so provisioning flows work.
+            if enforcement_enabled() and not requester_has_all_scopes():
                 for s in explicit_scopes:
                     require_scope_grant(uid.strip_prefix(s) if isinstance(s, str) else s)
-        elif enforcement_enabled():
+            metadata["scopes"] = normalize_scopes(explicit_scopes)
+        else:
+            # Inheritance runs advisory too: items created inside a scope
+            # are labeled before the flag flips (no silently-global corpus).
             active_scope = active_scope_for(actor)
             if active_scope:
                 metadata["scopes"] = [active_scope]
@@ -267,6 +275,29 @@ def handle_amend(request: AmendRequest, actor: str) -> dict:
                      "code": "scope_write_denied"},
                 )
 
+        # Merge metadata with original metadata (computed once; the label
+        # diff below and the Fact construction share it)
+        new_metadata = {}
+        if original.metadata:
+            new_metadata.update(original.metadata)
+        if request.metadata:
+            new_metadata.update(request.metadata)
+        if "scopes" in new_metadata:
+            new_metadata["scopes"] = normalize_scopes(new_metadata["scopes"] or [])
+
+        # RFC-011 v1.2 (D2): symmetric label grants. A label added OR
+        # removed by a non-sovereign principal requires a grant on that
+        # label's scope — amend's metadata merge is a relabel channel, and
+        # removal is the exposure-widening direction (de-scoped items fall
+        # back to global). The before-state persists in the superseded
+        # original and the amend is audited via with_audit, satisfying
+        # SG-8's relabel record.
+        if enforcement_enabled() and not requester_has_all_scopes():
+            old_labels = set((original.metadata or {}).get("scopes") or [])
+            new_labels = set(new_metadata.get("scopes") or [])
+            for changed in old_labels.symmetric_difference(new_labels):
+                require_scope_grant(changed)
+
         # Get current time for realized_at
         now = isodatetime.now()
 
@@ -274,13 +305,6 @@ def handle_amend(request: AmendRequest, actor: str) -> dict:
         canonical_at = request.canonical_at
         if canonical_at is None:
             canonical_at = original.canonical_at
-
-        # Merge metadata with original metadata
-        new_metadata = {}
-        if original.metadata:
-            new_metadata.update(original.metadata)
-        if request.metadata:
-            new_metadata.update(request.metadata)
 
         # Create new Fact with amended data
         amended_item = Fact(

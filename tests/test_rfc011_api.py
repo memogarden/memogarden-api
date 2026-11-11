@@ -14,6 +14,7 @@ Covers:
 import pytest
 
 from system.core import get_core
+from utils import uid
 
 
 @pytest.fixture
@@ -50,10 +51,16 @@ def _plain(prefixed: str) -> str:
     return prefixed.split("core_", 1)[-1]
 
 
-class TestGrantGating:
-    """RFC-011 §4.4: entering requires a grant (SG-4)."""
+@pytest.fixture
+def enforcement(monkeypatch):
+    """RFC-011 §8: flip the enforcement flag for the requesting test."""
+    monkeypatch.setenv("MEMOGARDEN_SCOPE_ENFORCEMENT", "1")
 
-    def test_enter_without_grant_denied(self, client, auth_headers_apikey, scope_uuid):
+
+class TestGrantGating:
+    """RFC-011 §4.4: entering requires a grant (SG-4) — under enforcement."""
+
+    def test_enter_without_grant_denied(self, client, auth_headers_apikey, scope_uuid, enforcement):
         """A key with no grant gets 403 on enter (PermissionDenied)."""
         response = client.post(
             "/mg",
@@ -67,7 +74,7 @@ class TestGrantGating:
         assert data["error"]["type"] == "PermissionDenied"
         assert data["error"]["details"]["code"] == "scope_grant_required"
 
-    def test_enter_with_grant_allowed(self, client, auth_headers, auth_headers_apikey, key_id, scope_uuid):
+    def test_enter_with_grant_allowed(self, client, auth_headers, auth_headers_apikey, key_id, scope_uuid, enforcement):
         """With a grant, the same key enters successfully."""
         response = _grant(client, auth_headers, key_id, scope_uuid)
         assert response.status_code == 201
@@ -90,7 +97,7 @@ class TestGrantGating:
         )
         assert response.status_code == 200
 
-    def test_revoke_then_enter_denied(self, client, auth_headers, auth_headers_apikey, key_id, scope_uuid):
+    def test_revoke_then_enter_denied(self, client, auth_headers, auth_headers_apikey, key_id, scope_uuid, enforcement):
         """Revocation gates the next enter (grants re-read per request)."""
         assert _grant(client, auth_headers, key_id, scope_uuid).status_code == 201
         assert client.post(
@@ -254,10 +261,6 @@ class TestEnforcement:
     """
 
     @pytest.fixture
-    def enforcement(self, monkeypatch):
-        monkeypatch.setenv("MEMOGARDEN_SCOPE_ENFORCEMENT", "1")
-
-    @pytest.fixture
     def agent_key(self, client, auth_headers):
         """A bound agent key: headers, key id, agent id."""
         agent_response = client.post(
@@ -391,5 +394,196 @@ class TestEnforcement:
         """Labeling an item INTO a scope requires a grant (§4.5 relabel rule)."""
         response = self._add_note(
             client, agent_key["headers"], "smuggled note", metadata={"scopes": [scope_uuid]}
+        )
+        assert response.status_code == 403
+
+
+class TestScopeMinting:
+    """RFC-011 v1.2 (D1): scope creation is operator-gated (unconditional —
+    issuance governance, not an enforcement-flag activity)."""
+
+    def test_key_cannot_mint_scope(self, client, auth_headers_apikey):
+        response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Scope", "data": {"label": "Smuggled"}},
+            headers=auth_headers_apikey,
+        )
+        assert response.status_code == 403
+        assert response.get_json()["error"]["details"]["code"] == "scope_mint_denied"
+
+    def test_operator_mints_scope_via_create(self, client, auth_headers):
+        response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Scope", "data": {"label": "Operator Scope"}},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        assert "uuid" in response.get_json()["result"]
+
+
+class TestAdvisoryMode:
+    """RFC-011 §8 step 2: flag OFF = advisory — entry and labeling are
+    unchecked (grants gate only under enforcement), but labels are still
+    written so the corpus is correct before the flag flips."""
+
+    def test_advisory_enter_without_grant_allowed(self, client, auth_headers_apikey, scope_uuid):
+        response = client.post(
+            "/mg",
+            json={"op": "enter", "scope": scope_uuid},
+            headers=auth_headers_apikey,
+        )
+        assert response.status_code == 200
+        assert response.get_json()["result"]["active_scope"] == scope_uuid
+
+    def test_advisory_explicit_labels_accepted_without_grant(
+        self, client, auth_headers_apikey, scope_uuid
+    ):
+        response = client.post(
+            "/mg",
+            json={
+                "op": "add",
+                "type": "Note",
+                "data": {"title": "provisioned", "description": "x"},
+                "metadata": {"scopes": [scope_uuid]},
+            },
+            headers=auth_headers_apikey,
+        )
+        assert response.status_code == 200
+        # labels normalize to plain uuids at the API boundary
+        assert response.get_json()["result"]["metadata"]["scopes"] == [_plain(scope_uuid)]
+
+    def test_advisory_auto_label_still_writes(self, client, auth_headers, scope_uuid):
+        """Inheritance runs advisory too — no silently-global corpus."""
+        assert client.post(
+            "/mg", json={"op": "enter", "scope": scope_uuid}, headers=auth_headers
+        ).status_code == 200
+
+        add = client.post(
+            "/mg",
+            json={"op": "add", "type": "Note",
+                  "data": {"title": "labeled", "description": "x"}},
+            headers=auth_headers,
+        )
+        assert add.get_json()["result"]["metadata"]["scopes"] == [_plain(scope_uuid)]
+
+
+class TestRelabelGovernance:
+    """RFC-011 v1.2 (D2): symmetric label grants on amend — the label
+    surface is grant-gated in BOTH directions under enforcement."""
+
+    @pytest.fixture
+    def two_sorters(self, client, auth_headers):
+        """Two bound agent keys: sorter-a holds {triage, finances} grants,
+        sorter-b holds {triage} only. Both are inside triage. The conftest
+        wipes entities per test, so the fixture mints its own scopes."""
+        triage_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Scope", "data": {"label": "Sort Triage"}},
+            headers=auth_headers,
+        )
+        assert triage_response.status_code == 200
+        triage = triage_response.get_json()["result"]["uuid"]
+
+        finances_response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Scope", "data": {"label": "Finances"}},
+            headers=auth_headers,
+        )
+        assert finances_response.status_code == 200
+        finances_uuid = finances_response.get_json()["result"]["uuid"]
+
+        keys = {}
+        for name, grants in (("sorter-a", {triage, _plain(finances_uuid)}),
+                             ("sorter-b", {triage})):
+            agent_response = client.post(
+                "/agents", json={"label": name}, headers=auth_headers
+            )
+            agent_id = agent_response.get_json()["agent_id"]
+            key_response = client.post(
+                "/api-keys/",
+                json={"name": name, "agent_id": agent_id},
+                headers=auth_headers,
+            )
+            key = key_response.get_json()
+            headers = {"X-API-Key": key["key"], "Content-Type": "application/json"}
+            for scope_plain in grants:
+                assert client.post(
+                    "/grants",
+                    json={"agent_id": agent_id, "scope_uuid": scope_plain},
+                    headers=auth_headers,
+                ).status_code == 201
+            assert client.post(
+                "/mg", json={"op": "enter", "scope": triage},
+                headers=headers,
+            ).status_code == 200
+            keys[name] = headers
+        return {"triage": triage, "finances": finances_uuid, "keys": keys}
+
+    def _labeled_item(self, client, auth_headers, triage, finances):
+        """Operator creates an item labeled into both scopes (sovereign)."""
+        response = client.post(
+            "/mg",
+            json={
+                "op": "add",
+                "type": "Note",
+                "data": {"title": "statement", "description": "x"},
+                "metadata": {"scopes": [triage, finances]},
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        return response.get_json()["result"]["uuid"]
+
+    def test_holder_can_remove_label(self, client, auth_headers, two_sorters, enforcement):
+        """sorter-a (triage+finances grants, inside triage) re-files the
+        item out of finances — removal requires holding finances ✓."""
+        item = self._labeled_item(client, auth_headers, two_sorters["triage"],
+                                  two_sorters["finances"])
+        response = client.post(
+            "/mg",
+            json={"op": "amend", "target": item,
+                  "data": {"title": "statement", "description": "x"},
+                  "metadata": {"scopes": [two_sorters["triage"]]}},
+            headers=two_sorters["keys"]["sorter-a"],
+        )
+        assert response.status_code == 200, response.get_json()
+        assert response.get_json()["result"]["metadata"]["scopes"] == [_plain(two_sorters["triage"])]
+
+    def test_without_target_grant_removal_denied(self, client, auth_headers, two_sorters, enforcement):
+        """sorter-b (triage grant only) cannot strip the finances label —
+        D2: removal requires the removed scope's grant."""
+        item = self._labeled_item(client, auth_headers, two_sorters["triage"],
+                                  two_sorters["finances"])
+        response = client.post(
+            "/mg",
+            json={"op": "amend", "target": item,
+                  "data": {"title": "statement", "description": "x"},
+                  "metadata": {"scopes": [two_sorters["triage"]]}},
+            headers=two_sorters["keys"]["sorter-b"],
+        )
+        assert response.status_code == 403, response.get_json()
+        assert response.get_json()["error"]["details"]["code"] == "scope_grant_required"
+
+    def test_adding_label_via_amend_also_gated(self, client, auth_headers, two_sorters, enforcement):
+        """Symmetry: adding a label through amend needs its grant too."""
+        item = self._labeled_item(client, auth_headers, two_sorters["triage"],
+                                  two_sorters["finances"])
+        # sorter-a first strips finances so the item is {triage}-only;
+        # the amend supersedes the fact, so sorter-b must target the successor
+        strip = client.post(
+            "/mg",
+            json={"op": "amend", "target": item,
+                  "data": {"title": "statement", "description": "x"},
+                  "metadata": {"scopes": [two_sorters["triage"]]}},
+            headers=two_sorters["keys"]["sorter-a"],
+        )
+        item = strip.get_json()["result"]["uuid"]
+        # sorter-b (no finances grant) tries to add finances back
+        response = client.post(
+            "/mg",
+            json={"op": "amend", "target": item,
+                  "data": {"title": "statement", "description": "x"},
+                  "metadata": {"scopes": [two_sorters["triage"], two_sorters["finances"]]}},
+            headers=two_sorters["keys"]["sorter-b"],
         )
         assert response.status_code == 403

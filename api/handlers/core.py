@@ -196,6 +196,17 @@ def handle_create(request: CreateRequest, actor: str) -> dict:
             f"Custom schema registration not yet implemented."
         )
 
+    # RFC-011 v1.2 (D1): scopes are security boundaries — creation is
+    # operator-gated (RFC-010's issuance invariant applied to boundaries).
+    # Operator JWT sessions mint via the same verb under sovereignty.
+    # Not flag-gated: issuance governance is unconditional, like identity.
+    if request.type == "Scope" and not requester_has_all_scopes():
+        raise PermissionDenied(
+            "Scope creation is operator-gated: scopes are security "
+            "boundaries. Ask the operator to mint the scope. (RFC-011 v1.2 D1)",
+            {"type": "Scope", "code": "scope_mint_denied"},
+        )
+
     # Use transaction for entity creation and fetch
     with get_core() as core:
         entity_uuid = core.entity.create(
@@ -929,8 +940,11 @@ def handle_enter(request: EnterRequest, actor: str) -> dict:
         # Strip prefix from scope UUID
         scope_uuid = uid.strip_prefix(request.scope)
 
-        # RFC-011 SG-4: grant-gated entry (denial is audited via with_audit)
-        require_scope_grant(scope_uuid)
+        # RFC-011 SG-4: grant-gated entry (denial is audited via with_audit).
+        # §8 advisory mode: with enforcement off, entry is advisory —
+        # grants gate entry only when the flag is on.
+        if enforcement_enabled():
+            require_scope_grant(scope_uuid)
 
         # Snapshot prior scope for the switch record before entering
         previous_scope = context_frame.active_scope
