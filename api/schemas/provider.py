@@ -38,3 +38,30 @@ class UpdateProviderRequest(BaseModel):
     enabled: bool | None = None
     description: str | None = None
     config: dict[str, Any] | None = None
+
+
+class ScopePolicyRule(BaseModel):
+    """One rule of a provider scope policy (RFC-011 §4.8, item 4).
+
+    match: exact-equality fields evaluated against a merged view of the
+    created fact's data and metadata. scope: the target scope (uuid or
+    builtin alias like "triage"); null = deliver unscoped.
+    """
+
+    match: dict[str, Any] = Field(default_factory=dict)
+    scope: str | None = None
+
+
+class ScopePolicyRequest(BaseModel):
+    """Payload for PUT /api/v1/providers/{name}/scope-policy (RFC-011 §4.8).
+
+    First-match-wins rules; the default catch-all routes unmatched items
+    to triage when omitted (ratified 2026-11-12 — fail-closed). Set
+    {"default": null} for an unscoped-by-default provider (e.g. task sync).
+    """
+
+    rules: list[ScopePolicyRule] = Field(default_factory=list)
+    default: str | None = Field(
+        default="triage",
+        description="Catch-all scope ref (uuid or builtin alias); null = unscoped",
+    )

@@ -41,7 +41,8 @@ RESERVED_NAMES = {"run"}
 # Columns selected for manifests, in row order
 _COLUMNS = (
     "name, module, class, interval, enabled, description, config, "
-    "capabilities, registered_at, last_run_id, last_run_at, last_status, next_due_at"
+    "capabilities, scope_policy, registered_at, last_run_id, last_run_at, "
+    "last_status, next_due_at"
 )
 
 
@@ -197,6 +198,10 @@ def _row_to_manifest(row) -> dict:
         capabilities = json.loads(row["capabilities"]) if row["capabilities"] else []
     except (json.JSONDecodeError, TypeError):
         capabilities = []
+    try:
+        scope_policy = json.loads(row["scope_policy"]) if row["scope_policy"] else None
+    except (json.JSONDecodeError, TypeError):
+        scope_policy = None
     return {
         "name": row["name"],
         "module": row["module"],
@@ -206,6 +211,7 @@ def _row_to_manifest(row) -> dict:
         "description": row["description"],
         "config": config,
         "capabilities": capabilities,
+        "scope_policy": scope_policy,
         "registered_at": row["registered_at"],
         "last_run_id": row["last_run_id"],
         "last_run_at": row["last_run_at"],
@@ -327,6 +333,38 @@ def update_provider(name: str, data: UpdateProviderRequest) -> dict:
         )
         core._conn.commit()
 
+    return get_provider(name)
+
+
+def set_scope_policy(name: str, policy: dict | None) -> dict:
+    """Set (or clear) a provider's scope policy (RFC-011 §4.8, item 4).
+
+    Shape: {"rules": [{"match": {<metadata-or-data field>: value, ...},
+    "scope": "<uuid | builtin alias>" | null}, ...],
+    "default": "<uuid | alias>" | null}. Evaluation is first-match-wins;
+    the default catch-all routes everything unmatched to triage when
+    unconfigured (ratified 2026-11-12, fail-closed). scope null on a
+    matching rule (or a null default) = deliver unscoped.
+
+    Args:
+        name: Registered provider name
+        policy: The policy dict, or None to clear (back to ratified default)
+
+    Returns:
+        Updated manifest
+    """
+    core = get_core()
+    row = core._conn.execute(
+        "SELECT name FROM providers WHERE name = ?", (name,)
+    ).fetchone()
+    if row is None:
+        raise ResourceNotFound(f"provider '{name}' is not registered", {"name": name})
+
+    core._conn.execute(
+        "UPDATE providers SET scope_policy = ? WHERE name = ?",
+        (json.dumps(policy) if policy is not None else None, name),
+    )
+    core._conn.commit()
     return get_provider(name)
 
 

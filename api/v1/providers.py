@@ -10,7 +10,12 @@ import logging
 from flask import Blueprint, jsonify
 
 from .. import provider_registry, provider_runtime
-from ..schemas.provider import RegisterProviderRequest, UpdateProviderRequest
+from ..middleware.decorators import _authenticate_jwt
+from ..schemas.provider import (
+    RegisterProviderRequest,
+    ScopePolicyRequest,
+    UpdateProviderRequest,
+)
 from ..validation import validate_request
 
 logger = logging.getLogger(__name__)
@@ -60,6 +65,28 @@ def update_provider(name: str, data: UpdateProviderRequest):
     exists; today a duplicate name 409s, so treat rename as future work).
     """
     return jsonify(provider_registry.update_provider(name, data))
+
+
+@providers_bp.put("/<name>/scope-policy")
+@validate_request
+def set_scope_policy(name: str, data: ScopePolicyRequest):
+    """Set a provider's scope policy (RFC-011 §4.8, item 4). Operator-gated:
+    JWT only — a provider's labeling policy is boundary configuration, and
+    boundary configuration is operator-governed (D1's invariant applied to
+    those who shape it).
+
+    The policy applies at fact creation in the provider runtime: ordered
+    first-match-wins rules over the created fact's data+metadata fields,
+    default catch-all → triage when omitted (ratified default — fail-closed).
+
+    Returns:
+        Updated manifest including the stored scope_policy
+    """
+    _authenticate_jwt()
+    policy = {"rules": [rule.model_dump() for rule in data.rules]}
+    if data.default is not None or "default" in data.model_fields_set:
+        policy["default"] = data.default
+    return jsonify(provider_registry.set_scope_policy(name, policy))
 
 
 @providers_bp.post("/run")

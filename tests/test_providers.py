@@ -455,3 +455,137 @@ class TestOriginPin:
             assert "provider roots" in json.loads(row["detail"])["error"]
         finally:
             conn.close()
+
+
+class TestScopePolicy:
+    """RFC-011 §4.8 (item 4): providers label at creation per the
+    operator's scope policy — rules-based, default catch-all → triage."""
+
+    @pytest.fixture
+    def triage_uuid(self, client, auth_headers):
+        response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Scope", "data": {"label": "Triage / Untrusted"}},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        return response.get_json()["result"]["uuid"]
+
+    @pytest.fixture
+    def finances_uuid(self, client, auth_headers):
+        response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Scope", "data": {"label": "Finances"}},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        return response.get_json()["result"]["uuid"]
+
+    def _plain(self, prefixed):
+        return prefixed.split("core_", 1)[-1]
+
+    def _notes(self, client, auth_headers):
+        query = client.post(
+            "/mg",
+            json={"op": "query", "target_type": "fact", "type": "Note"},
+            headers=auth_headers,
+        )
+        assert query.status_code == 200, query.get_json()
+        return {r["data"]["description"]: r for r in query.get_json()["result"]["results"]}
+
+    def test_default_policy_routes_to_triage(
+        self, client, auth_headers, dummy_module, triage_uuid
+    ):
+        """No policy configured → the ratified default: everything → triage."""
+        assert _register(client, auth_headers, _payload(dummy_module)).status_code == 201
+        client.post("/api/v1/providers/testprov/run", headers=auth_headers)
+        assert _wait_for_finish(client, auth_headers, "testprov")["last_status"] == "success"
+
+        notes = self._notes(client, auth_headers)
+        assert len(notes) == 2
+        for note in notes.values():
+            assert note["metadata"]["scopes"] == [self._plain(triage_uuid)]
+
+    def test_rule_routes_match_and_default_rest(
+        self, client, auth_headers, dummy_module, triage_uuid, finances_uuid
+    ):
+        assert _register(client, auth_headers, _payload(dummy_module)).status_code == 201
+        put = client.put(
+            "/api/v1/providers/testprov/scope-policy",
+            json={
+                "rules": [
+                    {"match": {"description": "dummy fact 0"},
+                     "scope": finances_uuid}
+                ],
+                "default": "triage",
+            },
+            headers=auth_headers,
+        )
+        assert put.status_code == 200
+        assert put.get_json()["scope_policy"]["rules"][0]["scope"] == finances_uuid
+
+        client.post("/api/v1/providers/testprov/run", headers=auth_headers)
+        assert _wait_for_finish(client, auth_headers, "testprov")["last_status"] == "success"
+
+        notes = self._notes(client, auth_headers)
+        assert notes["dummy fact 0"]["metadata"]["scopes"] == [self._plain(finances_uuid)]
+        assert notes["dummy fact 1"]["metadata"]["scopes"] == [self._plain(triage_uuid)]
+
+    def test_null_scope_and_null_default_deliver_unscoped(
+        self, client, auth_headers, dummy_module
+    ):
+        assert _register(client, auth_headers, _payload(dummy_module)).status_code == 201
+        assert client.put(
+            "/api/v1/providers/testprov/scope-policy",
+            json={"rules": [{"match": {"description": "dummy fact 0"}, "scope": None}],
+                  "default": None},
+            headers=auth_headers,
+        ).status_code == 200
+
+        client.post("/api/v1/providers/testprov/run", headers=auth_headers)
+        assert _wait_for_finish(client, auth_headers, "testprov")["last_status"] == "success"
+
+        notes = self._notes(client, auth_headers)
+        assert all("scopes" not in n["metadata"] or not n["metadata"]["scopes"]
+                   for n in notes.values())
+
+    def test_policy_endpoint_requires_jwt(self, client, auth_headers, auth_headers_apikey, dummy_module):
+        assert _register(client, auth_headers, _payload(dummy_module)).status_code == 201
+        response = client.put(
+            "/api/v1/providers/testprov/scope-policy",
+            json={"default": "triage"},
+            headers=auth_headers_apikey,
+        )
+        assert response.status_code == 401
+
+    def test_unit_provider_set_scopes_win_and_rules_apply(self):
+        from api.provider_runtime import _apply_scope_policy
+        from system.soil import Fact
+
+        def fact(metadata=None, data=None):
+            return Fact(uuid="u", _type="Note", realized_at="t", canonical_at="t",
+                        data=data or {}, metadata=metadata or {}, fidelity="full")
+
+        # Provider-set label wins over the policy
+        f = fact(metadata={"scopes": ["preset"]})
+        _apply_scope_policy(f, {"default": "triage"}, lambda ref: "resolved")
+        assert f.metadata["scopes"] == ["preset"]
+
+        # Null default = unscoped (metadata untouched)
+        f = fact()
+        _apply_scope_policy(f, {"default": None}, lambda ref: "resolved")
+        assert "scopes" not in f.metadata
+
+        # Default resolves through the resolver
+        f = fact()
+        _apply_scope_policy(f, {"default": "triage"}, lambda ref: "triage-uuid")
+        assert f.metadata["scopes"] == ["triage-uuid"]
+
+        # Rule match on a data field wins over the default
+        f = fact(data={"from": "bank@example.com"})
+        policy = {"rules": [{"match": {"from": "bank@example.com"},
+                             "scope": "finances-uuid"}],
+                  "default": "triage"}
+        _apply_scope_policy(f, policy, lambda ref: {"finances-uuid": "finances-uuid",
+                                                    "triage": "triage-uuid"}[ref])
+        assert f.metadata["scopes"] == ["finances-uuid"]

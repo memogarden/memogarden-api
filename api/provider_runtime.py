@@ -22,7 +22,7 @@ import threading
 
 from system.exceptions import LockConflictError
 from system.soil import Fact, generate_soil_uuid, get_soil
-from utils import isodatetime
+from utils import isodatetime, uid
 
 from . import provider_registry
 from .provider_registry import (
@@ -115,9 +115,15 @@ def _execute_run(
 
         facts_inserted = 0
         relations_created = 0
+        scope_policy = manifest.get("scope_policy")
+        resolve_scope = _make_scope_resolver()
         with get_soil() as soil:
             for yielded in provider.sync(since=since):
                 fact = _to_fact(yielded)
+                # RFC-011 §4.8 (item 4): providers label at creation per the
+                # operator's policy — the framework applies it, providers
+                # cannot forget (SG-7: providers are never scope-gated).
+                _apply_scope_policy(fact, scope_policy, resolve_scope)
                 fact_uuid = soil.create_fact(fact)
                 # Commit before create_relations: providers hold their own
                 # Soil instance (get_soil() is not cached), and a separate
@@ -164,3 +170,77 @@ def _to_fact(yielded) -> Fact:
         f"provider yielded {type(yielded).__name__}; expected system.soil.Fact "
         "or dict with {type, data, metadata}"
     )
+
+
+def _make_scope_resolver():
+    """Resolve a policy scope reference to a plain scope uuid, cached per run.
+
+    A reference is a core_-prefixed uuid, a bare uuid, a builtin alias
+    ("triage"/"private" — mapped to the builtin labels), or a Scope label.
+    Unknown references resolve to None — the item is left unscoped and the
+    miss is logged (visible failure beats silent mislabeling).
+    """
+    cache: dict = {}
+    # Builtin aliases (§4.1): the runtime's policies address the builtin
+    # scopes by short name; ensure_builtin_scopes seeds them under labels.
+    BUILTIN_ALIASES = {"triage": "Triage / Untrusted", "private": "Private"}
+
+    def resolve(ref):
+        if ref in cache:
+            return cache[ref]
+        from system.core import get_core
+
+        plain = uid.strip_prefix(ref)
+        label = BUILTIN_ALIASES.get(ref, ref)
+        with get_core() as core:
+            row = core._conn.execute(
+                "SELECT uuid FROM entity WHERE uuid IN (?, ?) AND type = 'Scope'",
+                (plain, uid.add_core_prefix(plain)),
+            ).fetchone()
+            if row is None:
+                row = core._conn.execute(
+                    "SELECT uuid FROM entity WHERE type = 'Scope' "
+                    "AND json_extract(data, '$.label') = ?",
+                    (label,),
+                ).fetchone()
+        uuid_val = row["uuid"] if row else None
+        if uuid_val is None:
+            logger.warning(
+                "scope policy references unknown scope %r — item left unscoped", ref
+            )
+        cache[ref] = uuid_val
+        return uuid_val
+
+    return resolve
+
+
+def _apply_scope_policy(fact: Fact, policy: dict | None, resolve_scope) -> None:
+    """RFC-011 §4.8 (item 4): apply the operator's scope policy to a fact.
+
+    Rules-based: ordered {match, scope} rules evaluated first-match-wins
+    against a merged view of the fact's data and metadata; the default
+    catch-all routes unmatched items to triage (ratified 2026-11-12 —
+    fail-closed). A scope of null on a matching rule (or a null default)
+    delivers the item unscoped. A provider-set metadata.scopes wins over
+    the policy.
+    """
+    metadata = dict(fact.metadata or {})
+    if metadata.get("scopes"):
+        return  # provider labeled it — provider wins
+
+    merged = {**(fact.data or {}), **metadata}
+    scope_ref = None
+    for rule in (policy or {}).get("rules", []):
+        match = rule.get("match", {})
+        if all(merged.get(field) == value for field, value in match.items()):
+            scope_ref = rule.get("scope")
+            break
+    else:
+        scope_ref = (policy or {}).get("default", "triage")
+
+    if scope_ref is None:
+        return  # explicitly unscoped
+    scope_uuid = resolve_scope(scope_ref)
+    if scope_uuid:
+        metadata["scopes"] = [scope_uuid]
+        fact.metadata = metadata
