@@ -12,8 +12,10 @@ from flask import Blueprint, jsonify
 from .. import provider_registry, provider_runtime
 from ..middleware.decorators import _authenticate_jwt
 from ..schemas.provider import (
+    RegisterAccountRequest,
     RegisterProviderRequest,
     ScopePolicyRequest,
+    UpdateAccountRequest,
     UpdateProviderRequest,
 )
 from ..validation import validate_request
@@ -91,22 +93,117 @@ def set_scope_policy(name: str, data: ScopePolicyRequest):
 
 @providers_bp.post("/run")
 def run_due_providers():
-    """Run all due providers (heartbeat entry point).
+    """Run all due work (heartbeat entry point).
 
     The systemd ingest timer pokes this endpoint; the server decides
-    due-ness from each provider's interval against last_run_at. Runs execute
-    in background threads; this returns immediately.
+    due-ness from intervals against last_run_at — provider-level for
+    account-less providers, per-account for account-backed ones (RFC-012
+    §4.5). Runs execute in background threads; this returns immediately.
     """
     return jsonify(provider_runtime.run_all_due(triggered_by="heartbeat")), 202
 
 
 @providers_bp.post("/<name>/run")
 def run_provider(name: str):
-    """Trigger a run for a specific provider (manual, even if not yet due).
+    """Trigger runs for a specific provider (manual, even if not yet due).
+
+    Account-less providers start one provider-level run. Account-backed
+    providers start every active account in parallel (RFC-012 §4.5).
 
     Returns:
-        202: {"name", "run_id", "status": "running"}
+        202: Provider-level {"name", "run_id", "status": "running"} or
+             account-backed {"name", "triggered": [...], "skipped": [...]}
         404: Unknown provider
-        409: A run is already in flight (single-flight lock)
+        409: Single-flight lock held (provider-level only; account runs
+             report collisions per account inside "skipped")
     """
-    return jsonify(provider_runtime.start_run(name, triggered_by="manual")), 202
+    return jsonify(provider_runtime.start_provider_run(name, triggered_by="manual")), 202
+
+
+# ============================================================================
+# Provider accounts (RFC-012 §6.1)
+# ============================================================================
+
+
+@providers_bp.post("/<name>/accounts")
+@validate_request
+def register_account(name: str, data: RegisterAccountRequest):
+    """Bind an upstream account to a provider (RFC-012).
+
+    Tokens never transit the API: consent happens CLI-local and the secret
+    lives in HACM under `credential_ref` (default {platform}:{subject}).
+    The subject must already be verified against that credential by the
+    linking flow (INV-3) — the server records the binding, it does not
+    attest it.
+
+    Returns:
+        201: Stored account manifest
+        400: Bad schema, or platform rejected by the provider class
+        404: Unknown provider
+        409: (provider, subject) already registered
+    """
+    return jsonify(provider_registry.register_account(name, data)), 201
+
+
+@providers_bp.get("/<name>/accounts")
+def list_accounts(name: str):
+    """List a provider's account bindings with status (RFC-012)."""
+    accounts = provider_registry.list_accounts(name)
+    return jsonify({"accounts": accounts, "count": len(accounts)})
+
+
+@providers_bp.get("/<name>/accounts/<account_id>")
+def get_account(name: str, account_id: str):
+    """Get one account binding (RFC-012)."""
+    return jsonify(provider_registry.get_account(name, account_id))
+
+
+@providers_bp.patch("/<name>/accounts/<account_id>")
+@validate_request
+def update_account(name: str, account_id: str, data: UpdateAccountRequest):
+    """Update mutable account fields (label, status, config, interval).
+
+    platform/subject/credential_ref are immutable — remove and re-register
+    instead (the credential they reference is operator-managed in HACM).
+    """
+    return jsonify(provider_registry.update_account(name, account_id, data))
+
+
+@providers_bp.delete("/<name>/accounts/<account_id>")
+def remove_account(name: str, account_id: str):
+    """Delete an account binding (RFC-012).
+
+    Removes the registry row only — the HACM credential it references is
+    operator-managed (custody operations stay on the host side, INV-2).
+    """
+    provider_registry.remove_account(name, account_id)
+    return "", 204
+
+
+@providers_bp.post("/<name>/accounts/<account_id>/verify")
+def verify_account(name: str, account_id: str):
+    """Probe an account's credential health server-side (RFC-012 §6.1).
+
+    Delegates to the provider's verify_account hook. A passing probe
+    re-activates a needs_reauth account; a failing probe parks it there.
+
+    Returns:
+        200: Updated account manifest (status/error/last_verified_at)
+        400: Provider has no verify_account hook
+        404: Unknown provider or account
+    """
+    return jsonify(provider_runtime.verify_account(name, account_id))
+
+
+@providers_bp.post("/<name>/accounts/<account_id>/run")
+def run_account(name: str, account_id: str):
+    """Trigger a run for one specific account (manual, RFC-012 §6.1).
+
+    Returns:
+        202: {"name", "account_id", "subject", "run_id", "status": "running"}
+        404: Unknown provider or account
+        409: A run is already in flight for this (provider, account)
+    """
+    return jsonify(
+        provider_runtime.start_run(name, triggered_by="manual", account_id=account_id)
+    ), 202

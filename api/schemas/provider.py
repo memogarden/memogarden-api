@@ -65,3 +65,44 @@ class ScopePolicyRequest(BaseModel):
         default="triage",
         description="Catch-all scope ref (uuid or builtin alias); null = unscoped",
     )
+
+
+class RegisterAccountRequest(BaseModel):
+    """Payload for POST /api/v1/providers/{name}/accounts (RFC-012 §6.1).
+
+    Binds one upstream identity to the provider. Tokens never transit the
+    API: the OAuth consent happens CLI-local and the secret lives in HACM;
+    `credential_ref` is only a reference (defaults to the {platform}:{subject}
+    convention). `subject` must already be verified against the credential
+    by the linking flow (RFC-012 INV-3) — the server records, it does not
+    attest.
+    """
+
+    platform: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")
+    subject: str = Field(min_length=1, max_length=255)
+    label: str | None = Field(default=None, max_length=120)
+    credential_ref: str | None = Field(
+        default=None,
+        min_length=1,
+        description="HACM credential id; defaults to {platform}:{subject}",
+    )
+    config: dict[str, Any] = Field(default_factory=dict)
+    capabilities: list[str] = Field(default_factory=list)
+
+
+class UpdateAccountRequest(BaseModel):
+    """Payload for PATCH /api/v1/providers/{name}/accounts/{account_id}.
+
+    Fields omitted stay unchanged. `config` replaces the whole per-account
+    config object (same semantics as the provider-level config patch).
+    platform/subject/credential_ref are immutable — remove and re-register
+    instead (the credential they reference is operator-managed in HACM).
+    """
+
+    label: str | None = Field(default=None, max_length=120)
+    status: str | None = Field(
+        default=None,
+        pattern=r"^(active|needs_reauth|revoked|disabled)$",
+    )
+    config: dict[str, Any] | None = None
+    interval: int | None = Field(default=None, ge=60)
