@@ -51,4 +51,8 @@ api_v1_bp.register_blueprint(recurrences.recurrences_bp)
 # Register the providers registry blueprint (RFC-004 §12.2)
 api_v1_bp.register_blueprint(providers_bp)
 
+# Register calendar Event review actions (RFC-014 §6: mark-occurred)
+from .events import calendar_events_bp  # noqa: E402 (blueprint wiring)
+api_v1_bp.register_blueprint(calendar_events_bp)
+
 __all__ = ["api_v1_bp"]
