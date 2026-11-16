@@ -204,6 +204,11 @@ def validate_provider_class(module: str, class_name: str) -> list[str]:
     capabilities = ["sync"]
     if callable(getattr(cls, "create_relations", None)):
         capabilities.append("create_relations")
+    if getattr(cls, "ENTITY_UPSERTS", False):
+        # RFC-014 §3: the provider yields entity upserts alongside facts;
+        # the runtime refuses entity yields from providers that do not
+        # declare this (defense in depth at run time).
+        capabilities.append("upsert_entities")
     return capabilities
 
 

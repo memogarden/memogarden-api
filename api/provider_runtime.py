@@ -28,7 +28,9 @@ Execution model:
 import json
 import logging
 import threading
+from contextlib import ExitStack
 
+from system.core import get_core
 from system.exceptions import LockConflictError, ValidationError
 from system.soil import Fact, generate_soil_uuid, get_soil
 from utils import isodatetime, uid
@@ -261,11 +263,56 @@ def _execute_run(
             provider = cls(config=config)
 
         facts_inserted = 0
+        entities_created = 0
+        entities_updated = 0
+        entities_noop = 0
         relations_created = 0
         scope_policy = manifest.get("scope_policy")
         resolve_scope = _make_scope_resolver()
-        with get_soil() as soil:
+        capabilities = manifest.get("capabilities") or []
+        with get_soil() as soil, ExitStack() as stack:
+            core = None
+
+            def ensure_core():
+                """Open the Core connection lazily — only when the provider
+                actually yields an entity upsert (a fact-only run pays no
+                Core connection)."""
+                nonlocal core
+                if core is None:
+                    core = stack.enter_context(get_core())
+                return core
+
             for yielded in provider.sync(since=since):
+                if isinstance(yielded, dict) and yielded.get("op") == "upsert_entity":
+                    # RFC-014 §3: providers yield, MemoGarden stores. A
+                    # provider that yields entities without declaring
+                    # ENTITY_UPSERTS is a contract violation — fail the run.
+                    if "upsert_entities" not in capabilities:
+                        raise ValidationError(
+                            f"provider '{name}' yielded an entity upsert but does "
+                            "not declare ENTITY_UPSERTS (capability "
+                            "'upsert_entities' missing from registration)",
+                            {"provider": name},
+                        )
+                    core_ctx = ensure_core()
+                    outcome = _upsert_entity(
+                        yielded, soil, core_ctx, name, run_id,
+                        scope_policy, resolve_scope,
+                    )
+                    if outcome == "created":
+                        entities_created += 1
+                    elif outcome == "updated":
+                        entities_updated += 1
+                    else:
+                        entities_noop += 1
+                    # Core-first commit ordering (RFC-008): a crash between
+                    # the two commits can lose an EntityDelta (recovered on
+                    # the next upsert) but must never orphan one — an
+                    # EntityDelta in Soil without its entity in Core is a
+                    # consistency-check failure; the reverse is not checked.
+                    core_ctx._conn.commit()
+                    soil.commit()
+                    continue
                 fact = _to_fact(yielded)
                 # RFC-011 §4.8 (item 4): providers label at creation per the
                 # operator's policy — the framework applies it, providers
@@ -284,7 +331,13 @@ def _execute_run(
                         soil.create_relation(relation)
                         relations_created += 1
 
-        detail = {"facts_inserted": facts_inserted, "relations_created": relations_created}
+        detail = {
+            "facts_inserted": facts_inserted,
+            "entities_created": entities_created,
+            "entities_updated": entities_updated,
+            "entities_noop": entities_noop,
+            "relations_created": relations_created,
+        }
         finish_run(run_id, name, started_at, "success", detail, interval,
                    account_id=account["id"] if account else "")
         logger.info("Provider run succeeded: %s run_id=%s %s", name, run_id, detail)
@@ -326,6 +379,182 @@ def _to_fact(yielded) -> Fact:
         f"provider yielded {type(yielded).__name__}; expected system.soil.Fact "
         "or dict with {type, data, metadata}"
     )
+
+
+def _match_policy_scope(merged: dict, policy: dict | None):
+    """First-match-wins rule evaluation over a merged data view.
+
+    Returns the matched scope reference, the policy default, or None for
+    explicitly unscoped. Absent policy = the ratified fail-closed default
+    (triage, 2026-11-12). Shared by the fact path (_apply_scope_policy)
+    and the entity upsert path so both label with the exact same rule
+    semantics (RFC-011 §4.8 item 4 / RFC-014 §10).
+    """
+    for rule in (policy or {}).get("rules", []):
+        match = rule.get("match", {})
+        if all(merged.get(field) == value for field, value in match.items()):
+            return rule.get("scope")
+    return (policy or {}).get("default", "triage")
+
+
+def _apply_entity_scopes(target: dict, scope_policy: dict | None, resolve_scope) -> None:
+    """Entity analogue of _apply_scope_policy (RFC-014 §10).
+
+    Same rule semantics (shared _match_policy_scope); the label lands in
+    `data.scopes` instead of metadata.scopes, because Core entities have
+    a single JSON data column. A provider-set `scopes` wins (SG-7).
+    """
+    if target.get("scopes"):
+        return  # provider labeled it — provider wins
+    scope_ref = _match_policy_scope(target, scope_policy)
+    if scope_ref is None:
+        return  # explicitly unscoped
+    scope_uuid = resolve_scope(scope_ref)
+    if scope_uuid:
+        target["scopes"] = [scope_uuid]
+
+
+def _upsert_entity(
+    yielded: dict,
+    soil,
+    core,
+    provider_name: str,
+    run_id: str,
+    scope_policy: dict | None,
+    resolve_scope,
+) -> str:
+    """Store one provider-yielded entity upsert (RFC-014 §3).
+
+    Storage mapping: Core entities have a single JSON data column, so the
+    merged view of yielded data + metadata is stored flat in entity.data
+    (data/metadata must not collide — the merge would be ambiguous).
+
+    Update semantics: incoming top-level keys merge OVER the stored data
+    (absent keys keep stored values; an explicit null clears), then the
+    operator's scope policy is re-applied to the merged result — labels
+    follow the live policy, a provider-set `scopes` wins (SG-7). Google
+    resources arrive complete on change, so merge is faithful; the merge
+    exists for tombstones, whose payloads guarantee only ids — the stamps
+    must not clobber stored belief fields (RFC-014 §4.5).
+
+    No-op rule: stored etag AND source_status both unchanged → skip (an
+    hourly run over an unchanged calendar stays cheap, and the delta
+    stream stays signal, RFC-014 §4.4).
+
+    Returns "created" | "updated" | "noop". Writes are NOT committed here —
+    the run loop commits Core before Soil (RFC-008 orphan-delta ordering).
+    """
+    entity_type = yielded.get("type")
+    data = yielded.get("data") or {}
+    metadata = yielded.get("metadata") or {}
+    if not entity_type or not isinstance(data, dict) or not isinstance(metadata, dict):
+        raise ValidationError(
+            "entity upsert requires {op, type, key, data[, metadata]} with dict data",
+            {"provider": provider_name, "got_type": type(entity_type).__name__},
+        )
+    collisions = sorted(set(data) & set(metadata))
+    if collisions:
+        raise ValidationError(
+            f"entity upsert data/metadata key collision: {collisions}",
+            {"provider": provider_name, "keys": collisions},
+        )
+
+    incoming = {**data, **metadata}
+    key = yielded.get("key")
+    if not isinstance(key, dict) or not key:
+        raise ValidationError(
+            "entity upsert requires a non-empty natural key",
+            {"provider": provider_name},
+        )
+
+    stored = core.entity.find_by_data(entity_type, key)
+    if stored is None:
+        # A create must carry its full natural key in the payload — the
+        # stored data is what every future lookup matches against. A merge
+        # (update) may be stamp-only: tombstone payloads guarantee only
+        # ids (RFC-014 §4.5), so requiring key fields there would make
+        # removal stamps impossible.
+        missing = [field for field in key if field not in incoming]
+        if missing:
+            raise ValidationError(
+                f"natural key fields missing from the upsert payload: {missing}",
+                {"provider": provider_name, "missing": missing},
+            )
+        nulls = [field for field in key if incoming.get(field) is None]
+        if nulls:
+            # json_extract = NULL never matches (NULL is NULL in SQL), so a
+            # null key field would create a duplicate entity every run.
+            raise ValidationError(
+                f"natural key fields must not be null: {nulls}",
+                {"provider": provider_name, "nulls": nulls},
+            )
+    if stored is not None:
+        stored_data = stored["data"]
+        if (
+            stored_data.get("etag") == incoming.get("etag")
+            and stored_data.get("source_status") == incoming.get("source_status")
+        ):
+            return "noop"
+
+    # Scope label (RFC-014 §10): provider-set wins; otherwise the live
+    # policy applies. Labels ride `data.scopes` — the entity analogue of
+    # fact metadata.scopes (entities have no metadata column; the future
+    # entity read-path enforcement reads this).
+    if stored is None:
+        _apply_entity_scopes(incoming, scope_policy, resolve_scope)
+        core.entity.create(entity_type=entity_type, data=incoming)
+        return "created"
+
+    entity_id = stored["uuid"]
+    previous_hash = stored["hash"]
+    # Merge semantics (RFC-014 §3): incoming top-level keys overwrite,
+    # absent keys keep stored values — Google resources arrive complete
+    # on change, and tombstones are stamp-only payloads that must not
+    # clobber stored belief fields. Stored runtime labels don't survive
+    # the merge; the live policy re-labels the merged result (identical
+    # labels therefore produce no delta noise — the changed-field diff
+    # below compares against what was stored).
+    merged = {k: v for k, v in stored_data.items() if k != "scopes"}
+    merged.update(incoming)
+    _apply_entity_scopes(merged, scope_policy, resolve_scope)
+    changed = {
+        field: {"from": stored_data.get(field), "to": value}
+        for field, value in merged.items()
+        if stored_data.get(field) != value
+    }
+    if not changed:
+        # Etag churned but content converged (Google etag noise) — nothing
+        # to record, and an empty delta would be noise in the stream.
+        return "noop"
+    core.entity.update_data(entity_id, merged)
+    new_hash = core.entity.get_current_hash(entity_id)
+    soil.create_fact(
+        Fact(
+            uuid=generate_soil_uuid(),
+            _type="EntityDelta",
+            realized_at=isodatetime.now(),
+            canonical_at=isodatetime.now(),
+            data={
+                # entity_uuid per the entitydelta schema (core_-prefixed);
+                # entity_id mirrors it plain because the RFC-008 orphan
+                # checker reads data.entity_id.
+                "entity_uuid": uid.add_core_prefix(entity_id),
+                "entity_id": entity_id,
+                "entity_type": entity_type,
+                "commit": new_hash,
+                "parent": previous_hash,
+                "ops": {"changed": changed},
+            },
+            metadata={
+                "provider": provider_name,
+                "run_id": run_id,
+                "source": "provider_runtime",
+            },
+            integrity_hash=None,  # computed by create_fact
+            fidelity="full",
+        )
+    )
+    return "updated"
 
 
 def _make_scope_resolver():
@@ -385,15 +614,7 @@ def _apply_scope_policy(fact: Fact, policy: dict | None, resolve_scope) -> None:
         return  # provider labeled it — provider wins
 
     merged = {**(fact.data or {}), **metadata}
-    scope_ref = None
-    for rule in (policy or {}).get("rules", []):
-        match = rule.get("match", {})
-        if all(merged.get(field) == value for field, value in match.items()):
-            scope_ref = rule.get("scope")
-            break
-    else:
-        scope_ref = (policy or {}).get("default", "triage")
-
+    scope_ref = _match_policy_scope(merged, policy)
     if scope_ref is None:
         return  # explicitly unscoped
     scope_uuid = resolve_scope(scope_ref)
