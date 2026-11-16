@@ -50,6 +50,10 @@ BASELINE_ITEM_TYPES = {
     "ToolCall",
     "EntityDelta",
     "SystemEvent",
+    # Operator-authored (memogarden import opml): one fact per subscribed
+    # RSS/Atom feed; Entry facts themselves enter via the provider runtime,
+    # not this verb (schemas/subscription.yaml).
+    "Subscription",
 }
 
 

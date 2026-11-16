@@ -583,6 +583,48 @@ class TestAddVerb:
         assert data["ok"] is True
         assert data["result"]["type"] == "Message"
 
+    def test_add_subscription_fact(self, client, auth_headers):
+        """Subscription (RSS/Atom feed) is operator-authored via
+        `memogarden import opml` — schemas/subscription.yaml. Entry facts
+        themselves enter through the provider runtime, not this verb."""
+        response = client.post(
+            "/mg",
+            json={
+                "op": "add",
+                "type": "Subscription",
+                "data": {
+                    "xml_url": "https://rachelbythebay.com/w/atom.xml",
+                    "title": "Rachel by the Bay",
+                    "categories": ["Tech Blogs"],
+                },
+                "metadata": {"source": "opml"},
+            },
+            headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+        result = data["result"]
+        assert result["type"] == "Subscription"
+        assert result["data"]["xml_url"] == "https://rachelbythebay.com/w/atom.xml"
+
+        # and it is queryable by type + xml_url (the import verb's dedup probe)
+        query = client.post(
+            "/mg",
+            json={
+                "op": "query",
+                "target_type": "fact",
+                "type": "Subscription",
+                "filters": {"xml_url": "https://rachelbythebay.com/w/atom.xml"},
+            },
+            headers=auth_headers,
+        )
+        assert query.status_code == 200
+        qdata = query.get_json()
+        assert qdata["ok"] is True
+        assert qdata["result"]["total"] >= 1
+
     def test_add_unsupported_type_fails(self, client, auth_headers):
         """Test adding unsupported fact type fails."""
         response = client.post(
