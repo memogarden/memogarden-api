@@ -198,7 +198,8 @@ def test_pending_review_queue(client, auth_headers, core):
     marked = _make_event(core, "happened", _past_iso(3), _past_iso(3),
                          occurred_at=_past_iso(3))
     _make_event(core, "unmarked recent", _past_iso(2), _past_iso(2))
-    _make_event(core, "date-only past", "2026-11-01", None)
+    _make_event(core, "date-only past",
+                (datetime.now(UTC) - timedelta(days=2)).strftime("%Y-%m-%d"), None)
     _make_event(core, "in the future", (datetime.now(UTC) + timedelta(days=5)).isoformat(),
                 (datetime.now(UTC) + timedelta(days=5)).isoformat())
 

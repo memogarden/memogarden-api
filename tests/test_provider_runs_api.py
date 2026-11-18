@@ -120,14 +120,14 @@ def test_list_runs_unauthenticated_401(client, core):
 
 
 def test_list_runs_limit_cap(client, auth_headers, core):
-    """The 200 hard cap bounds oversized requests."""
+    """The 200 hard cap bounds oversized requests (>200 seeded rows)."""
     _seed_provider(core, "alpha")
-    for i in range(5):
+    for i in range(205):
         _seed_run(core, f"55555555-5555-4555-8555-{i:012d}", "alpha", "success",
-                  f"2026-11-10T0{i}:00:00+00:00")
+                  f"2026-01-01T00:00:{i % 60:02d}+00:00")
     response = client.get("/api/v1/providers/alpha/runs?limit=500", headers=auth_headers)
     assert response.status_code == 200
-    assert response.get_json()["count"] == 5  # corpus smaller than cap
+    assert response.get_json()["count"] == 200  # capped, not 205
 
 
 # ============================================================================

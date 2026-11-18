@@ -933,6 +933,7 @@ def list_runs(
     if status is not None:
         clauses.append("status = ?")
         params.append(status)
+    params.append(capped)
     core = get_core()
     with _RUNS_LOCK:
         rows = core._conn.execute(
@@ -941,7 +942,7 @@ def list_runs(
                 FROM provider_runs
                 WHERE {' AND '.join(clauses)}
                 ORDER BY started_at DESC
-                LIMIT {int(capped)}""",
+                LIMIT ?""",
             params,
         ).fetchall()
     return [_row_to_run(row) for row in rows]

@@ -331,7 +331,11 @@ def pending_review():
             {"window_days": raw_window, "limit": raw_limit},
         ) from None
 
-    cutoff = (datetime.now(UTC) - timedelta(days=window_days)).isoformat()
+    # isodatetime everywhere: mixed +00:00/Z suffixes compare fine but
+    # one format keeps the lexicographic window comparisons legible.
+    cutoff = isodatetime.to_timestamp(
+        datetime.now(UTC) - timedelta(days=window_days)
+    )
     now = isodatetime.now()
 
     core = get_core()
@@ -343,17 +347,17 @@ def pending_review():
                      json_extract(data, '$.starts_at')) >= ?"""
     params: list = [now, cutoff]
 
+    total_unmarked = core._conn.execute(
+        f"SELECT COUNT(*) AS n FROM entity WHERE {where}", params
+    ).fetchone()["n"]
     rows = core._conn.execute(
         f"""SELECT uuid, data, updated_at FROM entity
             WHERE {where}
             ORDER BY COALESCE(json_extract(data, '$.ends_at'),
                               json_extract(data, '$.starts_at')) DESC
-            LIMIT {limit}""",
-        params,
+            LIMIT ?""",
+        [*params, limit],
     ).fetchall()
-    total_unmarked = core._conn.execute(
-        f"SELECT COUNT(*) AS n FROM entity WHERE {where}", params
-    ).fetchone()["n"]
 
     # Exclude events that already have an occurrence fact (idempotency
     # probe pattern from mark_occurred — occurrence data stores the

@@ -59,9 +59,35 @@
     }
     if (!getAuthToken()) {
         window.location.href = '/login';
+    } else {
+        initConsole();
     }
-    const userInfo = JSON.parse(localStorage.getItem('user_info') || '{}');
-    document.getElementById('userDisplay').textContent = userInfo.username || 'operator';
+
+    function initConsole() {
+        let username = 'operator';
+        try {
+            username = JSON.parse(localStorage.getItem('user_info') || '{}').username || username;
+        } catch (error) { /* corrupt user_info — fall back to the default label */ }
+        document.getElementById('userDisplay').textContent = username;
+        setupChrome();
+        loadChromeData();
+    }
+
+    function setupChrome() {
+        document.getElementById('logoutBtn').addEventListener('click', function() {
+            localStorage.removeItem('access_token');
+            localStorage.removeItem('user_info');
+            window.location.href = '/login';
+        });
+
+        // Highlight the active nav item
+        const navPage = document.getElementById('consoleNav').dataset.page;
+        document.querySelectorAll('.console-nav').forEach(function(link) {
+            if (link.dataset.nav === navPage) {
+                link.classList.add('bg-gray-200', 'font-medium', 'text-gray-900');
+            }
+        });
+    }
 
     document.getElementById('logoutBtn').addEventListener('click', function() {
         localStorage.removeItem('access_token');
@@ -142,7 +168,7 @@
     }
 
     // Sidebar badges + enforcement chip (cheap sovereign reads)
-    (async function loadChrome() {
+    async function loadChromeData() {
         try {
             const [triage, pending, overview] = await Promise.all([
                 api('/api/v1/triage?limit=1'),
@@ -165,7 +191,7 @@
         } catch (error) {
             showError('Console chrome failed to load: ' + error.message);
         }
-    })();
+    }
 </script>
 {% block console_scripts %}{% endblock %}
 {% endblock %}

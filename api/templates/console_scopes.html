@@ -100,7 +100,10 @@ function renderOverview() {
             <td class="px-3 py-2">${s.fact_count}</td>
             <td class="px-3 py-2">${entityTotal}</td>
             <td class="px-3 py-2 text-right">${builtin ? '' :
-                `<button class="px-2 py-1 text-xs border border-red-200 text-red-600 rounded hover:bg-red-50" onclick="deleteScope('${esc(s.uuid)}','${esc(scopeLabel(s))}')">delete</button>`}
+                // Scope labels are user-editable (handle_edit has no Scope gate),
+                // so the label never enters an inline JS string — the confirm
+                // dialog reads it back from the overview, attribute holds the uuid.
+                `<button class="px-2 py-1 text-xs border border-red-200 text-red-600 rounded hover:bg-red-50" data-delete-scope="${esc(s.uuid)}">delete</button>`}
             </td></tr>`;
     }).join('');
 
@@ -177,15 +180,24 @@ document.getElementById('mintScopeGo').addEventListener('click', async function(
     } catch (error) { showError('Mint scope failed: ' + error.message); }
 });
 
-async function deleteScope(uuid, label) {
+async function deleteScope(uuid) {
     clearError();
-    if (!confirm(`Delete scope "${label}"? Warned: items still carrying the label keep it.`)) return;
+    const scope = OV.scopes.find(s => s.uuid === uuid);
+    const label = scope ? scopeLabel(scope) : uuid;
+    if (!confirm('Delete scope "' + label + '"? Warned: items still carrying the label keep it.')) return;
     try {
         const result = await mg({ op: 'forget', target: uuid });
         if (result.ok === false) throw new Error(result.error ? result.error.message : 'forget failed');
         window.location.reload();
     } catch (error) { showError('Delete failed: ' + error.message); }
 }
+
+// Delegated handler — scope labels are user-editable, so they never ride
+// in inline onclick strings; the attribute carries only the server uuid.
+document.getElementById('scopesBody').addEventListener('click', function(evt) {
+    const btn = evt.target.closest('[data-delete-scope]');
+    if (btn) deleteScope(btn.dataset.deleteScope);
+});
 
 document.getElementById('issueGrantBtn').addEventListener('click', () =>
     document.getElementById('issueGrantForm').classList.toggle('hidden'));

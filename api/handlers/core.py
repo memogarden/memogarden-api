@@ -28,6 +28,7 @@ from ..middleware.scope_access import (
     active_scope_for,
     enforcement_enabled,
     filter_visible,
+    normalize_scopes,
     require_scope_grant,
     requester_has_all_scopes,
 )
@@ -294,6 +295,13 @@ def handle_edit(request: EditRequest, actor: str) -> dict:
 
         # Apply set operations
         if request.set:
+            # RFC-011: entity scope labels live in data.scopes as plain
+            # uuids (DB convention) — normalize at the boundary exactly
+            # like handle_amend does for metadata.scopes, so prefixed
+            # labels from callers never wedge the scope predicates
+            # (a prefixed label silently matches nothing).
+            if "scopes" in request.set:
+                request.set["scopes"] = normalize_scopes(request.set["scopes"] or [])
             current_data.update(request.set)
 
         # Apply unset operations

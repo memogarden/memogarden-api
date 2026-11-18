@@ -46,24 +46,25 @@
 {% block console_scripts %}
 <script>
 (async function init() {
-    try {
-        const [agents, keys] = await Promise.all([
-            api('/agents'),
-            api('/api-keys/'),
-        ]);
-        const agentList = Array.isArray(agents) ? agents : (agents.agents || []);
-        const keyList = Array.isArray(keys) ? keys : (keys.keys || keys.api_keys || []);
+    document.addEventListener('console:overview', async function(evt) {
+        const overview = evt.detail;
+        try {
+            const [agents, keys] = await Promise.all([
+                api('/agents'),
+                api('/api-keys/'),
+            ]);
+            const agentList = Array.isArray(agents) ? agents : (agents.agents || []);
+            const keyList = Array.isArray(keys) ? keys : (keys.keys || keys.api_keys || []);
 
-        document.getElementById('agentsBody').innerHTML = agentList.length
-            ? agentList.map(a => `<tr class="border-b border-gray-100">
-                <td class="px-3 py-2"><b>${esc(a.label || a.name || '')}</b></td>
-                <td class="px-3 py-2 text-xs text-gray-500">${esc(a.agent_id || a.uuid || '')}</td>
-                <td class="px-3 py-2 text-xs">${esc(((a.data || {}).allowed_scopes || []).join(', ') || '—')}</td>
-              </tr>`).join('')
-            : '<tr><td class="px-3 py-4 text-gray-400" colspan="3">No agents minted yet.</td></tr>';
+            document.getElementById('agentsBody').innerHTML = agentList.length
+                ? agentList.map(a => `<tr class="border-b border-gray-100">
+                    <td class="px-3 py-2"><b>${esc(a.label || a.name || '')}</b></td>
+                    <td class="px-3 py-2 text-xs text-gray-500">${esc(a.agent_id || a.uuid || '')}</td>
+                    <td class="px-3 py-2 text-xs">${esc(((a.data || {}).allowed_scopes || []).join(', ') || '—')}</td>
+                  </tr>`).join('')
+                : '<tr><td class="px-3 py-4 text-gray-400" colspan="3">No agents minted yet.</td></tr>';
 
-        const overview = window.__scopesOverview;
-        const unbound = [];
+            const unbound = [];
         document.getElementById('keysBody').innerHTML = keyList.filter(k => !k.revoked_at).map(k => {
             const agentId = k.agent_entity_id || k.agent_id;
             const bound = agentId ? (agentId.startsWith('core_') ? agentId.slice(0, 13) + '…' : agentId) : null;
@@ -88,14 +89,15 @@
               </tr>`;
         }).join('') || '<tr><td class="px-3 py-4 text-gray-400" colspan="4">No keys minted yet.</td></tr>';
 
-        if (unbound.length) {
-            const warn = document.getElementById('unboundWarning');
-            warn.textContent = 'Unbound keys: ' + unbound.join(', ') + ' — attribution collapses to actor_type=api_key. Bind or retire.';
-            warn.classList.remove('hidden');
+            if (unbound.length) {
+                const warn = document.getElementById('unboundWarning');
+                warn.textContent = 'Unbound keys: ' + unbound.join(', ') + ' — attribution collapses to actor_type=api_key. Bind or retire.';
+                warn.classList.remove('hidden');
+            }
+        } catch (error) {
+            showError('Failed to load identity overview: ' + error.message);
         }
-    } catch (error) {
-        showError('Failed to load identity overview: ' + error.message);
-    }
+    }, { once: true });
 })();
 </script>
 {% endblock %}
