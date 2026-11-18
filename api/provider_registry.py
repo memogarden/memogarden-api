@@ -209,6 +209,12 @@ def validate_provider_class(module: str, class_name: str) -> list[str]:
         # the runtime refuses entity yields from providers that do not
         # declare this (defense in depth at run time).
         capabilities.append("upsert_entities")
+    if getattr(cls, "ENTITY_RETIRES", False):
+        # Tada ontology (#30): the provider yields entity retirements — a
+        # belief that ended, its occurrence already landed as a fact. Same
+        # defense in depth as upserts: the runtime refuses retire yields
+        # from providers that do not declare this.
+        capabilities.append("retire_entities")
     return capabilities
 
 
