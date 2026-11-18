@@ -1,0 +1,245 @@
+{% extends "console_base.html" %}
+
+{% block console_title %}Scopes &amp; Grants{% endblock %}
+{% block console_page %}scopes{% endblock %}
+
+{% block console_content %}
+<h2 class="text-lg font-semibold text-gray-900 mb-1">Scopes &amp; grants</h2>
+<p class="text-sm text-gray-600 mb-4">Authority is minted here — scopes define intentions; grants bind them to keys (SG-4, checked only at enter).</p>
+
+<div id="enforcementBanner" class="alert alert-info mb-4"></div>
+
+<div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+    <!-- Scopes -->
+    <section>
+        <div class="flex justify-between items-center mb-2">
+            <h3 class="text-sm font-semibold text-gray-900">Scopes</h3>
+            <button id="mintScopeBtn" class="px-3 py-1 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">Mint scope <span class="opacity-75">OP</span></button>
+        </div>
+        <div class="bg-white shadow rounded-lg overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+                    <th class="px-3 py-2">Scope</th><th class="px-3 py-2">Facts</th><th class="px-3 py-2">Entities</th><th class="px-3 py-2"></th>
+                </tr></thead>
+                <tbody id="scopesBody"><tr><td class="px-3 py-4 text-gray-400" colspan="4">Loading…</td></tr></tbody>
+            </table>
+        </div>
+        <div id="mintScopeForm" class="hidden bg-white shadow rounded-lg p-3 mt-2 space-y-2">
+            <input id="scopeLabel" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm" placeholder="Label (e.g. Finances)">
+            <input id="scopeDesc" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm" placeholder="Description (optional)">
+            <button id="mintScopeGo" class="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm">Create</button>
+        </div>
+    </section>
+
+    <!-- Grants -->
+    <section>
+        <div class="flex justify-between items-center mb-2">
+            <h3 class="text-sm font-semibold text-gray-900">Grants</h3>
+            <button id="issueGrantBtn" class="px-3 py-1 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">Issue grant <span class="opacity-75">OP</span></button>
+        </div>
+        <div class="bg-white shadow rounded-lg overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+                    <th class="px-3 py-2">Principal</th><th class="px-3 py-2">Scopes</th><th class="px-3 py-2">Expiry</th><th class="px-3 py-2"></th>
+                </tr></thead>
+                <tbody id="grantsBody"><tr><td class="px-3 py-4 text-gray-400" colspan="4">Loading…</td></tr></tbody>
+            </table>
+        </div>
+        <div id="issueGrantForm" class="hidden bg-white shadow rounded-lg p-3 mt-2 space-y-2">
+            <select id="grantPrincipal" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm"></select>
+            <div class="flex gap-2">
+                <select id="grantScope" class="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-sm"></select>
+                <input id="grantExpires" type="date" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+            </div>
+            <button id="issueGrantGo" class="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm">Grant</button>
+            <p class="text-xs text-gray-400">Agent principals grant all bound keys; future bindings inherit.</p>
+        </div>
+    </section>
+</div>
+
+<!-- Provider scope policies -->
+<section class="mt-6">
+    <h3 class="text-sm font-semibold text-gray-900 mb-2">Provider scope policies <span class="text-xs text-gray-400">OP — boundary configuration</span></h3>
+    <div class="bg-white shadow rounded-lg overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+                <th class="px-3 py-2">Provider</th><th class="px-3 py-2">Policy</th><th class="px-3 py-2">Set default destination</th>
+            </tr></thead>
+            <tbody id="policiesBody"><tr><td class="px-3 py-4 text-gray-400" colspan="3">Loading…</td></tr></tbody>
+        </table>
+    </div>
+    <p class="text-xs text-gray-400 mt-2">Omit default = ratified fail-closed catch-all → triage · explicit null = exempt (unscoped) · rules editing stays with the API/CLI.</p>
+</section>
+{% endblock %}
+
+{% block console_scripts %}
+<script>
+const BUILTIN_LABELS = ['Triage / Untrusted', 'Private'];
+let OV = null;
+
+function scopeLabel(s) { return (s.data ? s.data.label : s.label) || s.uuid; }
+
+function renderOverview() {
+    const banner = document.getElementById('enforcementBanner');
+    if (OV.enforcement) {
+        banner.className = 'alert alert-success mb-4';
+        banner.textContent = 'Scope enforcement is ON — label gates (read / relabel / enter) are enforced.';
+    } else {
+        banner.className = 'alert mb-4 bg-amber-50 text-amber-700 border border-amber-300';
+        banner.innerHTML = '<b>MEMOGARDEN_SCOPE_ENFORCEMENT=0</b> — identity, minting and grant gates are always on; ' +
+            'read / relabel / enter gates are advisory until the flag flips. ' +
+            'Flip: set the env var on memogarden.service + restart (operator act, not an endpoint).';
+    }
+
+    document.getElementById('scopesBody').innerHTML = OV.scopes.map(s => {
+        const builtin = BUILTIN_LABELS.includes(scopeLabel(s));
+        const entityTotal = Object.values(s.entity_counts || {}).reduce((a, b) => a + b, 0);
+        return `<tr class="border-b border-gray-100">
+            <td class="px-3 py-2"><b>${esc(scopeLabel(s))}</b> ${builtin ? '<span class="text-xs text-gray-400">builtin</span>' : ''}
+                <div class="text-xs text-gray-400">${shortUuid(s.uuid)}</div></td>
+            <td class="px-3 py-2">${s.fact_count}</td>
+            <td class="px-3 py-2">${entityTotal}</td>
+            <td class="px-3 py-2 text-right">${builtin ? '' :
+                // Scope labels are user-editable (handle_edit has no Scope gate),
+                // so the label never enters an inline JS string — the confirm
+                // dialog reads it back from the overview, attribute holds the uuid.
+                `<button class="px-2 py-1 text-xs border border-red-200 text-red-600 rounded hover:bg-red-50" data-delete-scope="${esc(s.uuid)}">delete</button>`}
+            </td></tr>`;
+    }).join('');
+
+    // Grants: one row per (principal, scope) grant entry
+    const rows = [];
+    for (const key of OV.grants) {
+        const principal = key.agent_label || key.agent_entity_id
+            ? `key ${esc(key.key_label)} → agent ${esc(key.agent_label || '')}`
+            : `key ${esc(key.key_label)} <span class="text-xs text-red-500">unbound</span>`;
+        if (!(key.grants || []).length) {
+            rows.push(`<tr class="border-b border-gray-100"><td class="px-3 py-2">${principal}</td>
+                <td class="px-3 py-2 text-gray-400" colspan="3">no grants</td></tr>`);
+            continue;
+        }
+        for (const g of key.grants) {
+            const scope = OV.scopes.find(s => s.uuid.endsWith(g.scope_uuid) || g.scope_uuid.endsWith(s.uuid));
+            rows.push(`<tr class="border-b border-gray-100">
+                <td class="px-3 py-2">${principal}</td>
+                <td class="px-3 py-2">${scope ? esc(scopeLabel(scope)) : shortUuid(g.scope_uuid)}</td>
+                <td class="px-3 py-2">${g.expires_at ? fmtTime(g.expires_at) : '—'}</td>
+                <td class="px-3 py-2 text-right"><button class="px-2 py-1 text-xs border border-red-200 text-red-600 rounded hover:bg-red-50" onclick="revokeGrant('${esc(g.grant_id)}')">revoke</button></td>
+            </tr>`);
+        }
+    }
+    document.getElementById('grantsBody').innerHTML = rows.length ? rows.join('') :
+        '<tr><td class="px-3 py-4 text-gray-400" colspan="4">No keys yet.</td></tr>';
+
+    // Issue-grant form options
+    const principals = OV.grants.map(k => {
+        const label = k.agent_label ? `${k.key_label} → ${k.agent_label}` : k.key_label;
+        const value = k.agent_entity_id ? `agent|${k.agent_entity_id}` : `key|${k.key_id}`;
+        return `<option value="${esc(value)}">${esc(label)}</option>`;
+    }).join('');
+    document.getElementById('grantPrincipal').innerHTML = principals;
+    document.getElementById('grantScope').innerHTML = OV.scopes.map(s =>
+        `<option value="${esc(s.uuid)}">${esc(scopeLabel(s))}</option>`).join('');
+
+    // Provider policies
+    const providers = Object.keys(OV.provider_policies || {});
+    document.getElementById('policiesBody').innerHTML = providers.map(name => {
+        const policy = OV.provider_policies[name];
+        const hasDefaultKey = policy && Object.prototype.hasOwnProperty.call(policy, 'default');
+        const desc = !policy || !hasDefaultKey ? '<span class="text-amber-600">fail-closed → triage</span>'
+            : policy.default === null ? '<span class="text-gray-500">exempt (unscoped)</span>'
+            : `default → ${shortUuid(policy.default)}`;
+        const rules = policy && policy.rules ? policy.rules.length : 0;
+        return `<tr class="border-b border-gray-100">
+            <td class="px-3 py-2"><b>${esc(name)}</b></td>
+            <td class="px-3 py-2">${desc} <span class="text-xs text-gray-400">${rules} rule(s)</span></td>
+            <td class="px-3 py-2">
+                <select class="border border-gray-300 rounded px-2 py-1 text-xs" onchange="setPolicy('${esc(name)}', this.value)">
+                    <option value="">change…</option>
+                    <option value="__catchall">triage catch-all</option>
+                    <option value="__exempt">exempt (unscoped)</option>
+                    ${OV.scopes.map(s => `<option value="${esc(s.uuid)}">default → ${esc(scopeLabel(s))}</option>`).join('')}
+                </select>
+            </td></tr>`;
+    }).join('') || '<tr><td class="px-3 py-4 text-gray-400" colspan="3">No providers registered.</td></tr>';
+}
+
+document.getElementById('mintScopeBtn').addEventListener('click', () =>
+    document.getElementById('mintScopeForm').classList.toggle('hidden'));
+document.getElementById('mintScopeGo').addEventListener('click', async function() {
+    clearError();
+    const label = document.getElementById('scopeLabel').value.trim();
+    const description = document.getElementById('scopeDesc').value.trim();
+    if (!label) { showError('Label required'); return; }
+    try {
+        const data = { label: label };
+        if (description) data.description = description;
+        const result = await mg({ op: 'create', type: 'Scope', data: data });
+        if (result.ok === false) throw new Error(result.error ? result.error.message : 'create failed');
+        window.location.reload();
+    } catch (error) { showError('Mint scope failed: ' + error.message); }
+});
+
+async function deleteScope(uuid) {
+    clearError();
+    const scope = OV.scopes.find(s => s.uuid === uuid);
+    const label = scope ? scopeLabel(scope) : uuid;
+    if (!confirm('Delete scope "' + label + '"? Warned: items still carrying the label keep it.')) return;
+    try {
+        const result = await mg({ op: 'forget', target: uuid });
+        if (result.ok === false) throw new Error(result.error ? result.error.message : 'forget failed');
+        window.location.reload();
+    } catch (error) { showError('Delete failed: ' + error.message); }
+}
+
+// Delegated handler — scope labels are user-editable, so they never ride
+// in inline onclick strings; the attribute carries only the server uuid.
+document.getElementById('scopesBody').addEventListener('click', function(evt) {
+    const btn = evt.target.closest('[data-delete-scope]');
+    if (btn) deleteScope(btn.dataset.deleteScope);
+});
+
+document.getElementById('issueGrantBtn').addEventListener('click', () =>
+    document.getElementById('issueGrantForm').classList.toggle('hidden'));
+document.getElementById('issueGrantGo').addEventListener('click', async function() {
+    clearError();
+    const parts = document.getElementById('grantPrincipal').value.split('|');
+    const body = { scope_uuid: document.getElementById('grantScope').value };
+    body[parts[0] + '_id'] = parts[1];
+    const expires = document.getElementById('grantExpires').value;
+    if (expires) body.expires_at = new Date(expires + 'T00:00:00Z').toISOString();
+    try {
+        const result = await api('/grants', { method: 'POST', body: body });
+        if (!result.grants) throw new Error('grant failed');
+        window.location.reload();
+    } catch (error) { showError('Grant failed: ' + error.message); }
+});
+
+async function revokeGrant(grantId) {
+    clearError();
+    if (!confirm('Revoke this grant? Immediate for future operations.')) return;
+    try {
+        await api('/grants/' + encodeURIComponent(grantId), { method: 'DELETE' });
+        window.location.reload();
+    } catch (error) { showError('Revoke failed: ' + error.message); }
+}
+
+async function setPolicy(name, choice) {
+    if (!choice) return;
+    clearError();
+    let body;
+    if (choice === '__catchall') body = { rules: [] };
+    else if (choice === '__exempt') body = { rules: [], default: null };
+    else body = { rules: [], default: choice };
+    try {
+        await api('/api/v1/providers/' + encodeURIComponent(name) + '/scope-policy', { method: 'PUT', body: body });
+        window.location.reload();
+    } catch (error) { showError('Policy update failed: ' + error.message); }
+}
+
+document.addEventListener('console:overview', function(evt) {
+    OV = evt.detail;
+    renderOverview();
+}, { once: true });
+</script>
+{% endblock %}

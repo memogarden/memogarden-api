@@ -1,0 +1,216 @@
+{% extends "console_base.html" %}
+
+{% block console_title %}Triage{% endblock %}
+{% block console_page %}triage{% endblock %}
+
+{% block console_content %}
+<div class="flex justify-between items-center mb-2">
+    <h2 class="text-lg font-semibold text-gray-900">Triage review</h2>
+    <span id="scopeContext" class="text-xs text-gray-500"></span>
+</div>
+<p class="text-sm text-gray-600 mb-4">
+    Items land here by provider scope policy or the fail-closed default. Sorting = relabel into a destination scope
+    (amend; D2 gates every label change).
+</p>
+
+<div class="flex flex-wrap gap-3 items-center mb-4 bg-white shadow rounded-lg p-3">
+    <label class="flex items-center gap-2 text-sm">
+        <input type="checkbox" id="selAll" class="rounded"> <span><b id="selCount">0</b> selected</span>
+    </label>
+    <span class="text-sm text-gray-600">file to</span>
+    <select id="destScope" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm"></select>
+    <button id="applyRelabel" class="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">
+        Apply relabel <span class="text-xs opacity-75">OP</span>
+    </button>
+    <span class="text-xs text-gray-400">agents may sort with grants on triage + target — under enforcement</span>
+</div>
+
+<ul id="tabs" class="flex gap-2 mb-3 text-sm">
+    <li><button data-tab="facts" class="tab px-3 py-1 rounded-lg bg-gray-200 font-medium">Facts (<span id="cntFacts">…</span>)</button></li>
+    <li><button data-tab="entities" class="tab px-3 py-1 rounded-lg text-gray-600">Entities (<span id="cntEntities">…</span>)</button></li>
+</ul>
+
+<div id="factsList" class="space-y-2"></div>
+<div id="entitiesList" class="space-y-2 hidden"></div>
+
+<div class="mt-8">
+    <h3 class="text-sm font-semibold text-gray-900 mb-2">Recent relabels <span class="text-xs text-gray-400">DELE</span></h3>
+    <div id="relabelLog" class="bg-white shadow rounded-lg divide-y divide-gray-100 text-sm"></div>
+</div>
+{% endblock %}
+
+{% block console_scripts %}
+<script>
+let TRIAGE = null;
+let OVERVIEW = null;
+let dismissed = new Set();
+let activeTab = 'facts';
+
+document.getElementById('selAll').addEventListener('change', function() {
+    document.querySelectorAll('#factsList input[type="checkbox"]').forEach(cb => {
+        cb.checked = this.checked; cb.disabled = this.checked ? cb.disabled : cb.disabled;
+    });
+    updateCount();
+});
+
+function updateCount() {
+    const n = document.querySelectorAll('#factsList input[type="checkbox"]:checked').length;
+    document.getElementById('selCount').textContent = String(n);
+    return n;
+}
+
+function destScopeUuid() {
+    const sel = document.getElementById('destScope');
+    return sel.value ? sel.value.split('|')[0] : null;
+}
+
+function renderScopeOptions() {
+    const sel = document.getElementById('destScope');
+    sel.innerHTML = OVERVIEW.scopes
+        .filter(s => (s.data ? s.data.label : s.label) !== 'Triage / Untrusted')
+        .map(s => `<option value="${esc(s.uuid)}|${esc(s.label || '')}">${esc(s.label || s.uuid)}</option>`)
+        .join('');
+}
+
+function renderTriage() {
+    const scopeLabel = TRIAGE.scope && TRIAGE.scope.data ? TRIAGE.scope.data.label : 'triage';
+    document.getElementById('scopeContext').textContent =
+        `scope: ${scopeLabel} · ${TRIAGE.total_facts} facts · ${TRIAGE.total_entities} entities shown-window`;
+    document.getElementById('cntFacts').textContent = String(TRIAGE.facts.length);
+    document.getElementById('cntEntities').textContent = String(TRIAGE.entities.length);
+
+    const facts = document.getElementById('factsList');
+    if (!TRIAGE.facts.length) {
+        facts.innerHTML = '<div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">Triage queue is empty.</div>';
+    } else {
+        facts.innerHTML = TRIAGE.facts.map(f => {
+            const d = f.data || {};
+            const title = d.subject || d.title || d.filename || d.description || d.summary || f.uuid;
+            const account = (f.metadata || {}).account || d.account || '';
+            const src = (f.metadata || {}).source || (f.metadata || {}).provider || '';
+            return `
+            <div class="bg-white shadow rounded-lg p-3 flex items-start gap-3">
+                <input type="checkbox" data-uuid="${esc(f.uuid)}" data-kind="fact" class="mt-1 rounded triage-cb" onchange="updateCount()">
+                <div class="flex-1 min-w-0">
+                    <div class="text-sm font-medium text-gray-900 truncate">${esc(title)}</div>
+                    <div class="text-xs text-gray-500">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.realized_at)} · ${shortUuid(f.uuid)}</div>
+                </div>
+                <div class="flex gap-1 flex-wrap">
+                    ${OVERVIEW.scopes.filter(s => (s.data ? s.data.label : s.label) !== 'Triage / Untrusted').map(s =>
+                        `<button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="relabel('${esc(f.uuid)}','fact',['${esc(s.uuid)}'])">→ ${esc(s.label)}</button>`
+                    ).join('')}
+                    <button class="px-2 py-1 text-xs border border-gray-200 rounded text-gray-400" onclick="dismissRow(this)">keep</button>
+                </div>
+            </div>`;
+        }).join('');
+    }
+
+    const ents = document.getElementById('entitiesList');
+    if (!TRIAGE.entities.length) {
+        ents.innerHTML = '<div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">No scoped entities.</div>';
+    } else {
+        ents.innerHTML = TRIAGE.entities.map(e => {
+            const d = e.data || {};
+            const title = d.title || d.label || e.uuid;
+            const account = d.account || '';
+            return `
+            <div class="bg-white shadow rounded-lg p-3 flex items-start gap-3">
+                <div class="flex-1 min-w-0">
+                    <div class="text-sm font-medium text-gray-900 truncate">${esc(title)}</div>
+                    <div class="text-xs text-gray-500">${esc(e.type)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(e.updated_at)} · ${shortUuid(e.uuid)}</div>
+                </div>
+                <div class="flex gap-1 flex-wrap">
+                    ${OVERVIEW.scopes.filter(s => (s.data ? s.data.label : s.label) !== 'Triage / Untrusted').map(s =>
+                        `<button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="relabel('${esc(e.uuid)}','entity',['${esc(s.uuid)}'])">→ ${esc(s.label)}</button>`
+                    ).join('')}
+                </div>
+            </div>`;
+        }).join('');
+    }
+}
+
+function dismissRow(btn) {
+    dismissed.add(btn.closest('div.bg-white'));
+    btn.closest('div.bg-white').classList.add('opacity-40');
+    btn.disabled = true;
+}
+
+async function relabel(targetUuid, kind, scopeUuids) {
+    clearError();
+    try {
+        let result;
+        if (kind === 'fact') {
+            const item = TRIAGE.facts.find(f => f.uuid === targetUuid);
+            // Amend overlays metadata wholesale — send the full desired scope list.
+            // SG-9: the amended fact carries exactly the destination labels.
+            result = await mg({ op: 'amend', target: targetUuid, data: item.data, metadata: { scopes: scopeUuids } });
+        } else {
+            const item = TRIAGE.entities.find(e => e.uuid === targetUuid);
+            result = await mg({ op: 'edit', target: targetUuid, set: Object.assign({}, item.data, { scopes: scopeUuids }) });
+        }
+        if (result && result.ok === false) throw new Error(result.error ? result.error.message : 'amend failed');
+        window.location.reload();
+    } catch (error) {
+        showError('Relabel failed: ' + error.message);
+    }
+}
+
+document.getElementById('applyRelabel').addEventListener('click', async function() {
+    const dest = destScopeUuid();
+    if (!dest) { showError('Pick a destination scope'); return; }
+    const checked = Array.from(document.querySelectorAll('#factsList input[type="checkbox"]:checked'));
+    if (!checked.length) { showError('Select at least one item'); return; }
+    this.disabled = true;
+    let failures = 0;
+    for (const cb of checked) {
+        try {
+            const item = TRIAGE.facts.find(f => f.uuid === cb.dataset.uuid);
+            const result = await mg({ op: 'amend', target: cb.dataset.uuid, data: item.data, metadata: { scopes: [dest] } });
+            if (result && result.ok === false) throw new Error('amend failed');
+        } catch (error) { failures += 1; }
+    }
+    this.disabled = false;
+    if (failures) showError(`${failures} of ${checked.length} relabels failed — see audit`);
+    else window.location.reload();
+});
+
+document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', function() {
+    activeTab = this.dataset.tab;
+    document.querySelectorAll('.tab').forEach(b => b.className = 'tab px-3 py-1 rounded-lg text-gray-600');
+    this.className = 'tab px-3 py-1 rounded-lg bg-gray-200 font-medium';
+    document.getElementById('factsList').classList.toggle('hidden', activeTab !== 'facts');
+    document.getElementById('entitiesList').classList.toggle('hidden', activeTab !== 'entities');
+}));
+
+async function loadRelabelLog() {
+    try {
+        const result = await mg({ op: 'query', target_type: 'fact', type: 'Action', filters: { operation: 'amend' }, limit: 30 });
+        const actions = (result && result.ok !== false && result.results ? result.results : (result.facts || result.results || []))
+            .filter(a => (a.data || {}).operation === 'amend')
+            .slice(0, 8);
+        document.getElementById('relabelLog').innerHTML = actions.length
+            ? actions.map(a => {
+                const d = a.data || {};
+                return `<div class="px-3 py-2">${fmtTime(a.realized_at)} · <b>${esc((d.actor_type === 'agent') ? (d.actor || 'agent') : (d.actor || 'operator'))}</b> · amend ${shortUuid((d.params || {}).target)} <span class="text-xs text-gray-400">${esc(d.actor_type || '')}</span></div>`;
+              }).join('')
+            : '<div class="px-3 py-4 text-gray-400">No amends recorded yet.</div>';
+    } catch (error) {
+        document.getElementById('relabelLog').innerHTML = `<div class="px-3 py-2 text-gray-400">Relabel log unavailable: ${esc(error.message)}</div>`;
+    }
+}
+
+(async function init() {
+    document.addEventListener('console:overview', async function(evt) {
+        OVERVIEW = evt.detail;
+        renderScopeOptions();
+        try {
+            TRIAGE = await api('/api/v1/triage?limit=200');
+            renderTriage();
+        } catch (error) {
+            showError('Failed to load triage queue: ' + error.message);
+        }
+        loadRelabelLog();
+    }, { once: false });
+})();
+</script>
+{% endblock %}

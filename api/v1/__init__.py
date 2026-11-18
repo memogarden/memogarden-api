@@ -51,6 +51,14 @@ api_v1_bp.register_blueprint(recurrences.recurrences_bp)
 # Register the providers registry blueprint (RFC-004 §12.2)
 api_v1_bp.register_blueprint(providers_bp)
 
+# Register provider run reads (RFC-015 §3.2)
+from .runs import runs_bp  # noqa: E402 (blueprint wiring)
+api_v1_bp.register_blueprint(runs_bp)
+
+# Register operator-only console reads (RFC-015 §3.3: triage, scopes overview)
+from .operator import operator_bp  # noqa: E402 (blueprint wiring)
+api_v1_bp.register_blueprint(operator_bp)
+
 # Register calendar Event review actions (RFC-014 §6: mark-occurred)
 from .events import calendar_events_bp  # noqa: E402 (blueprint wiring)
 api_v1_bp.register_blueprint(calendar_events_bp)
