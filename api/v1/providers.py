@@ -7,7 +7,7 @@ so POST /providers/run (the heartbeat entry point) stays unambiguous.
 
 import logging
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 
 from .. import provider_registry, provider_runtime
 from ..middleware.decorators import _authenticate_jwt
@@ -67,6 +67,42 @@ def update_provider(name: str, data: UpdateProviderRequest):
     exists; today a duplicate name 409s, so treat rename as future work).
     """
     return jsonify(provider_registry.update_provider(name, data))
+
+
+@providers_bp.get("/<name>/runs")
+def list_provider_runs(name: str):
+    """List recent runs for a provider, newest first (RFC-015 §3.2).
+
+    Read-only operational visibility (RFC-015 §2.2 — the operator's
+    verification instrument for delegated run triggers). Matches provider
+    GET's principal class: any authenticated principal may read.
+
+    Query params:
+        account_id: filter to one account ('' selects provider-level runs)
+        status: 'running' | 'success' | 'failed'
+        limit: row cap (default 50, hard cap 200)
+
+    Returns:
+        200: {"runs": [...], "count": n}
+        404: Unknown provider
+        400: Bad status filter
+    """
+    account_id = request.args.get("account_id")
+    status = request.args.get("status")
+    raw_limit = request.args.get("limit", "50")
+    try:
+        limit = int(raw_limit)
+    except ValueError:
+        from system.exceptions import ValidationError
+
+        raise ValidationError(
+            f"limit must be an integer, got {raw_limit!r}",
+            {"limit": raw_limit},
+        ) from None
+    runs = provider_registry.list_runs(
+        name, account_id=account_id, status=status, limit=limit
+    )
+    return jsonify({"runs": runs, "count": len(runs)})
 
 
 @providers_bp.put("/<name>/scope-policy")

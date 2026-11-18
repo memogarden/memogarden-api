@@ -874,3 +874,94 @@ def cleanup_orphaned_runs() -> int:
     if cursor.rowcount:
         logger.warning("Marked %d orphaned provider run(s) as failed", cursor.rowcount)
     return cursor.rowcount
+
+
+def _row_to_run(row) -> dict:
+    """Project a provider_runs row into its API shape (detail JSON parsed)."""
+    detail = row["detail"]
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail) if detail else None
+        except ValueError:
+            detail = {"raw": detail}
+    return {
+        "id": row["id"],
+        "provider_name": row["provider_name"],
+        "account_id": row["account_id"],
+        "status": row["status"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "triggered_by": row["triggered_by"],
+        "detail": detail,
+    }
+
+
+def list_runs(
+    name: str,
+    account_id: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """List recent runs for a provider, newest first (RFC-015 §3.2).
+
+    Read-only operational visibility — the run history was previously
+    internal (no read endpoint existed), leaving operators to infer run
+    outcomes from fact counts.
+
+    Args:
+        name: Provider name (must be registered — 404 otherwise)
+        account_id: Optional filter; '' selects provider-level runs only
+        status: Optional filter ('running' | 'success' | 'failed')
+        limit: Row cap (caller clamps; hard cap 200 applied here)
+
+    Raises:
+        ResourceNotFound: Unknown provider
+        ValidationError: Bad status filter
+    """
+    if status is not None and status not in ("running", "success", "failed"):
+        raise ValidationError(
+            f"invalid status filter: {status!r}",
+            {"status": status},
+        )
+    get_provider(name)  # 404 for unknown providers
+    capped = max(1, min(int(limit), 200))
+    clauses = ["provider_name = ?"]
+    params: list = [name]
+    if account_id is not None:
+        clauses.append("account_id = ?")
+        params.append(account_id)
+    if status is not None:
+        clauses.append("status = ?")
+        params.append(status)
+    core = get_core()
+    with _RUNS_LOCK:
+        rows = core._conn.execute(
+            f"""SELECT id, provider_name, account_id, status, started_at,
+                       finished_at, triggered_by, detail
+                FROM provider_runs
+                WHERE {' AND '.join(clauses)}
+                ORDER BY started_at DESC
+                LIMIT {int(capped)}""",
+            params,
+        ).fetchall()
+    return [_row_to_run(row) for row in rows]
+
+
+def get_run(run_id: str) -> dict:
+    """Get a single run by id (RFC-015 §3.2).
+
+    Raises:
+        ResourceNotFound: Unknown run id
+    """
+    core = get_core()
+    with _RUNS_LOCK:
+        row = core._conn.execute(
+            """SELECT id, provider_name, account_id, status, started_at,
+                      finished_at, triggered_by, detail
+               FROM provider_runs
+               WHERE id = ?""",
+            (run_id,),
+        ).fetchone()
+    if row is None:
+        raise ResourceNotFound("Run not found", {"run_id": run_id})
+    return _row_to_run(row)

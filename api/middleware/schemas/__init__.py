@@ -2,6 +2,7 @@
 
 from .auth import (
     AdminRegistrationResponse,
+    ChangePasswordRequest,
     GrantCreate,
     AgentCreate,
     AgentListResponse,
@@ -36,4 +37,5 @@ __all__ = [
     "TokenPayload",
     "TokenResponse",
     "AdminRegistrationResponse",
+    "ChangePasswordRequest",
 ]

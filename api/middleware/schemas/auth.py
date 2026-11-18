@@ -94,6 +94,34 @@ class UserLogin(BaseModel):
     password: str = Field(..., description="Password")
 
 
+class ChangePasswordRequest(BaseModel):
+    """
+    Request body for POST /auth/change-password (RFC-015 §3.1).
+
+    The operator's own rotation path — until now the admin password could
+    be set once at bootstrap and never changed (no endpoint existed).
+
+    Password policy matches UserCreate: min 8 chars, at least one letter
+    and one digit.
+    """
+
+    current_password: str = Field(..., description="Current password")
+    new_password: Annotated[
+        str,
+        Field(min_length=8, description="New password (min 8 characters, must contain letter and digit)"),
+    ]
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        """Validate password meets security requirements (same policy as registration)."""
+        if not re.search(r"[A-Za-z]", v):
+            raise ValueError("Password must contain at least one letter")
+        if not re.search(r"\d", v):
+            raise ValueError("Password must contain at least one digit")
+        return v
+
+
 class UserResponse(UserBase):
     """
     API response with user data and entity metadata.

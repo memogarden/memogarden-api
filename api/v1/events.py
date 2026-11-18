@@ -22,7 +22,7 @@ import logging
 import threading
 from datetime import UTC, datetime, timedelta
 
-from flask import Blueprint, g, jsonify
+from flask import Blueprint, g, jsonify, request
 
 from system.core import get_core
 from system.exceptions import (
@@ -287,3 +287,116 @@ def _mark_locked(plain: str, occurred_at: str, now: str):
             "occurrence_uuid": occurrence_uuid,
             "action_uuid": action_uuid,
         }), 201
+
+
+# ============================================================================
+# Occurrence review queue (RFC-015 §3.3)
+# ============================================================================
+
+
+@calendar_events_bp.get("/pending-review")
+def pending_review():
+    """List Events awaiting occurrence review (RFC-015 §3.3). JWT-only.
+
+    An Event is a belief; only review creates memory (RFC-014 D3). This
+    read backs the console's review queue: events whose scheduled end has
+    passed within the review window, `occurred_at` still null, and no
+    EventOccurrence fact yet. Date-only events (all-day) compare
+    lexicographically against the ISO cutoff — a past `YYYY-MM-DD` sorts
+    before any full ISO timestamp of today, a future one sorts after it.
+
+    Events that did not happen simply stay unmarked (no dismissal path
+    exists — RFC-015 §4.2); they age out of the window.
+
+    Query params:
+        window_days: how far back to look (default 30, cap 365)
+        limit: row cap (default 100, cap 500)
+
+    Returns:
+        200: {"events": [...], "count": n, "total_unmarked": n,
+              "window_days": k}
+    """
+    from ..middleware.decorators import _authenticate_jwt
+
+    _authenticate_jwt()
+
+    raw_window = request.args.get("window_days", "30")
+    raw_limit = request.args.get("limit", "100")
+    try:
+        window_days = max(1, min(int(raw_window), 365))
+        limit = max(1, min(int(raw_limit), 500))
+    except ValueError:
+        raise ValidationError(
+            "window_days/limit must be integers",
+            {"window_days": raw_window, "limit": raw_limit},
+        ) from None
+
+    cutoff = (datetime.now(UTC) - timedelta(days=window_days)).isoformat()
+    now = isodatetime.now()
+
+    core = get_core()
+    where = """superseded_by IS NULL AND type = 'Event'
+        AND json_extract(data, '$.occurred_at') IS NULL
+        AND COALESCE(json_extract(data, '$.ends_at'),
+                     json_extract(data, '$.starts_at')) <= ?
+        AND COALESCE(json_extract(data, '$.ends_at'),
+                     json_extract(data, '$.starts_at')) >= ?"""
+    params: list = [now, cutoff]
+
+    rows = core._conn.execute(
+        f"""SELECT uuid, data, updated_at FROM entity
+            WHERE {where}
+            ORDER BY COALESCE(json_extract(data, '$.ends_at'),
+                              json_extract(data, '$.starts_at')) DESC
+            LIMIT {limit}""",
+        params,
+    ).fetchall()
+    total_unmarked = core._conn.execute(
+        f"SELECT COUNT(*) AS n FROM entity WHERE {where}", params
+    ).fetchone()["n"]
+
+    # Exclude events that already have an occurrence fact (idempotency
+    # probe pattern from mark_occurred — occurrence data stores the
+    # core_-prefixed event uuid).
+    candidates = {row["uuid"]: row for row in rows}
+    marked = set()
+    if candidates:
+        with get_soil() as soil:
+            sconn = soil._get_connection()
+            placeholders = ",".join("?" * len(candidates))
+            marked = {
+                r["ev"]
+                for r in sconn.execute(
+                    f"""SELECT DISTINCT json_extract(data, '$.event_uuid') AS ev
+                        FROM item
+                        WHERE _type = 'EventOccurrence' AND superseded_by IS NULL
+                          AND json_extract(data, '$.event_uuid') IN ({placeholders})""",
+                    [uid.add_core_prefix(u) for u in candidates],
+                ).fetchall()
+            }
+
+    events = []
+    for row in rows:
+        if uid.add_core_prefix(row["uuid"]) in marked:
+            continue
+        data = row["data"]
+        if isinstance(data, str):
+            data = json.loads(data)
+        events.append({
+            "uuid": uid.add_core_prefix(row["uuid"]),
+            "title": data.get("title"),
+            "starts_at": data.get("starts_at"),
+            "ends_at": data.get("ends_at"),
+            "status": data.get("status"),
+            "calendar_id": data.get("calendar_id"),
+            "account": data.get("account"),
+            "captured_after_fact": data.get("captured_after_fact", False),
+            "updated_at": row["updated_at"],
+        })
+
+    return jsonify({
+        "events": events,
+        "count": len(events),
+        "total_unmarked": total_unmarked,
+        "window_days": window_days,
+    })

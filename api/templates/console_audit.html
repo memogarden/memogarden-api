@@ -1,0 +1,99 @@
+{% extends "console_base.html" %}
+
+{% block console_title %}Audit{% endblock %}
+{% block console_page %}audit{% endblock %}
+
+{% block console_content %}
+<h2 class="text-lg font-semibold text-gray-900 mb-1">Action audit</h2>
+<p class="text-sm text-gray-600 mb-4">Action facts record every operation — including reads (RFC-005 full-op audit) and identity issuance (RFC-010 INV-2). Attribution is how delegation gets verified.</p>
+
+<div class="flex flex-wrap gap-2 items-center mb-3 text-sm">
+    <select id="fActorType" class="border border-gray-300 rounded-lg px-3 py-1.5">
+        <option value="">actor type: all</option>
+        <option value="operator">operator</option>
+        <option value="agent">agent</option>
+        <option value="api_key">api_key (unbound)</option>
+    </select>
+    <select id="fOp" class="border border-gray-300 rounded-lg px-3 py-1.5">
+        <option value="">operation: all</option>
+        <option value="amend">amend (relabels)</option>
+        <option value="mark_occurred">mark_occurred</option>
+        <option value="create">create</option>
+        <option value="change_password">change_password</option>
+        <option value="mint_api_key">mint_api_key</option>
+        <option value="bind_agent_to_key">bind</option>
+    </select>
+    <select id="fMode" class="border border-gray-300 rounded-lg px-3 py-1.5">
+        <option value="Action">actions</option>
+        <option value="ActionResult">action results (errors)</option>
+    </select>
+    <input id="fActor" class="border border-gray-300 rounded-lg px-3 py-1.5" placeholder="actor contains…">
+    <button id="applyFilters" class="px-3 py-1.5 bg-gray-200 rounded-lg text-sm hover:bg-gray-300">Apply</button>
+</div>
+
+<div class="bg-white shadow rounded-lg overflow-x-auto">
+    <table class="w-full text-sm">
+        <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+            <th class="px-3 py-2">Time</th><th class="px-3 py-2">Actor</th><th class="px-3 py-2">Type</th>
+            <th class="px-3 py-2">Operation</th><th class="px-3 py-2">Detail</th>
+        </tr></thead>
+        <tbody id="auditBody"><tr><td class="px-3 py-4 text-gray-400" colspan="5">Loading…</td></tr></tbody>
+    </table>
+</div>
+<p class="text-xs text-gray-400 mt-2">Showing the latest 200 matching facts. ActionResult mode lists completion records (result / error / duration) — pair by time and operation.</p>
+{% endblock %}
+
+{% block console_scripts %}
+<script>
+async function loadAudit() {
+    const actorType = document.getElementById('fActorType').value;
+    const op = document.getElementById('fOp').value;
+    const actor = document.getElementById('fActor').value.trim();
+    const mode = document.getElementById('fMode').value;
+
+    const filters = {};
+    if (actorType) filters.actor_type = actorType;
+    if (op) filters.operation = op;
+    if (actor) filters.actor = actor;
+
+    try {
+        const result = await mg({
+            op: 'query', target_type: 'fact', type: mode,
+            filters: filters, limit: 200,
+        });
+        if (result && result.ok === false) throw new Error(result.error ? result.error.message : 'query failed');
+        const items = result.results || result.facts || [];
+        const body = items.map(item => {
+            const d = item.data || {};
+            const who = esc(String(d.actor || '—'));
+            const whoType = esc(String(d.actor_type || '—'));
+            const whoCls = whoType === 'agent' ? 'text-gray-900 font-medium'
+                : whoType === 'api_key' ? 'text-amber-600' : 'text-gray-900';
+            let detail = '—';
+            if (mode === 'Action') {
+                const params = d.params ? JSON.stringify(d.params) : '';
+                detail = esc(params.slice(0, 160));
+            } else {
+                detail = esc(String(d.error || d.result || JSON.stringify(d)).slice(0, 160));
+                if (d.error) detail = '<span class="text-red-600">' + detail + '</span>';
+            }
+            return `<tr class="border-b border-gray-100">
+                <td class="px-3 py-2 text-xs whitespace-nowrap">${fmtTime(item.realized_at)}</td>
+                <td class="px-3 py-2 ${whoCls}">${who} <span class="text-xs text-gray-400">${whoType}</span></td>
+                <td class="px-3 py-2 text-xs">${esc(item.type || item._type || mode)}</td>
+                <td class="px-3 py-2 text-xs">${esc(String(d.operation || '—'))}</td>
+                <td class="px-3 py-2 text-xs text-gray-500 break-all">${detail}</td>
+            </tr>`;
+        }).join('');
+        document.getElementById('auditBody').innerHTML = body ||
+            '<tr><td class="px-3 py-4 text-gray-400" colspan="5">No matching actions.</td></tr>';
+    } catch (error) {
+        document.getElementById('auditBody').innerHTML =
+            `<tr><td class="px-3 py-4 text-gray-400" colspan="5">${esc(error.message)}</td></tr>`;
+    }
+}
+
+document.getElementById('applyFilters').addEventListener('click', loadAudit);
+loadAudit();
+</script>
+{% endblock %}

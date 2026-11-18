@@ -349,6 +349,7 @@ def _register_blueprints(app):
     from . import semantic
     from . import events
     from .middleware import api as auth_api
+    from .middleware import console as console_ui
     from .middleware import ui as auth_ui
     from .v1 import api_v1_bp
 
@@ -360,6 +361,9 @@ def _register_blueprints(app):
 
     # Auth UI pages (HTML responses, top-level routes)
     app.register_blueprint(auth_ui.auth_views_bp)
+
+    # Operator Console pages (HTML shells, RFC-015 §4)
+    app.register_blueprint(console_ui.console_bp)
 
     # Semantic API (/mg endpoint)
     app.register_blueprint(semantic.semantic_bp)

@@ -28,6 +28,7 @@ from .schemas import (
     AgentCreate,
     APIKeyCreate,
     APIKeyUpdate,
+    ChangePasswordRequest,
     GrantCreate,
     TokenResponse,
     UserCreate,
@@ -237,6 +238,66 @@ def logout():
     # For MVP: tokens are stateless, just return success
     # Future: implement token blacklist if needed
     return jsonify({"message": "Logged out successfully"}), 200
+
+
+# ============================================================================
+# Operator Account Security (RFC-015 §3.1)
+# ============================================================================
+
+
+@auth_bp.route("/auth/change-password", methods=["POST"])
+@validate_request
+def change_password(data: ChangePasswordRequest):
+    """
+    Rotate the authenticated operator's password (RFC-015 §3.1). JWT-gated.
+
+    Until now the password could be set once at bootstrap and never changed
+    (no endpoint existed) — a standing rotation-hygiene gap since the
+    2026-11-05 bootstrap. The current password must be presented; the new
+    one follows the registration policy (min 8 chars, letter + digit).
+
+    An active JWT stays valid after rotation (stateless tokens, 30-day
+    expiry) — log out other sessions by revoking their keys is not
+    applicable to JWTs; the operator simply stops using them.
+
+    Returns:
+        200: Password updated (an identity Action fact is written, RFC-010 INV-2)
+
+    Raises:
+        AuthenticationError: Not a JWT session, or current password wrong
+    """
+    payload = _authenticate_jwt()
+
+    core = get_core()
+    row = core._conn.execute(
+        "SELECT id, username, password_hash FROM users WHERE id = ?",
+        (payload.sub,),
+    ).fetchone()
+    if row is None:
+        raise AuthenticationError(
+            "Unknown user for this session",
+            {"username": getattr(payload, "username", None)},
+        )
+
+    if not service.verify_password(data.current_password, row["password_hash"]):
+        logger.warning(f"Failed password change (wrong current password): {row['username']}")
+        raise AuthenticationError(
+            "Current password is incorrect",
+            {"field": "current_password"},
+        )
+
+    core._conn.execute(
+        "UPDATE users SET password_hash = ? WHERE id = ?",
+        (service.hash_password(data.new_password), row["id"]),
+    )
+    core._conn.commit()
+
+    _record_identity_action(
+        "change_password", {"username": row["username"]}
+    )
+    logger.info(f"Password changed for {row['username']}")
+    return jsonify({"message": "Password updated"}), 200
+    # Connection closes automatically via __del__
 
 
 # ============================================================================

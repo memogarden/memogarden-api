@@ -1,0 +1,101 @@
+{% extends "console_base.html" %}
+
+{% block console_title %}Keys &amp; Agents{% endblock %}
+{% block console_page %}identity{% endblock %}
+
+{% block console_content %}
+<h2 class="text-lg font-semibold text-gray-900 mb-1">Keys &amp; agents</h2>
+<p class="text-sm text-gray-600 mb-4">"Identity is issued, never assumed" (RFC-010) — every mutation here is JWT-only, audited, and unreachable by any API key. Minting and binding live on the dedicated pages; this screen is the unified overview.</p>
+
+<div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+    <section>
+        <div class="flex justify-between items-center mb-2">
+            <h3 class="text-sm font-semibold text-gray-900">Agents</h3>
+            <a href="/agents/" class="px-3 py-1 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">Mint agent <span class="opacity-75">OP</span></a>
+        </div>
+        <div class="bg-white shadow rounded-lg overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+                    <th class="px-3 py-2">Agent</th><th class="px-3 py-2">Entity</th><th class="px-3 py-2">Descriptive grants</th>
+                </tr></thead>
+                <tbody id="agentsBody"><tr><td class="px-3 py-4 text-gray-400" colspan="3">Loading…</td></tr></tbody>
+            </table>
+        </div>
+        <p class="text-xs text-gray-400 mt-2">agent.data.allowed_scopes is descriptive — enforcement reads the key, never the entity.</p>
+    </section>
+
+    <section>
+        <div class="flex justify-between items-center mb-2">
+            <h3 class="text-sm font-semibold text-gray-900">API keys</h3>
+            <a href="/api-keys/new" class="px-3 py-1 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">Mint key <span class="opacity-75">OP</span></a>
+        </div>
+        <div id="unboundWarning" class="hidden alert mb-3 bg-red-50 text-red-700 border border-red-300 text-sm"></div>
+        <div class="bg-white shadow rounded-lg overflow-x-auto">
+            <table class="w-full text-sm">
+                <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+                    <th class="px-3 py-2">Key</th><th class="px-3 py-2">Bound to</th><th class="px-3 py-2">Grants</th><th class="px-3 py-2">Last used</th>
+                </tr></thead>
+                <tbody id="keysBody"><tr><td class="px-3 py-4 text-gray-400" colspan="4">Loading…</td></tr></tbody>
+            </table>
+        </div>
+        <p class="text-xs text-gray-400 mt-2">Unbound keys act in the username frame — attribution collapses to actor_type=api_key. Bind or retire. Full actions (bind / revoke / re-bind) on <a class="underline" href="/api-keys">/api-keys</a>.</p>
+    </section>
+</div>
+{% endblock %}
+
+{% block console_scripts %}
+<script>
+(async function init() {
+    try {
+        const [agents, keys] = await Promise.all([
+            api('/agents'),
+            api('/api-keys/'),
+        ]);
+        const agentList = Array.isArray(agents) ? agents : (agents.agents || []);
+        const keyList = Array.isArray(keys) ? keys : (keys.keys || keys.api_keys || []);
+
+        document.getElementById('agentsBody').innerHTML = agentList.length
+            ? agentList.map(a => `<tr class="border-b border-gray-100">
+                <td class="px-3 py-2"><b>${esc(a.label || a.name || '')}</b></td>
+                <td class="px-3 py-2 text-xs text-gray-500">${esc(a.agent_id || a.uuid || '')}</td>
+                <td class="px-3 py-2 text-xs">${esc(((a.data || {}).allowed_scopes || []).join(', ') || '—')}</td>
+              </tr>`).join('')
+            : '<tr><td class="px-3 py-4 text-gray-400" colspan="3">No agents minted yet.</td></tr>';
+
+        const overview = window.__scopesOverview;
+        const unbound = [];
+        document.getElementById('keysBody').innerHTML = keyList.filter(k => !k.revoked_at).map(k => {
+            const agentId = k.agent_entity_id || k.agent_id;
+            const bound = agentId ? (agentId.startsWith('core_') ? agentId.slice(0, 13) + '…' : agentId) : null;
+            if (!bound) unbound.push(k.name);
+            let grantsText = '—';
+            if (overview) {
+                const entry = (overview.grants || []).find(g => g.key_id.endsWith(k.id) || k.id.endsWith(g.key_id));
+                if (entry && entry.grants.length) {
+                    grantsText = entry.grants.map(g => {
+                        const scope = overview.scopes.find(s => s.uuid.endsWith(g.scope_uuid) || g.scope_uuid.endsWith(s.uuid));
+                        return scope ? (scope.data ? scope.data.label : scope.label) : g.scope_uuid.slice(0, 8);
+                    }).join(', ');
+                } else if (entry) {
+                    grantsText = 'none';
+                }
+            }
+            return `<tr class="border-b border-gray-100">
+                <td class="px-3 py-2"><b>${esc(k.name)}</b><div class="text-xs text-gray-400">${esc(k.key_prefix || '')}</div></td>
+                <td class="px-3 py-2 ${bound ? '' : 'text-red-600'}">${esc(bound || 'unbound')}</td>
+                <td class="px-3 py-2 text-xs">${esc(grantsText)}</td>
+                <td class="px-3 py-2 text-xs">${fmtTime(k.last_seen)}</td>
+              </tr>`;
+        }).join('') || '<tr><td class="px-3 py-4 text-gray-400" colspan="4">No keys minted yet.</td></tr>';
+
+        if (unbound.length) {
+            const warn = document.getElementById('unboundWarning');
+            warn.textContent = 'Unbound keys: ' + unbound.join(', ') + ' — attribution collapses to actor_type=api_key. Bind or retire.';
+            warn.classList.remove('hidden');
+        }
+    } catch (error) {
+        showError('Failed to load identity overview: ' + error.message);
+    }
+})();
+</script>
+{% endblock %}

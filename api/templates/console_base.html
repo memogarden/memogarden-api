@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+
+{% block title %}{% block console_title %}Operator Console{% endblock %} - MemoGarden{% endblock %}
+
+{% block body %}
+<div class="min-h-screen bg-gray-50">
+    <!-- Header -->
+    <header class="bg-white shadow">
+        <div class="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8 flex justify-between items-center gap-4">
+            <div class="flex items-baseline gap-3">
+                <h1 class="text-xl font-bold text-gray-900">MemoGarden</h1>
+                <span class="text-sm font-medium text-gray-500">Operator Console</span>
+                <span class="text-xs text-gray-400 hidden sm:inline">RFC-015 · OP = operator-only · DELE = delegable, verify</span>
+            </div>
+            <div class="flex items-center gap-3">
+                <span id="enforcementChip" class="text-xs px-2 py-1 rounded border border-gray-300 text-gray-500">enforcement…</span>
+                <span id="userDisplay" class="text-sm text-gray-700"></span>
+                <a href="/settings" class="text-sm text-gray-600 hover:text-gray-900">Settings</a>
+                <button id="logoutBtn" class="text-sm text-gray-600 hover:text-gray-900">Logout</button>
+            </div>
+        </div>
+    </header>
+
+    <div class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8 flex flex-col lg:flex-row gap-6">
+        <!-- Sidebar -->
+        <aside class="lg:w-56 flex-shrink-0">
+            <nav id="consoleNav" data-page="{% block console_page %}{% endblock %}" class="space-y-1">
+                <a href="/console/triage" data-nav="triage" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200">
+                    Triage review <span id="badgeTriage" class="hidden float-right text-xs bg-gray-200 text-gray-700 rounded-full px-2"></span>
+                </a>
+                <a href="/console/scopes" data-nav="scopes" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200">Scopes &amp; grants</a>
+                <a href="/console/identity" data-nav="identity" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200">Keys &amp; agents</a>
+                <a href="/console/providers" data-nav="providers" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200">Providers</a>
+                <a href="/console/occurrences" data-nav="occurrences" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200">
+                    Occurrences <span id="badgeOccurrences" class="hidden float-right text-xs bg-gray-200 text-gray-700 rounded-full px-2"></span>
+                </a>
+                <a href="/console/audit" data-nav="audit" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200">Audit</a>
+            </nav>
+            <div class="mt-6 pt-4 border-t border-gray-200 space-y-1">
+                <a href="/api-keys" class="block px-3 py-2 rounded-lg text-sm text-gray-500 hover:bg-gray-200">API keys (manage)</a>
+                <a href="/agents/" class="block px-3 py-2 rounded-lg text-sm text-gray-500 hover:bg-gray-200">Agents (manage)</a>
+            </div>
+        </aside>
+
+        <!-- Content -->
+        <main class="flex-1 min-w-0">
+            <div id="globalError" class="hidden alert alert-error mb-4"></div>
+            {% block console_content %}{% endblock %}
+        </main>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // ---- Shared console helpers (RFC-015 §4: client-side JWT, localStorage) ----
+    function getAuthToken() {
+        return localStorage.getItem('access_token');
+    }
+    if (!getAuthToken()) {
+        window.location.href = '/login';
+    }
+    const userInfo = JSON.parse(localStorage.getItem('user_info') || '{}');
+    document.getElementById('userDisplay').textContent = userInfo.username || 'operator';
+
+    document.getElementById('logoutBtn').addEventListener('click', function() {
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('user_info');
+        window.location.href = '/login';
+    });
+
+    // Highlight the active nav item
+    const navPage = document.getElementById('consoleNav').dataset.page;
+    document.querySelectorAll('.console-nav').forEach(function(link) {
+        if (link.dataset.nav === navPage) {
+            link.classList.add('bg-gray-200', 'font-medium', 'text-gray-900');
+        }
+    });
+
+    // Authenticated JSON fetch with uniform error surfacing
+    async function api(path, options) {
+        const opts = options || {};
+        const headers = Object.assign(
+            { 'Authorization': 'Bearer ' + getAuthToken() },
+            opts.headers || {}
+        );
+        if (opts.body !== undefined) {
+            headers['Content-Type'] = 'application/json';
+            opts.body = JSON.stringify(opts.body);
+        }
+        const response = await fetch(path, Object.assign({ headers: headers }, opts));
+        if (response.status === 401 || response.status === 403) {
+            const payload = await response.json().catch(function() { return null; });
+            const message = payload && payload.error ? (payload.error.message || '') : '';
+            throw new Error(message || ('HTTP ' + response.status + ' — this action is operator-gated'));
+        }
+        if (!response.ok) {
+            const payload = await response.json().catch(function() { return null; });
+            throw new Error((payload && payload.error && payload.error.message) || ('HTTP ' + response.status));
+        }
+        if (response.status === 204) return null;
+        return response.json();
+    }
+
+    // Semantic API helper: POST /mg with the envelope
+    async function mg(payload) {
+        return api('/mg', { method: 'POST', body: payload });
+    }
+
+    function showError(message) {
+        const box = document.getElementById('globalError');
+        box.textContent = message;
+        box.classList.remove('hidden');
+    }
+    function clearError() {
+        document.getElementById('globalError').classList.add('hidden');
+    }
+
+    // HTML-escape every string rendered from fact/entity data (untrusted)
+    function esc(value) {
+        const div = document.createElement('div');
+        div.textContent = value === null || value === undefined ? '' : String(value);
+        return div.innerHTML;
+    }
+
+    function shortUuid(uuid) {
+        return esc((uuid || '').slice(0, 13) + '…');
+    }
+
+    function fmtTime(iso) {
+        if (!iso) return '—';
+        return esc(iso.replace('T', ' ').slice(0, 16));
+    }
+
+    function setBadge(elementId, count) {
+        const el = document.getElementById(elementId);
+        if (!el) return;
+        if (count > 0) {
+            el.textContent = count > 999 ? '999+' : String(count);
+            el.classList.remove('hidden');
+        }
+    }
+
+    // Sidebar badges + enforcement chip (cheap sovereign reads)
+    (async function loadChrome() {
+        try {
+            const [triage, pending, overview] = await Promise.all([
+                api('/api/v1/triage?limit=1'),
+                api('/api/v1/events/pending-review?limit=1'),
+                api('/api/v1/scopes/overview'),
+            ]);
+            setBadge('badgeTriage', (triage.total_facts || 0) + (triage.total_entities || 0));
+            setBadge('badgeOccurrences', pending.total_unmarked || 0);
+            const chip = document.getElementById('enforcementChip');
+            if (overview.enforcement) {
+                chip.textContent = 'enforcement ON';
+                chip.className = 'text-xs px-2 py-1 rounded border border-green-300 bg-green-50 text-green-700';
+            } else {
+                chip.textContent = 'enforcement advisory (flag off)';
+                chip.className = 'text-xs px-2 py-1 rounded border border-amber-300 bg-amber-50 text-amber-700';
+                chip.title = 'Flip MEMOGARDEN_SCOPE_ENFORCEMENT in the service env + restart to make label gates real';
+            }
+            window.__scopesOverview = overview;  // pages may reuse
+            document.dispatchEvent(new CustomEvent('console:overview', { detail: overview }));
+        } catch (error) {
+            showError('Console chrome failed to load: ' + error.message);
+        }
+    })();
+</script>
+{% block console_scripts %}{% endblock %}
+{% endblock %}

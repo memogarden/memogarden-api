@@ -1,0 +1,175 @@
+{% extends "console_base.html" %}
+
+{% block console_title %}Providers{% endblock %}
+{% block console_page %}providers{% endblock %}
+
+{% block console_content %}
+<h2 class="text-lg font-semibold text-gray-900 mb-1">Providers</h2>
+<p class="text-sm text-gray-600 mb-4">Code trust lives here: registering a module points the runtime at executable ingestion code (origin-pinned to provider roots). Run triggers are DELE — run history below is the verification instrument.</p>
+
+<div class="flex justify-between items-center mb-2">
+    <h3 class="text-sm font-semibold text-gray-900">Registry</h3>
+    <span class="text-xs text-gray-400">register via <code>memogarden register provider</code></span>
+</div>
+<div class="bg-white shadow rounded-lg overflow-x-auto">
+    <table class="w-full text-sm">
+        <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+            <th class="px-3 py-2">Provider</th><th class="px-3 py-2">Module</th><th class="px-3 py-2">Interval</th><th class="px-3 py-2">Last run</th><th class="px-3 py-2">Actions</th>
+        </tr></thead>
+        <tbody id="providersBody"><tr><td class="px-3 py-4 text-gray-400" colspan="5">Loading…</td></tr></tbody>
+    </table>
+</div>
+
+<div class="flex justify-between items-center mt-6 mb-2">
+    <h3 class="text-sm font-semibold text-gray-900">Accounts</h3>
+    <span class="text-xs text-gray-400">re-auth (OAuth consent) is human-only — delegate everything around it</span>
+</div>
+<div id="accountsList" class="space-y-4"></div>
+
+<div class="flex justify-between items-center mt-6 mb-2">
+    <h3 class="text-sm font-semibold text-gray-900">Run history</h3>
+    <select id="runsProvider" class="border border-gray-300 rounded-lg px-3 py-1 text-sm"></select>
+</div>
+<div class="bg-white shadow rounded-lg overflow-x-auto">
+    <table class="w-full text-sm">
+        <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+            <th class="px-3 py-2">Run</th><th class="px-3 py-2">Account</th><th class="px-3 py-2">Started</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Detail</th>
+        </tr></thead>
+        <tbody id="runsBody"><tr><td class="px-3 py-4 text-gray-400" colspan="5">Loading…</td></tr></tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block console_scripts %}
+<script>
+let PROVIDERS = [];
+let selectedProvider = null;
+
+function statusChip(status) {
+    if (status === 'success' || status === 'active' || status === 'complete' || status === 'ok')
+        return '<span class="text-green-700">' + esc(status) + '</span>';
+    if (status === 'needs_reauth' || status === 'failed')
+        return '<span class="text-red-600 font-medium">' + esc(status) + '</span>';
+    return '<span class="text-gray-500">' + esc(status || '—') + '</span>';
+}
+
+async function loadProviders() {
+    const data = await api('/api/v1/providers');
+    PROVIDERS = data.providers || [];
+    document.getElementById('providersBody').innerHTML = PROVIDERS.map(p => `
+        <tr class="border-b border-gray-100">
+            <td class="px-3 py-2"><b>${esc(p.name)}</b></td>
+            <td class="px-3 py-2 text-xs text-gray-500">${esc(p.module)}.${esc(p.class)}</td>
+            <td class="px-3 py-2 text-xs">${p.interval}s</td>
+            <td class="px-3 py-2 text-xs">${fmtTime(p.last_run_at)} ${statusChip(p.last_status)}</td>
+            <td class="px-3 py-2">
+                <button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="runProvider('${esc(p.name)}')">run <span class="text-gray-400">DELE</span></button>
+                <button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="toggleProvider('${esc(p.name)}', ${p.enabled ? 'false' : 'true'})">${p.enabled ? 'disable' : 'enable'}</button>
+            </td>
+        </tr>`).join('') || '<tr><td class="px-3 py-4 text-gray-400" colspan="5">No providers registered.</td></tr>';
+
+    document.getElementById('runsProvider').innerHTML = PROVIDERS.map(p =>
+        `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+    if (PROVIDERS.length) {
+        selectedProvider = PROVIDERS[0].name;
+        document.getElementById('runsProvider').value = selectedProvider;
+        loadRuns();
+    }
+}
+
+async function loadAccounts() {
+    const sections = await Promise.all(PROVIDERS.map(async p => {
+        try {
+            const data = await api(`/api/v1/providers/${encodeURIComponent(p.name)}/accounts`);
+            const accounts = data.accounts || [];
+            if (!accounts.length) return '';
+            const rows = accounts.map(a => `
+                <tr class="border-b border-gray-100">
+                    <td class="px-3 py-2"><b>${esc(a.label || a.subject)}</b>
+                        <div class="text-xs text-gray-400">${esc(a.subject)} · ${esc(a.platform)}</div></td>
+                    <td class="px-3 py-2">${statusChip(a.status)}${a.error ? `<div class="text-xs text-red-500">${esc(a.error)}</div>` : ''}</td>
+                    <td class="px-3 py-2 text-xs">${a.interval ? a.interval + 's' : 'inherit'}${(a.config && Object.keys(a.config).length) ? ' · ' + esc(JSON.stringify(a.config)) : ''}</td>
+                    <td class="px-3 py-2 text-xs">${fmtTime(a.last_run_at)} ${statusChip(a.last_status)}</td>
+                    <td class="px-3 py-2 whitespace-nowrap">
+                        <button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="runAccount('${esc(p.name)}','${esc(a.id)}')">run</button>
+                        <button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="verifyAccount('${esc(p.name)}','${esc(a.id)}')">verify</button>
+                        <button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="toggleAccount('${esc(p.name)}','${esc(a.id)}','${esc(a.status)}')">${a.status === 'disabled' ? 'resume' : 'pause'}</button>
+                        ${a.status === 'needs_reauth'
+                            ? `<span class="text-xs text-red-600 ml-1">re-auth: provider CLI auth-login (human OAuth consent)</span>` : ''}
+                    </td>
+                </tr>`);
+            return `<div class="bg-white shadow rounded-lg overflow-x-auto mb-3">
+                <div class="px-3 py-2 text-xs font-medium text-gray-500 border-b border-gray-200">${esc(p.name)}</div>
+                <table class="w-full text-sm"><tbody>${rows.join('')}</tbody></table></div>`;
+        } catch (error) { return ''; }
+    }));
+    document.getElementById('accountsList').innerHTML = sections.join('') ||
+        '<div class="bg-white shadow rounded-lg p-6 text-center text-gray-400">No account bindings.</div>';
+}
+
+async function loadRuns() {
+    if (!selectedProvider) return;
+    try {
+        const data = await api(`/api/v1/providers/${encodeURIComponent(selectedProvider)}/runs?limit=50`);
+        const runs = data.runs || [];
+        document.getElementById('runsBody').innerHTML = runs.length ? runs.map(r => `
+            <tr class="border-b border-gray-100">
+                <td class="px-3 py-2 text-xs text-gray-500">${shortUuid(r.id)}</td>
+                <td class="px-3 py-2 text-xs">${r.account_id ? esc(r.account_id.slice(0, 13)) + '…' : 'provider-level'}</td>
+                <td class="px-3 py-2 text-xs">${fmtTime(r.started_at)}${r.finished_at ? ' → ' + fmtTime(r.finished_at) : ''}</td>
+                <td class="px-3 py-2">${statusChip(r.status)} <span class="text-xs text-gray-400">${esc(r.triggered_by || '')}</span></td>
+                <td class="px-3 py-2 text-xs text-gray-500">${esc(r.detail ? JSON.stringify(r.detail).slice(0, 120) : '—')}</td>
+            </tr>`).join('') : '<tr><td class="px-3 py-4 text-gray-400" colspan="5">No runs recorded.</td></tr>';
+    } catch (error) {
+        document.getElementById('runsBody').innerHTML =
+            `<tr><td class="px-3 py-4 text-gray-400" colspan="5">${esc(error.message)}</td></tr>`;
+    }
+}
+
+async function runProvider(name) {
+    clearError();
+    try { await api(`/api/v1/providers/${encodeURIComponent(name)}/run`, { method: 'POST' });
+        setTimeout(() => { loadProviders(); loadRuns(); }, 1500);
+    } catch (error) { showError('Run failed: ' + error.message); }
+}
+async function runAccount(provider, accountId) {
+    clearError();
+    try { await api(`/api/v1/providers/${encodeURIComponent(provider)}/accounts/${encodeURIComponent(accountId)}/run`, { method: 'POST' });
+        setTimeout(() => { loadProviders(); loadAccounts(); loadRuns(); }, 1500);
+    } catch (error) { showError('Run failed: ' + error.message); }
+}
+async function verifyAccount(provider, accountId) {
+    clearError();
+    try { await api(`/api/v1/providers/${encodeURIComponent(provider)}/accounts/${encodeURIComponent(accountId)}/verify`, { method: 'POST' });
+        loadAccounts();
+    } catch (error) { showError('Verify failed: ' + error.message); }
+}
+async function toggleAccount(provider, accountId, status) {
+    clearError();
+    const target = status === 'disabled' ? 'active' : 'disabled';
+    try { await api(`/api/v1/providers/${encodeURIComponent(provider)}/accounts/${encodeURIComponent(accountId)}`, { method: 'PATCH', body: { status: target } });
+        loadAccounts();
+    } catch (error) { showError('Status change failed: ' + error.message); }
+}
+async function toggleProvider(name, enabled) {
+    clearError();
+    try { await api(`/api/v1/providers/${encodeURIComponent(name)}`, { method: 'PATCH', body: { enabled: enabled } });
+        loadProviders();
+    } catch (error) { showError('Update failed: ' + error.message); }
+}
+
+document.getElementById('runsProvider').addEventListener('change', function() {
+    selectedProvider = this.value;
+    loadRuns();
+});
+
+(async function init() {
+    try {
+        await loadProviders();
+        await loadAccounts();
+    } catch (error) {
+        showError('Failed to load providers: ' + error.message);
+    }
+})();
+</script>
+{% endblock %}
