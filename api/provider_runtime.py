@@ -266,6 +266,8 @@ def _execute_run(
         entities_created = 0
         entities_updated = 0
         entities_noop = 0
+        entities_retired = 0
+        entities_retired_noop = 0
         relations_created = 0
         scope_policy = manifest.get("scope_policy")
         resolve_scope = _make_scope_resolver()
@@ -313,6 +315,33 @@ def _execute_run(
                     core_ctx._conn.commit()
                     soil.commit()
                     continue
+                if isinstance(yielded, dict) and yielded.get("op") == "retire_entity":
+                    # Tada ontology (#30): the conversion complement — a
+                    # provider retires an entity it previously upserted, its
+                    # occurrence already landed as a fact. Same contract as
+                    # upserts: an undeclared capability fails the run.
+                    if "retire_entities" not in capabilities:
+                        raise ValidationError(
+                            f"provider '{name}' yielded an entity retire but does "
+                            "not declare ENTITY_RETIRES (capability "
+                            "'retire_entities' missing from registration)",
+                            {"provider": name},
+                        )
+                    core_ctx = ensure_core()
+                    outcome = _retire_entity(
+                        yielded, soil, core_ctx, name, run_id,
+                    )
+                    if outcome == "retired":
+                        entities_retired += 1
+                    else:
+                        entities_retired_noop += 1
+                    # The retire writes an EntityDelta to Soil, so the RFC-008
+                    # posture applies: Core first, then Soil. A crash between
+                    # them drops only the audit delta — the retirement itself
+                    # is durable in Core, and a replayed retire is a noop.
+                    core_ctx._conn.commit()
+                    soil.commit()
+                    continue
                 fact = _to_fact(yielded)
                 # RFC-011 §4.8 (item 4): providers label at creation per the
                 # operator's policy — the framework applies it, providers
@@ -336,6 +365,8 @@ def _execute_run(
             "entities_created": entities_created,
             "entities_updated": entities_updated,
             "entities_noop": entities_noop,
+            "entities_retired": entities_retired,
+            "entities_retired_noop": entities_retired_noop,
             "relations_created": relations_created,
         }
         finish_run(run_id, name, started_at, "success", detail, interval,
@@ -555,6 +586,78 @@ def _upsert_entity(
         )
     )
     return "updated"
+
+
+def _retire_entity(
+    yielded: dict,
+    soil,
+    core,
+    provider_name: str,
+    run_id: str,
+) -> str:
+    """Retire one provider-yielded entity (tada Task→Event conversion).
+
+    Soft-delete via supersession against a fresh Tombstone — the exact
+    mechanism /mg forget uses, minus the identity guard (providers cannot
+    yield identity types; Task is not one).
+
+    Idempotent: an unknown key — never created, or already retired — is a
+    success no-op, because find_by_data excludes superseded rows, so a
+    conversion replay converges instead of failing the run.
+
+    Audit: writes an EntityDelta fact with ops {"retired": ...} so the
+    retirement joins the same delta stream entity updates write. A crash
+    after the Core commit but before this fact lands drops only the audit
+    line — the retirement itself is durable in Core, and a replayed retire
+    is a noop that writes no second delta.
+
+    Returns "retired" | "noop". Writes are NOT committed here — the run
+    loop commits Core before Soil (RFC-008 ordering).
+    """
+    entity_type = yielded.get("type")
+    key = yielded.get("key")
+    if not entity_type or not isinstance(key, dict) or not key:
+        raise ValidationError(
+            "entity retire requires {op, type, key} with a non-empty key dict",
+            {"provider": provider_name},
+        )
+
+    stored = core.entity.find_by_data(entity_type, key)
+    if stored is None:
+        # Never created, or already retired — conversion replays converge.
+        return "noop"
+
+    entity_id = stored["uuid"]
+    tombstone_id = core.entity.create(entity_type="Tombstone")
+    core.entity.supersede(entity_id, tombstone_id)
+    new_hash = core.entity.get_current_hash(entity_id)
+    soil.create_fact(
+        Fact(
+            uuid=generate_soil_uuid(),
+            _type="EntityDelta",
+            realized_at=isodatetime.now(),
+            canonical_at=isodatetime.now(),
+            data={
+                # entity_uuid per the entitydelta schema (core_-prefixed);
+                # entity_id mirrors it plain for the RFC-008 orphan checker.
+                "entity_uuid": uid.add_core_prefix(entity_id),
+                "entity_id": entity_id,
+                "entity_type": entity_type,
+                "commit": new_hash,
+                "parent": stored["hash"],
+                "ops": {"retired": {"provider": provider_name, "key": key}},
+                "tombstone": uid.add_core_prefix(tombstone_id),
+            },
+            metadata={
+                "provider": provider_name,
+                "run_id": run_id,
+                "source": "provider_runtime",
+            },
+            integrity_hash=None,  # computed by create_fact
+            fidelity="full",
+        )
+    )
+    return "retired"
 
 
 def _make_scope_resolver():
