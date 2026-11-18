@@ -21,7 +21,7 @@ import json
 import logging
 
 from system.core import get_core
-from system.exceptions import PermissionDenied, ResourceNotFound
+from system.exceptions import PermissionDenied, ResourceNotFound, ValidationError
 from utils import uid
 
 from ..middleware.scope_access import (
@@ -370,7 +370,11 @@ def handle_query(request: QueryRequest, actor: str) -> dict:
     """Handle query verb - query entities with filters.
 
     Session 1: Basic equality filters only.
-    Filters are applied to entity.type and JSON data fields.
+    Filters are applied to entity.type and JSON data fields (#27): the
+    documented `{"_type": T}` filter resolves as the type filter; every
+    other key is a data-field equality match (find_by_data's path rule —
+    [A-Za-z0-9_.]+, dotted segments = nested paths). All filters are
+    WHERE-level, so filtering happens BEFORE pagination.
 
     Args:
         request: Validated QueryRequest
@@ -380,13 +384,36 @@ def handle_query(request: QueryRequest, actor: str) -> dict:
         dict with query results (results, total, start_index, count)
     """
     with get_core() as core:
+        entity_type = request.type
+        data_filters: dict = {}
+        for field, value in (request.filters or {}).items():
+            if field == "_type":
+                if entity_type and entity_type != value:
+                    raise ValidationError(
+                        "conflicting type filters: 'type' and filters._type disagree",
+                        {"type": entity_type, "filters._type": value},
+                    )
+                entity_type = entity_type or value
+                continue
+            if isinstance(value, (dict, list)):
+                raise ValidationError(
+                    f"filter '{field}' must be a scalar (equality matching only)",
+                    {"field": field},
+                )
+            data_filters[field] = value
+
         # Use public API method to query entities
-        rows, total = core.entity.query_with_filters(
-            entity_type=request.type,
-            include_superseded=False,
-            limit=request.count,
-            offset=request.start_index,
-        )
+        try:
+            rows, total = core.entity.query_with_filters(
+                entity_type=entity_type,
+                include_superseded=False,
+                limit=request.count,
+                offset=request.start_index,
+                data_filters=data_filters or None,
+            )
+        except ValueError as e:
+            # Bad data-field path (house rule shared with find_by_data)
+            raise ValidationError(str(e), {"filters": request.filters}) from e
 
         # Convert rows to response format (already dicts with parsed JSON)
         results = [_add_core_prefix(entity) for entity in rows]
