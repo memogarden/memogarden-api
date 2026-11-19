@@ -193,20 +193,11 @@ def flask_app():
         # Initialize schema on first connection (with locking to prevent race conditions)
         with _schema_lock:
             if not _schema_initialized:
-                # Load schema from the memogarden-system core.sql file
-                from pathlib import Path
+                # Load the core schema via the system resolver (the SQL
+                # files moved to the root repo 2026-11-19 — PR #4)
+                from system.schemas import get_sql_schema
 
-                tests_dir = Path(__file__).parent
-                project_root = tests_dir.parent.parent
-                schema_path = project_root / "memogarden-system" / "system" / "schemas" / "sql" / "core.sql"
-
-                if not schema_path.exists():
-                    raise FileNotFoundError(
-                        f"Schema file not found at {schema_path}. "
-                        f"Ensure memogarden-system repository is available."
-                    )
-
-                final_schema_sql = schema_path.read_text()
+                final_schema_sql = get_sql_schema("core")
                 conn.executescript(final_schema_sql)
 
                 # Add authentication tables (users and api_keys)
@@ -254,18 +245,9 @@ def flask_app():
     # Use named shared in-memory database with unique name (Session 5: fixed to use shared cache)
     soil_db_name = f"file:memogarden_soil_{uuid.uuid4()}?mode=memory&cache=shared"
     soil_conn = _create_sqlite_connection(soil_db_name)
-    from pathlib import Path
-    tests_dir = Path(__file__).parent
-    project_root = tests_dir.parent.parent
-    soil_schema_path = project_root / "memogarden-system" / "system" / "schemas" / "sql" / "soil.sql"
+    from system.schemas import get_sql_schema
 
-    if not soil_schema_path.exists():
-        raise FileNotFoundError(
-            f"Soil schema file not found at {soil_schema_path}. "
-            f"Ensure memogarden-system repository is available."
-        )
-
-    soil_schema_sql = soil_schema_path.read_text()
+    soil_schema_sql = get_sql_schema("soil")
     soil_conn.executescript(soil_schema_sql)
     soil_conn.commit()
 
@@ -331,22 +313,10 @@ def db_conn():
 
     conn = _create_sqlite_connection(db_path)
 
-    # Load schema from the memogarden-system core.sql file
-    # This ensures tests always match production schema
-    from pathlib import Path
+    # Load schema via the system resolver (matches production schema)
+    from system.schemas import get_sql_schema
 
-    # Find the core.sql file in memogarden-system
-    tests_dir = Path(__file__).parent
-    project_root = tests_dir.parent.parent
-    schema_path = project_root / "memogarden-system" / "system" / "schemas" / "sql" / "core.sql"
-
-    if not schema_path.exists():
-        raise FileNotFoundError(
-            f"Schema file not found at {schema_path}. "
-            f"Ensure memogarden-system repository is available."
-        )
-
-    final_schema_sql = schema_path.read_text()
+    final_schema_sql = get_sql_schema("core")
     conn.executescript(final_schema_sql)
 
     # Add authentication tables (users and api_keys) which are not in core.sql yet
