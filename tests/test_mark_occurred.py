@@ -107,20 +107,29 @@ class TestMarkOccurred:
         stored = _entities_of_type("Event")[event_uuid]
         assert stored["data"]["occurred_at"] == body["occurred_at"]
 
-        # The EventOccurrence fact: linkage, ground truth, snapshot.
-        occurrences = _facts("EventOccurrence")
+        # The Event fact (#31 convergence): linkage, ground truth, flat
+        # belief projection.
+        occurrences = _facts("Event")
         assert len(occurrences) == 1
         occ = occurrences[0]["data"]
         assert occ["event_uuid"] == body["event_uuid"]
-        assert occ["occurred_at"] == body["occurred_at"]
-        assert occ["snapshot"]["title"] == "Weekly sync"
-        assert occ["snapshot"]["participants"] == ["a@x.com", "b@x.com"]
-        assert occ["snapshot"]["status"] == "confirmed"
-        # Provenance rides the occurrence metadata (review P2 gap).
-        assert occurrences[0]["metadata"]["source"] == "google_calendar"
-        assert occurrences[0]["metadata"]["account"] == "me@gmail.com"
-        assert occurrences[0]["metadata"]["calendar_id"] == "me@gmail.com"
-        assert occurrences[0]["metadata"]["source_id"] == "evt_1"
+        assert occ["title"] == "Weekly sync"
+        assert occ["participants"] == ["a@x.com", "b@x.com"]
+        assert occ["start_at"] == "2026-11-16T09:00:00+00:00"
+        assert occ["ends_at"] == "2026-11-16T10:00:00+00:00"
+        assert occ["location"] == "Room 1"
+        assert occ["organizer"] == "me@gmail.com"
+        # The belief status stays on the entity — the fact's verdict is
+        # metadata.status, not the schedule belief.
+        assert "status" not in occ
+        # Provenance + verdict ride the metadata.
+        m = occurrences[0]["metadata"]
+        assert m["source"] == "google_calendar"
+        assert m["account"] == "me@gmail.com"
+        assert m["calendar_id"] == "me@gmail.com"
+        assert occ["source_id"] == "evt_1"
+        assert m["status"] == "occurred"
+        assert m["resolved_at"] == body["occurred_at"]
         # canonical_at = occurred_at (user-meaning time).
         assert occurrences[0]["canonical_at"] == body["occurred_at"]
 
@@ -140,7 +149,7 @@ class TestMarkOccurred:
         assert second.status_code == 200
         assert second.get_json()["idempotent"] is True
 
-        assert len(_facts("EventOccurrence")) == 1
+        assert len(_facts("Event")) == 1
         assert len(_facts("Action")) == 1
 
     def test_prefixed_uuid_accepted(self, client, auth_headers, event_uuid):
@@ -155,7 +164,7 @@ class TestMarkOccurred:
         assert response.get_json()["occurred_at"] == stamp
         stored = _entities_of_type("Event")[event_uuid]
         assert stored["data"]["occurred_at"] == stamp
-        assert _facts("EventOccurrence")[0]["canonical_at"] == stamp
+        assert _facts("Event")[0]["canonical_at"] == stamp
 
     def test_future_occurred_at_rejected(self, client, auth_headers, event_uuid):
         from datetime import UTC, datetime, timedelta
@@ -163,7 +172,7 @@ class TestMarkOccurred:
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         response = _mark(client, auth_headers, event_uuid, {"occurred_at": future})
         assert response.status_code == 400
-        assert _facts("EventOccurrence") == []
+        assert _facts("Event") == []
 
     def test_naive_occurred_at_rejected(self, client, auth_headers, event_uuid):
         response = _mark(
@@ -176,7 +185,7 @@ class TestMarkOccurred:
             client, auth_headers, event_uuid, {"occurred_at": "not-a-date"}
         )
         assert response.status_code == 400
-        assert _facts("EventOccurrence") == []
+        assert _facts("Event") == []
 
     def test_offset_normalized_to_utc(self, client, auth_headers, event_uuid):
         stamp = "2026-11-15T05:30:00-05:00"  # == 10:30Z
@@ -217,15 +226,15 @@ class TestMarkOccurred:
         body = response.get_json()
         assert body["repaired"] is True
         assert body["occurred_at"] == stamp  # NOT overwritten by "now"
-        assert len(_facts("EventOccurrence")) == 1
-        assert _facts("EventOccurrence")[0]["data"]["occurred_at"] == stamp
+        assert len(_facts("Event")) == 1
+        assert _facts("Event")[0]["metadata"]["resolved_at"] == stamp
 
     def test_unbound_api_key_forbidden(
         self, client, auth_headers, auth_headers_apikey, event_uuid
     ):
         response = _mark(client, auth_headers_apikey, event_uuid)
         assert response.status_code == 403
-        assert _facts("EventOccurrence") == []
+        assert _facts("Event") == []
         assert _facts("Action") == []
 
     def test_unauthenticated_401(self, client, event_uuid):
