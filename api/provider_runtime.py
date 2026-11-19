@@ -64,6 +64,9 @@ def _account_context(account: dict) -> dict:
         "label": account["label"],
         "credential_ref": account["credential_ref"],
         "config": account.get("config") or {},
+        # Per-account scope_policy override ({rules, default} | None) —
+        # read by _execute_run; NULL = inherit the provider-level policy.
+        "scope_policy": account.get("scope_policy"),
     }
 
 
@@ -269,7 +272,13 @@ def _execute_run(
         entities_retired = 0
         entities_retired_noop = 0
         relations_created = 0
-        scope_policy = manifest.get("scope_policy")
+        # Per-account override (RFC-012 config-override pattern): an
+        # account-set scope_policy REPLACES the provider-level policy
+        # entirely when set — runs are strictly per-account, so the
+        # effective policy is a property of the ingesting account, not a
+        # rule matched against item content (the provider rules DSL stays
+        # for that). NULL/absent = inherit the provider policy.
+        scope_policy = (account or {}).get("scope_policy") or manifest.get("scope_policy")
         resolve_scope = _make_scope_resolver()
         capabilities = manifest.get("capabilities") or []
         with get_soil() as soil, ExitStack() as stack:

@@ -143,6 +143,11 @@ def _notes(client, auth_headers):
     return {r["data"]["description"]: r for r in query.get_json()["result"]["results"]}
 
 
+def _plain(prefixed):
+    """Strip the core_ entity prefix from a scope uuid."""
+    return prefixed.split("core_", 1)[-1]
+
+
 class TestAccountCRUD:
     def test_register_account_success(self, client, auth_headers, accounted_module):
         assert _register_provider(
@@ -590,9 +595,159 @@ class TestAccountScopePolicy:
             )
             _wait_for_account(client, auth_headers, "testprov", account["id"])
 
-        def _plain(prefixed):
-            return prefixed.split("core_", 1)[-1]
+        notes = _notes(client, auth_headers)
+        assert notes["from a@gmail.com"]["metadata"]["scopes"] == [_plain(finances_uuid)]
+        assert notes["from b@gmail.com"]["metadata"]["scopes"] == [_plain(triage_uuid)]
+
+    def _set_account_policy(self, client, auth_headers, account_id, policy):
+        return client.patch(
+            f"/api/v1/providers/testprov/accounts/{account_id}",
+            json={"scope_policy": policy},
+            headers=auth_headers,
+        )
+
+    def test_account_scope_policy_overrides_provider(
+        self, client, auth_headers, accounted_module, triage_uuid, finances_uuid
+    ):
+        """Per-account override (RFC-012 config pattern): the account policy
+        REPLACES the provider policy entirely for that account's runs."""
+        assert _register_provider(
+            client, auth_headers, _provider_payload(accounted_module)
+        ).status_code == 201
+        # Provider level: everything → triage.
+        assert client.put(
+            "/api/v1/providers/testprov/scope-policy",
+            json={"rules": [], "default": "triage"},
+            headers=auth_headers,
+        ).status_code == 200
+
+        account_a = _register_account(
+            client, auth_headers, "testprov", subject="a@gmail.com"
+        ).get_json()
+        account_b = _register_account(
+            client, auth_headers, "testprov", subject="b@gmail.com"
+        ).get_json()
+        # Account a overrides → finances; b inherits the provider policy.
+        assert self._set_account_policy(
+            client, auth_headers, account_a["id"], {"rules": [], "default": finances_uuid}
+        ).status_code == 200
+
+        for account in (account_a, account_b):
+            client.post(
+                f"/api/v1/providers/testprov/accounts/{account['id']}/run",
+                headers=auth_headers,
+            )
+            _wait_for_account(client, auth_headers, "testprov", account["id"])
 
         notes = _notes(client, auth_headers)
         assert notes["from a@gmail.com"]["metadata"]["scopes"] == [_plain(finances_uuid)]
         assert notes["from b@gmail.com"]["metadata"]["scopes"] == [_plain(triage_uuid)]
+
+    def test_account_scope_policy_null_default_unscopes(
+        self, client, auth_headers, accounted_module, triage_uuid
+    ):
+        """An explicit null default on the account = deliver unscoped —
+        the override beats the provider's fail-closed triage catch-all."""
+        assert _register_provider(
+            client, auth_headers, _provider_payload(accounted_module)
+        ).status_code == 201
+        assert client.put(
+            "/api/v1/providers/testprov/scope-policy",
+            json={"rules": [], "default": "triage"},
+            headers=auth_headers,
+        ).status_code == 200
+
+        account_a = _register_account(
+            client, auth_headers, "testprov", subject="a@gmail.com"
+        ).get_json()
+        assert self._set_account_policy(
+            client, auth_headers, account_a["id"], {"rules": [], "default": None}
+        ).status_code == 200
+        client.post(
+            f"/api/v1/providers/testprov/accounts/{account_a['id']}/run",
+            headers=auth_headers,
+        )
+        _wait_for_account(client, auth_headers, "testprov", account_a["id"])
+
+        notes = _notes(client, auth_headers)
+        assert not notes["from a@gmail.com"]["metadata"].get("scopes")
+
+    def test_patch_scope_policy_roundtrip_and_clear(
+        self, client, auth_headers, accounted_module, finances_uuid
+    ):
+        """PATCH replaces the whole policy object; an explicit null clears
+        the override (manifest shows null = inherit provider policy)."""
+        assert _register_provider(
+            client, auth_headers, _provider_payload(accounted_module)
+        ).status_code == 201
+        account = _register_account(
+            client, auth_headers, "testprov", subject="a@gmail.com"
+        ).get_json()
+
+        assert self._set_account_policy(
+            client, auth_headers, account["id"], {"rules": [], "default": finances_uuid}
+        ).status_code == 200
+        stored = _get_account(client, auth_headers, "testprov", account["id"])
+        assert stored["scope_policy"] == {"rules": [], "default": finances_uuid}
+
+        assert self._set_account_policy(
+            client, auth_headers, account["id"], None
+        ).status_code == 200
+        stored = _get_account(client, auth_headers, "testprov", account["id"])
+        assert stored["scope_policy"] is None
+
+    def test_patch_account_scope_policy_requires_jwt(
+        self, client, auth_headers, auth_headers_apikey, accounted_module
+    ):
+        """Scope labels are authority boundaries: PATCHing scope_policy is
+        JWT-only (mirrors PUT /providers/{name}/scope-policy), while the
+        other mutable account fields stay key-acceptable."""
+        assert _register_provider(
+            client, auth_headers, _provider_payload(accounted_module)
+        ).status_code == 201
+        account = _register_account(
+            client, auth_headers, "testprov", subject="a@gmail.com"
+        ).get_json()
+
+        denied = client.patch(
+            f"/api/v1/providers/testprov/accounts/{account['id']}",
+            json={"scope_policy": {"rules": [], "default": "triage"}},
+            headers=auth_headers_apikey,
+        )
+        assert denied.status_code == 401
+
+        # Without the field, the same key can still edit label/status/config.
+        allowed = client.patch(
+            f"/api/v1/providers/testprov/accounts/{account['id']}",
+            json={"label": "renamed"},
+            headers=auth_headers_apikey,
+        )
+        assert allowed.status_code == 200
+        assert allowed.get_json()["label"] == "renamed"
+
+    def test_scopes_overview_lists_account_policies(
+        self, client, auth_headers, accounted_module, finances_uuid
+    ):
+        overview = client.get(
+            "/api/v1/scopes/overview", headers=auth_headers
+        ).get_json()
+        assert "account_policies" in overview
+        entries = overview["account_policies"].get("testprov", [])
+        assert entries == []  # no accounts registered yet → empty list
+
+        assert _register_provider(
+            client, auth_headers, _provider_payload(accounted_module)
+        ).status_code == 201
+        account = _register_account(
+            client, auth_headers, "testprov", subject="a@gmail.com"
+        ).get_json()
+        assert self._set_account_policy(
+            client, auth_headers, account["id"], {"rules": [], "default": finances_uuid}
+        ).status_code == 200
+
+        overview = client.get(
+            "/api/v1/scopes/overview", headers=auth_headers
+        ).get_json()
+        (entry,) = overview["account_policies"]["testprov"]
+        assert entry["subject"] == "a@gmail.com"
+        assert entry["scope_policy"] == {"rules": [], "default": finances_uuid}

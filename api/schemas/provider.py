@@ -100,8 +100,14 @@ class UpdateAccountRequest(BaseModel):
 
     Fields omitted stay unchanged. `config` replaces the whole per-account
     config object (same semantics as the provider-level config patch).
-    platform/subject/credential_ref are immutable — remove and re-register
-    instead (the credential they reference is operator-managed in HACM).
+    `scope_policy` replaces the whole per-account policy object
+    ({rules, default}, RFC-011 §4.8 shape); an explicit null clears the
+    override so the account inherits the provider-level policy again.
+    PATCHing this field is operator-gated (JWT only), matching
+    PUT /providers/{name}/scope-policy — scope labels are authority
+    boundaries. platform/subject/credential_ref are immutable — remove and
+    re-register instead (the credential they reference is operator-managed
+    in HACM).
     """
 
     label: str | None = Field(default=None, max_length=120)
@@ -110,4 +116,5 @@ class UpdateAccountRequest(BaseModel):
         pattern=r"^(active|needs_reauth|revoked|disabled)$",
     )
     config: dict[str, Any] | None = None
+    scope_policy: dict[str, Any] | None = None
     interval: int | None = Field(default=None, ge=60)

@@ -197,11 +197,18 @@ def get_account(name: str, account_id: str):
 @providers_bp.patch("/<name>/accounts/<account_id>")
 @validate_request
 def update_account(name: str, account_id: str, data: UpdateAccountRequest):
-    """Update mutable account fields (label, status, config, interval).
+    """Update mutable account fields (label, status, config, scope_policy,
+    interval).
 
-    platform/subject/credential_ref are immutable — remove and re-register
-    instead (the credential they reference is operator-managed in HACM).
+    `scope_policy` is operator-gated (JWT only, checked below) — a scope
+    label is authority-boundary configuration, same invariant as
+    PUT /providers/{name}/scope-policy. The other mutable fields accept
+    JWT or API key as before. platform/subject/credential_ref are
+    immutable — remove and re-register instead (the credential they
+    reference is operator-managed in HACM).
     """
+    if "scope_policy" in data.model_fields_set:
+        _authenticate_jwt()
     return jsonify(provider_registry.update_account(name, account_id, data))
 
 

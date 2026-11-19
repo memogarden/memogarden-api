@@ -191,11 +191,15 @@ def scopes_overview():
 
     One read for the console's Scopes & grants screen: every scope with
     its labeled-item counts (facts + entities), every live key with its
-    grants (and the agent it binds to), and every provider's scope policy.
+    grants (and the agent it binds to), every provider's scope policy,
+    and every account's per-account scope_policy override (RFC-012
+    pattern; null = the account inherits its provider's policy).
 
     Returns:
         200: {"enforcement": bool, "scopes": [...], "grants": [...],
-              "provider_policies": {name: policy}}
+              "provider_policies": {name: policy},
+              "account_policies": {provider: [{id, label, subject,
+              scope_policy}]}}
     """
     _authenticate_jwt()
 
@@ -268,9 +272,27 @@ def scopes_overview():
             json.loads(raw) if isinstance(raw, str) and raw else (raw or None)
         )
 
+    # Per-account overrides (RFC-012 pattern): NULL = inherit provider policy.
+    account_rows = core._conn.execute(
+        "SELECT provider_name, id, label, subject, scope_policy "
+        "FROM provider_accounts ORDER BY provider_name, label, subject ASC"
+    ).fetchall()
+    account_policies: dict = {}
+    for row in account_rows:
+        raw = row["scope_policy"]
+        account_policies.setdefault(row["provider_name"], []).append({
+            "id": row["id"],
+            "label": row["label"],
+            "subject": row["subject"],
+            "scope_policy": (
+                json.loads(raw) if isinstance(raw, str) and raw else (raw or None)
+            ),
+        })
+
     return jsonify({
         "enforcement": enforcement_enabled(),
         "scopes": scopes,
         "grants": grants,
         "provider_policies": policies,
+        "account_policies": account_policies,
     })

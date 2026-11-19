@@ -74,6 +74,16 @@
         </table>
     </div>
     <p class="text-xs text-gray-400 mt-2">Omit default = ratified fail-closed catch-all → triage · explicit null = exempt (unscoped) · rules editing stays with the API/CLI.</p>
+
+    <h3 class="text-sm font-semibold text-gray-900 mt-4 mb-2">Account policy overrides <span class="text-xs text-gray-400">RFC-012 pattern — replaces the provider policy for that account's runs; edits on the Providers page</span></h3>
+    <div class="bg-white shadow rounded-lg overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+                <th class="px-3 py-2">Provider</th><th class="px-3 py-2">Account</th><th class="px-3 py-2">Effective policy</th>
+            </tr></thead>
+            <tbody id="accountPoliciesBody"><tr><td class="px-3 py-4 text-gray-400" colspan="3">Loading…</td></tr></tbody>
+        </table>
+    </div>
 </section>
 {% endblock %}
 
@@ -181,6 +191,26 @@ function renderOverview() {
                 </select>
             </td></tr>`;
     }).join('') || '<tr><td class="px-3 py-4 text-gray-400" colspan="3">No providers registered.</td></tr>';
+
+    // Per-account overrides (RFC-012 pattern): null = inherit provider policy.
+    const accountRows = [];
+    for (const name of Object.keys(OV.account_policies || {})) {
+        for (const a of OV.account_policies[name]) {
+            const policy = a.scope_policy;
+            const desc = !policy ? '<span class="text-gray-400">inherit</span>'
+                : policy.default === null ? '<span class="text-gray-500">exempt (unscoped)</span>'
+                : `default → ${(() => {
+                    const scope = OV.scopes.find(s => s.uuid === policy.default || s.uuid.endsWith(policy.default));
+                    return scope ? esc(scopeLabel(scope)) : shortUuid(policy.default);
+                })()}`;
+            accountRows.push(`<tr class="border-b border-gray-100">
+                <td class="px-3 py-2">${esc(name)}</td>
+                <td class="px-3 py-2">${esc(a.label || a.subject)} <span class="text-xs text-gray-400">${esc(a.subject)}</span></td>
+                <td class="px-3 py-2">${desc}</td></tr>`);
+        }
+    }
+    document.getElementById('accountPoliciesBody').innerHTML = accountRows.length ? accountRows.join('') :
+        '<tr><td class="px-3 py-4 text-gray-400" colspan="3">No account bindings.</td></tr>';
 }
 
 document.getElementById('mintScopeBtn').addEventListener('click', () =>

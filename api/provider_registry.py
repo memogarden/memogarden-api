@@ -55,8 +55,9 @@ _COLUMNS = (
 # Columns selected for account manifests (RFC-012), in row order
 _ACCOUNT_COLUMNS = (
     "id, provider_name, platform, subject, label, status, credential_ref, "
-    "config, capabilities, error, interval, next_due_at, last_run_id, "
-    "last_run_at, last_status, last_verified_at, created_at, updated_at"
+    "config, scope_policy, capabilities, error, interval, next_due_at, "
+    "last_run_id, last_run_at, last_status, last_verified_at, created_at, "
+    "updated_at"
 )
 
 # Run bookkeeping runs in parallel threads (one per account, RFC-012 §4.5);
@@ -440,6 +441,12 @@ def _row_to_account(row) -> dict:
         capabilities = json.loads(row["capabilities"]) if row["capabilities"] else []
     except (json.JSONDecodeError, TypeError):
         capabilities = []
+    # {rules, default} policy dict, or None = inherit the provider-level
+    # scope_policy (RFC-011 §4.8; per-account override, RFC-012 pattern).
+    try:
+        scope_policy = json.loads(row["scope_policy"]) if row["scope_policy"] else None
+    except (json.JSONDecodeError, TypeError):
+        scope_policy = None
     return {
         "id": row["id"],
         "provider_name": row["provider_name"],
@@ -449,6 +456,7 @@ def _row_to_account(row) -> dict:
         "status": row["status"],
         "credential_ref": row["credential_ref"],
         "config": config,
+        "scope_policy": scope_policy,
         "capabilities": capabilities,
         "error": row["error"],
         "interval": row["interval"],
@@ -610,7 +618,8 @@ def get_account(provider_name: str, account_id: str) -> dict:
 def update_account(
     provider_name: str, account_id: str, data: UpdateAccountRequest
 ) -> dict:
-    """Update an account's mutable fields (label, status, config, interval).
+    """Update an account's mutable fields (label, status, config,
+    scope_policy, interval).
 
     Returns:
         Updated manifest
@@ -624,6 +633,11 @@ def update_account(
             if key == "config":
                 assignments.append("config = ?")
                 params.append(json.dumps(value))
+            elif key == "scope_policy":
+                # dict → JSON text; explicit null clears the override
+                # (SQL NULL = inherit the provider-level policy again)
+                assignments.append("scope_policy = ?")
+                params.append(json.dumps(value) if value is not None else None)
             else:
                 assignments.append(f"{key} = ?")
                 params.append(value)

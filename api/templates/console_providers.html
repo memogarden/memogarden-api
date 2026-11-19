@@ -44,6 +44,7 @@
 <script>
 let PROVIDERS = [];
 let selectedProvider = null;
+let OV = null;  // scopes overview (console:overview from base chrome) — drives the account policy pickers
 
 function statusChip(status) {
     if (status === 'success' || status === 'active' || status === 'complete' || status === 'ok')
@@ -89,6 +90,7 @@ async function loadAccounts() {
                         <div class="text-xs text-gray-400">${esc(a.subject)} · ${esc(a.platform)}</div></td>
                     <td class="px-3 py-2">${statusChip(a.status)}${a.error ? `<div class="text-xs text-red-500">${esc(a.error)}</div>` : ''}</td>
                     <td class="px-3 py-2 text-xs">${a.interval ? a.interval + 's' : 'inherit'}${(a.config && Object.keys(a.config).length) ? ' · ' + esc(JSON.stringify(a.config)) : ''}</td>
+                    <td class="px-3 py-2 text-xs">${accountPolicyCell(a)}</td>
                     <td class="px-3 py-2 text-xs">${fmtTime(a.last_run_at)} ${statusChip(a.last_status)}</td>
                     <td class="px-3 py-2 whitespace-nowrap">
                         <button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="runAccount('${esc(p.name)}','${esc(a.id)}')">run</button>
@@ -100,11 +102,51 @@ async function loadAccounts() {
                 </tr>`);
             return `<div class="bg-white shadow rounded-lg table-scroll mb-3">
                 <div class="px-3 py-2 text-xs font-medium text-gray-500 border-b border-gray-200">${esc(p.name)}</div>
-                <table class="w-full text-sm"><tbody>${rows.join('')}</tbody></table></div>`;
+                <table class="w-full text-sm">
+                    <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+                        <th class="px-3 py-2">Account</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Interval / config</th><th class="px-3 py-2">Scope policy</th><th class="px-3 py-2">Last run</th><th class="px-3 py-2">Actions</th>
+                    </tr></thead>
+                    <tbody>${rows.join('')}</tbody></table></div>`;
         } catch (error) { return ''; }
     }));
     document.getElementById('accountsList').innerHTML = sections.join('') ||
         '<div class="bg-white shadow rounded-lg p-6 text-center text-gray-400">No account bindings.</div>';
+}
+
+// Per-account scope policy (RFC-011 §4.8 at account level): null = inherit
+// the provider policy; {rules: [], default: X} replaces it for this
+// account's runs. uuids only ride in attributes (esc() does not escape
+// quotes — no free text here).
+function accountPolicyLabel(a) {
+    const policy = a.scope_policy;
+    if (!policy) return '<span class="text-gray-400">inherit</span>';
+    if (policy.default === null) return '<span class="text-gray-500">unscoped</span>';
+    const scope = (OV && OV.scopes || []).find(s => s.uuid === policy.default || s.uuid.endsWith(policy.default));
+    const label = scope ? (scope.data ? scope.data.label : scope.label) : shortUuid(policy.default);
+    return `default → ${esc(label)}`;
+}
+function accountPolicyCell(a) {
+    const summary = accountPolicyLabel(a);
+    if (!OV) return summary + ' <span class="text-gray-400 opacity-40">…</span>';
+    return `${summary}<br><select class="mt-1 border border-gray-300 rounded px-2 py-1 text-xs"
+        onchange="setAccountPolicy('${esc(a.provider_name)}','${esc(a.id)}', this.value)">
+        <option value="">change…</option>
+        <option value="__inherit">inherit provider</option>
+        <option value="__unscoped">unscoped</option>
+        ${OV.scopes.map(s => `<option value="${esc(s.uuid)}">default → ${esc(s.data ? s.data.label : s.label)}</option>`).join('')}
+    </select>`;
+}
+async function setAccountPolicy(provider, accountId, choice) {
+    if (!choice) return;
+    clearError();
+    const body = choice === '__inherit' ? { scope_policy: null }
+        : choice === '__unscoped' ? { scope_policy: { rules: [], default: null } }
+        : { scope_policy: { rules: [], default: choice } };
+    try {
+        await api(`/api/v1/providers/${encodeURIComponent(provider)}/accounts/${encodeURIComponent(accountId)}`,
+            { method: 'PATCH', body: body });
+        loadAccounts();
+    } catch (error) { showError('Policy update failed: ' + error.message); }
 }
 
 async function loadRuns() {
@@ -165,11 +207,19 @@ document.getElementById('runsProvider').addEventListener('change', function() {
 
 (async function init() {
     try {
+        if (window.__scopesOverview) { OV = window.__scopesOverview; }
         await loadProviders();
         await loadAccounts();
     } catch (error) {
         showError('Failed to load providers: ' + error.message);
     }
 })();
+
+// Chrome loads the overview async — re-render accounts once it lands so
+// the policy pickers get the scopes list.
+document.addEventListener('console:overview', function(evt) {
+    OV = evt.detail;
+    loadAccounts();
+}, { once: true });
 </script>
 {% endblock %}
