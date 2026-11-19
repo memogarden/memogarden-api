@@ -11,7 +11,7 @@
     <h3 class="text-sm font-semibold text-gray-900">Registry</h3>
     <span class="text-xs text-gray-400">register via <code>memogarden register provider</code></span>
 </div>
-<div class="bg-white shadow rounded-lg overflow-x-auto">
+<div class="bg-white shadow rounded-lg table-scroll">
     <table class="w-full text-sm">
         <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
             <th class="px-3 py-2">Provider</th><th class="px-3 py-2">Module</th><th class="px-3 py-2">Interval</th><th class="px-3 py-2">Last run</th><th class="px-3 py-2">Actions</th>
@@ -30,7 +30,7 @@
     <h3 class="text-sm font-semibold text-gray-900">Run history</h3>
     <select id="runsProvider" class="border border-gray-300 rounded-lg px-3 py-1 text-sm"></select>
 </div>
-<div class="bg-white shadow rounded-lg overflow-x-auto">
+<div class="bg-white shadow rounded-lg table-scroll">
     <table class="w-full text-sm">
         <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
             <th class="px-3 py-2">Run</th><th class="px-3 py-2">Account</th><th class="px-3 py-2">Started</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Detail</th>
@@ -98,7 +98,7 @@ async function loadAccounts() {
                             ? `<span class="text-xs text-red-600 ml-1">re-auth: provider CLI auth-login (human OAuth consent)</span>` : ''}
                     </td>
                 </tr>`);
-            return `<div class="bg-white shadow rounded-lg overflow-x-auto mb-3">
+            return `<div class="bg-white shadow rounded-lg table-scroll mb-3">
                 <div class="px-3 py-2 text-xs font-medium text-gray-500 border-b border-gray-200">${esc(p.name)}</div>
                 <table class="w-full text-sm"><tbody>${rows.join('')}</tbody></table></div>`;
         } catch (error) { return ''; }
