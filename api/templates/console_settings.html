@@ -1,0 +1,91 @@
+{% extends "console_base.html" %}
+
+{% block console_title %}Settings{% endblock %}
+{% block console_page %}settings{% endblock %}
+
+{% block console_content %}
+<h2 class="text-lg font-semibold text-gray-900 mb-1">Settings</h2>
+<p class="text-sm text-gray-600 mb-4">Operator profile and password rotation (RFC-015 §3.1 — the endpoint finally has a screen).</p>
+
+<div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+    <!-- Profile (absorbed from the retired /settings page) -->
+    <section>
+        <h3 class="text-sm font-semibold text-gray-900 mb-2">Profile</h3>
+        <div class="bg-white shadow rounded-lg">
+            <dl id="profileCard" class="text-sm">
+                <div class="flex justify-between px-3 py-2 border-b border-gray-100"><dt class="text-gray-500">Username</dt><dd id="pUsername" class="text-gray-900">Loading…</dd></div>
+                <div class="flex justify-between px-3 py-2 border-b border-gray-100"><dt class="text-gray-500">Role</dt><dd id="pRole" class="text-gray-900">—</dd></div>
+                <div class="flex justify-between px-3 py-2 border-b border-gray-100"><dt class="text-gray-500">User ID</dt><dd id="pUserId" class="text-gray-500 font-mono text-xs">—</dd></div>
+                <div class="flex justify-between px-3 py-2 border-b border-gray-100"><dt class="text-gray-500">Created</dt><dd id="pCreated" class="text-gray-900">—</dd></div>
+                <div class="flex justify-between px-3 py-2"><dt class="text-gray-500">Session</dt><dd id="pSession" class="text-gray-900">—</dd></div>
+            </dl>
+        </div>
+        <p class="text-xs text-gray-400 mt-2">The JWT is stateless (30-day expiry): changing the password does not invalidate an already-issued token.</p>
+    </section>
+
+    <!-- Change password (POST /auth/change-password, RFC-015 §3.1) -->
+    <section>
+        <h3 class="text-sm font-semibold text-gray-900 mb-2">Change password</h3>
+        <div class="bg-white shadow rounded-lg p-3 space-y-2">
+            <input id="cpCurrent" type="password" autocomplete="current-password" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm" placeholder="Current password">
+            <input id="cpNew" type="password" autocomplete="new-password" minlength="8" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm" placeholder="New password (min 8 chars, letter + digit)">
+            <input id="cpConfirm" type="password" autocomplete="new-password" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm" placeholder="Repeat new password">
+            <div class="flex items-center gap-3">
+                <button id="cpGo" class="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm">Update password</button>
+                <span id="cpMsg" class="text-xs"></span>
+            </div>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block console_scripts %}
+<script>
+(async function init() {
+    const el = (id) => document.getElementById(id);
+
+    try {
+        const me = await api('/auth/me');
+        el('pUsername').textContent = me.username || '—';
+        el('pRole').textContent = me.is_admin ? 'admin (operator)' : (me.actor_type || 'operator');
+        el('pUserId').textContent = me.id || me.actor || '—';
+        el('pCreated').textContent = fmtTime(me.created_at);
+        el('pSession').textContent = 'Bearer JWT · actor_type ' + (me.actor_type || 'operator');
+    } catch (error) {
+        showError('Failed to load profile: ' + error.message);
+    }
+
+    el('cpGo').addEventListener('click', async function() {
+        const msg = el('cpMsg');
+        msg.textContent = '';
+        msg.className = 'text-xs';
+        const current = el('cpCurrent').value;
+        const next = el('cpNew').value;
+        if (!current || !next) {
+            msg.textContent = 'Both fields are required.';
+            msg.classList.add('text-red-600');
+            return;
+        }
+        if (next !== el('cpConfirm').value) {
+            msg.textContent = 'New passwords do not match.';
+            msg.classList.add('text-red-600');
+            return;
+        }
+        try {
+            await api('/auth/change-password', {
+                method: 'POST',
+                body: { current_password: current, new_password: next },
+            });
+            el('cpCurrent').value = '';
+            el('cpNew').value = '';
+            el('cpConfirm').value = '';
+            msg.textContent = 'Password updated.';
+            msg.classList.add('text-green-600');
+        } catch (error) {
+            msg.textContent = error.message;
+            msg.classList.add('text-red-600');
+        }
+    });
+})();
+</script>
+{% endblock %}

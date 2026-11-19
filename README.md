@@ -174,10 +174,14 @@ Admin registration (localhost only):
 - `GET /admin/register` - Registration page
 - `POST /admin/register` - Create admin user
 
-API key management:
-- `GET /api-keys` - List API keys
-- `POST /api-keys/new` - Create new API key
-- `DELETE /api-keys/{id}` - Revoke API key
+Operator console (RFC-015, the single web GUI since the 2026-11-19
+consolidation — the standalone login/api-keys/agents/settings pages were
+absorbed into it and their URLs redirect):
+- `/login` - operator login (JWT → localStorage)
+- `/console/triage` - triage review (default landing)
+- `/console/identity` - keys & agents: mint keys/agents, bind, revoke
+- `/console/settings` - profile + change-password
+- `/console/{scopes,providers,occurrences,audit}` - other screens
 
 ## Troubleshooting
 

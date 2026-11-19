@@ -7,7 +7,7 @@
     <div class="card w-full max-w-md">
         <div class="text-center mb-8">
             <h1 class="text-3xl font-bold text-gray-800 mb-2">MemoGarden</h1>
-            <p class="text-gray-600">Sign in to your account</p>
+            <p class="text-gray-600">Operator Console — sign in</p>
         </div>
 
         {% if error %}
@@ -108,8 +108,8 @@
                 localStorage.setItem('access_token', result.access_token);
                 localStorage.setItem('user_info', JSON.stringify(result.user));
 
-                // Redirect to API keys page
-                window.location.href = '/api-keys';
+                // Redirect to the operator console (consolidated GUI)
+                window.location.href = '/console/triage';
             } else {
                 // Show error
                 const errorDiv = document.createElement('div');

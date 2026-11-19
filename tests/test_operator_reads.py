@@ -247,7 +247,25 @@ def test_console_pages_render(client):
         ("/console/providers", "Providers"),
         ("/console/occurrences", "Occurrence review"),
         ("/console/audit", "Action audit"),
+        ("/console/settings", "Settings"),
     ]:
         response = client.get(path, follow_redirects=True)
         assert response.status_code == 200, path
         assert marker in response.get_data(as_text=True), path
+
+
+def test_legacy_ui_pages_redirect_into_console(client):
+    """2026-11-19 consolidation: the pre-RFC-010 pages are retired and the
+    console absorbed their functionality — old URLs get a soft landing
+    (302) instead of a 404. The JSON endpoints behind bare /agents and
+    /api-keys/ are untouched (RFC-010/RFC-015 contracts)."""
+    for path, target in [
+        ("/api-keys", "/console/identity"),
+        ("/api-keys/new", "/console/identity"),
+        ("/agents/", "/console/identity"),
+        ("/settings", "/console/settings"),
+        ("/", "/console"),
+    ]:
+        response = client.get(path)
+        assert response.status_code == 302, path
+        assert response.headers["Location"].endswith(target), path

@@ -1,17 +1,19 @@
 """HTML UI pages for MemoGarden Core.
 
-These endpoints provide HTML user interface pages for:
-- Admin setup (localhost only)
-- User login
-- API key management
-- User settings
+Survivors of the 2026-11-19 console consolidation — everything else
+(login-adjacent identity management) moved into the operator console
+(console.py) and the legacy page routes now redirect there:
+
+- Admin setup (localhost only, one-time bootstrap)
+- User login (the console's auth entry; the JWT lands in localStorage)
+- / → /console
 
 All pages use TailwindCSS for styling and vanilla JavaScript for interactions.
 """
 
 import logging
 
-from flask import Blueprint, jsonify, render_template, render_template_string
+from flask import Blueprint, jsonify, redirect, render_template, render_template_string
 
 from system.core import get_core
 
@@ -241,78 +243,6 @@ def login_page():
 
 
 # ============================================================================
-# API Key Management Pages
-# ============================================================================
-
-
-@auth_views_bp.route("/api-keys", methods=["GET"])
-def api_keys_page():
-    """
-    Display API keys management page.
-
-    Returns:
-        HTML page for managing API keys
-
-    Example response:
-        HTML page with API keys list and management
-    """
-    return render_template("api_keys.html")
-
-
-@auth_views_bp.route("/api-keys/new", methods=["GET"])
-def api_key_new_page():
-    """
-    Display create new API key page.
-
-    Returns:
-        HTML page for creating new API key
-
-    Example response:
-        HTML page with API key creation form
-    """
-    return render_template("api_key_new.html")
-
-
-@auth_views_bp.route("/agents/", methods=["GET"])
-def agents_page():
-    """
-    Display agent identity management page (RFC-010).
-
-    NOTE the trailing slash: the JSON API owns bare `GET /agents`
-    (auth_bp list endpoint, RFC-010 contract), mirroring how the
-    /api-keys page coexists with the /api-keys/ JSON endpoint.
-
-    Lists the operator's Agent entities (with bound-key counts) and
-    provides the mint form. Identity issuance is operator-gated: this
-    page uses the JWT from localStorage client-side, same as the API-key
-    pages.
-
-    Returns:
-        HTML page for minting and viewing agents
-    """
-    return render_template("agents.html")
-
-
-# ============================================================================
-# Settings Page
-# ============================================================================
-
-
-@auth_views_bp.route("/settings", methods=["GET"])
-def settings_page():
-    """
-    Display user settings page.
-
-    Returns:
-        HTML page with user profile and settings
-
-    Example response:
-        HTML page with user settings
-    """
-    return render_template("settings.html")
-
-
-# ============================================================================
 # Index Page
 # ============================================================================
 
@@ -320,20 +250,12 @@ def settings_page():
 @auth_views_bp.route("/", methods=["GET"])
 def index_page():
     """
-    Redirect to appropriate page based on auth status.
+    Redirect to the operator console (RFC-015 consolidation).
 
-    If user is authenticated (has valid token in localStorage), redirect to /api-keys.
-    Otherwise, redirect to /login.
-
-    Note: This is a simple server-side redirect. The actual auth check happens
-    client-side in JavaScript since tokens are stored in localStorage.
+    Auth is client-side (localStorage JWT): the console shell forwards to
+    /login when no token is present, so a bare redirect covers both cases.
 
     Returns:
-        Redirect to /api-keys or /login
-
-    Example response:
-        HTTP 302 redirect
+        Redirect to /console
     """
-    # For now, redirect to login since we can't check localStorage server-side
-    # The pages themselves handle the auth check client-side
-    return render_template("login.html")
+    return redirect("/console")

@@ -5,99 +5,284 @@
 
 {% block console_content %}
 <h2 class="text-lg font-semibold text-gray-900 mb-1">Keys &amp; agents</h2>
-<p class="text-sm text-gray-600 mb-4">"Identity is issued, never assumed" (RFC-010) — every mutation here is JWT-only, audited, and unreachable by any API key. Minting and binding live on the dedicated pages; this screen is the unified overview.</p>
+<p class="text-sm text-gray-600 mb-4">"Identity is issued, never assumed" (RFC-010) — minting, binding and revocation are all JWT-only, audited, and unreachable by any API key.</p>
 
 <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+    <!-- Agents: mint + list -->
     <section>
         <div class="flex justify-between items-center mb-2">
             <h3 class="text-sm font-semibold text-gray-900">Agents</h3>
-            <a href="/agents/" class="px-3 py-1 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">Mint agent <span class="opacity-75">OP</span></a>
+            <button id="mintAgentBtn" class="px-3 py-1 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">Mint agent <span class="opacity-75">OP</span></button>
         </div>
         <div class="bg-white shadow rounded-lg overflow-x-auto">
             <table class="w-full text-sm">
                 <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
-                    <th class="px-3 py-2">Agent</th><th class="px-3 py-2">Entity</th><th class="px-3 py-2">Descriptive grants</th>
+                    <th class="px-3 py-2">Agent</th><th class="px-3 py-2">Entity</th><th class="px-3 py-2">Description</th><th class="px-3 py-2">Bound keys</th>
                 </tr></thead>
-                <tbody id="agentsBody"><tr><td class="px-3 py-4 text-gray-400" colspan="3">Loading…</td></tr></tbody>
+                <tbody id="agentsBody"><tr><td class="px-3 py-4 text-gray-400" colspan="4">Loading…</td></tr></tbody>
             </table>
         </div>
-        <p class="text-xs text-gray-400 mt-2">agent.data.allowed_scopes is descriptive — enforcement reads the key, never the entity.</p>
+        <div id="mintAgentForm" class="hidden bg-white shadow rounded-lg p-3 mt-2 space-y-2">
+            <input id="agentLabel" maxlength="100" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm" placeholder="Label (required, e.g. sessions-daemon)">
+            <input id="agentDesc" maxlength="500" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm" placeholder="Description (optional)">
+            <div class="flex items-center gap-2">
+                <button id="mintAgentGo" class="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm">Create</button>
+                <span id="mintAgentError" class="text-xs text-red-600"></span>
+            </div>
+            <p class="text-xs text-gray-400">agent.data.allowed_scopes is descriptive — enforcement reads the key, never the entity.</p>
+        </div>
     </section>
 
+    <!-- API keys: mint + list + bind/revoke -->
     <section>
         <div class="flex justify-between items-center mb-2">
             <h3 class="text-sm font-semibold text-gray-900">API keys</h3>
-            <a href="/api-keys/new" class="px-3 py-1 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">Mint key <span class="opacity-75">OP</span></a>
+            <button id="mintKeyBtn" class="px-3 py-1 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">Mint key <span class="opacity-75">OP</span></button>
         </div>
         <div id="unboundWarning" class="hidden alert mb-3 bg-red-50 text-red-700 border border-red-300 text-sm"></div>
         <div class="bg-white shadow rounded-lg overflow-x-auto">
             <table class="w-full text-sm">
                 <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
-                    <th class="px-3 py-2">Key</th><th class="px-3 py-2">Bound to</th><th class="px-3 py-2">Grants</th><th class="px-3 py-2">Last used</th>
+                    <th class="px-3 py-2">Key</th><th class="px-3 py-2">Bound to</th><th class="px-3 py-2">Grants</th><th class="px-3 py-2">Last used</th><th class="px-3 py-2"></th>
                 </tr></thead>
-                <tbody id="keysBody"><tr><td class="px-3 py-4 text-gray-400" colspan="4">Loading…</td></tr></tbody>
+                <tbody id="keysBody"><tr><td class="px-3 py-4 text-gray-400" colspan="5">Loading…</td></tr></tbody>
             </table>
         </div>
-        <p class="text-xs text-gray-400 mt-2">Unbound keys act in the username frame — attribution collapses to actor_type=api_key. Bind or retire. Full actions (bind / revoke / re-bind) on <a class="underline" href="/api-keys">/api-keys</a>.</p>
+        <div id="mintKeyForm" class="hidden bg-white shadow rounded-lg p-3 mt-2 space-y-2">
+            <input id="keyName" maxlength="100" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm" placeholder="Key name (required, e.g. sessions-daemon)">
+            <div class="flex gap-2">
+                <input id="keyExpires" type="datetime-local" class="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-sm" title="Expiration (optional)">
+                <select id="keyAgent" class="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                    <option value="">No agent — attributes to your username</option>
+                </select>
+            </div>
+            <div class="flex items-center gap-2">
+                <button id="mintKeyGo" class="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm">Create</button>
+                <span id="mintKeyError" class="text-xs text-red-600"></span>
+            </div>
+            <p class="text-xs text-gray-400">Full key is shown once after minting — copy it before closing.</p>
+        </div>
     </section>
+</div>
+
+<!-- One-time key reveal modal (absorbed from the retired /api-keys/new page) -->
+<div id="revealModal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center px-4">
+    <div class="bg-white rounded-lg p-6 max-w-lg w-full shadow-xl">
+        <h3 class="text-lg font-bold text-gray-900 mb-1">Key minted</h3>
+        <p class="text-sm text-gray-600 mb-4">Copy this key now — it is never shown again.</p>
+        <div class="flex gap-2 mb-2">
+            <input id="revealKey" readonly class="input-field font-mono text-sm bg-gray-50">
+            <button id="revealCopy" class="btn-primary w-auto px-4 whitespace-nowrap text-sm">Copy</button>
+        </div>
+        <p id="revealCopied" class="hidden text-xs text-green-600 mb-2">Copied to clipboard.</p>
+        <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-4">
+            <p class="text-xs text-yellow-800"><strong>Store it securely</strong> — treat it like a password; anyone holding it acts with its grants.</p>
+        </div>
+        <button id="revealDone" class="btn-primary w-full">I've saved my key</button>
+    </div>
 </div>
 {% endblock %}
 
 {% block console_scripts %}
 <script>
 (async function init() {
+    let OV = null;          // scopes overview (grants join), from the chrome event
+    let agentList = [];     // refreshed by loadIdentity()
+
+    const el = (id) => document.getElementById(id);
+
     document.addEventListener('console:overview', async function(evt) {
-        const overview = evt.detail;
+        OV = evt.detail;
+        await loadIdentity();
+    }, { once: true });
+
+    async function loadIdentity() {
         try {
             const [agents, keys] = await Promise.all([
                 api('/agents'),
                 api('/api-keys/'),
             ]);
-            const agentList = Array.isArray(agents) ? agents : (agents.agents || []);
+            agentList = Array.isArray(agents) ? agents : (agents.agents || []);
             const keyList = Array.isArray(keys) ? keys : (keys.keys || keys.api_keys || []);
-
-            document.getElementById('agentsBody').innerHTML = agentList.length
-                ? agentList.map(a => `<tr class="border-b border-gray-100">
-                    <td class="px-3 py-2"><b>${esc(a.label || a.name || '')}</b></td>
-                    <td class="px-3 py-2 text-xs text-gray-500">${esc(a.agent_id || a.uuid || '')}</td>
-                    <td class="px-3 py-2 text-xs">${esc(((a.data || {}).allowed_scopes || []).join(', ') || '—')}</td>
-                  </tr>`).join('')
-                : '<tr><td class="px-3 py-4 text-gray-400" colspan="3">No agents minted yet.</td></tr>';
-
-            const unbound = [];
-        document.getElementById('keysBody').innerHTML = keyList.filter(k => !k.revoked_at).map(k => {
-            const agentId = k.agent_entity_id || k.agent_id;
-            const bound = agentId ? (agentId.startsWith('core_') ? agentId.slice(0, 13) + '…' : agentId) : null;
-            if (!bound) unbound.push(k.name);
-            let grantsText = '—';
-            if (overview) {
-                const entry = (overview.grants || []).find(g => g.key_id.endsWith(k.id) || k.id.endsWith(g.key_id));
-                if (entry && entry.grants.length) {
-                    grantsText = entry.grants.map(g => {
-                        const scope = overview.scopes.find(s => s.uuid.endsWith(g.scope_uuid) || g.scope_uuid.endsWith(s.uuid));
-                        return scope ? (scope.data ? scope.data.label : scope.label) : g.scope_uuid.slice(0, 8);
-                    }).join(', ');
-                } else if (entry) {
-                    grantsText = 'none';
-                }
-            }
-            return `<tr class="border-b border-gray-100">
-                <td class="px-3 py-2"><b>${esc(k.name)}</b><div class="text-xs text-gray-400">${esc(k.key_prefix || '')}</div></td>
-                <td class="px-3 py-2 ${bound ? '' : 'text-red-600'}">${esc(bound || 'unbound')}</td>
-                <td class="px-3 py-2 text-xs">${esc(grantsText)}</td>
-                <td class="px-3 py-2 text-xs">${fmtTime(k.last_seen)}</td>
-              </tr>`;
-        }).join('') || '<tr><td class="px-3 py-4 text-gray-400" colspan="4">No keys minted yet.</td></tr>';
-
-            if (unbound.length) {
-                const warn = document.getElementById('unboundWarning');
-                warn.textContent = 'Unbound keys: ' + unbound.join(', ') + ' — attribution collapses to actor_type=api_key. Bind or retire.';
-                warn.classList.remove('hidden');
-            }
+            renderAgents(agentList);
+            renderKeys(keyList.filter(k => !k.revoked_at));
         } catch (error) {
-            showError('Failed to load identity overview: ' + error.message);
+            showError('Failed to load identity data: ' + error.message);
         }
-    }, { once: true });
+    }
+
+    function renderAgents(agents) {
+        el('agentsBody').innerHTML = agents.length
+            ? agents.map(a => `<tr class="border-b border-gray-100">
+                <td class="px-3 py-2"><b>${esc(a.label || a.name || '')}</b></td>
+                <td class="px-3 py-2 text-xs text-gray-500" title="${esc(a.agent_id || a.uuid || '')}">${shortUuid(a.agent_id || a.uuid)}</td>
+                <td class="px-3 py-2 text-xs text-gray-500">${esc(a.description || '—')}</td>
+                <td class="px-3 py-2 text-xs">${(a.bound_key_count || 0)}${(a.key_prefixes || []).length
+                    ? ` <span class="text-gray-400">${esc(a.key_prefixes.join(', '))}</span>` : ''}</td>
+              </tr>`).join('')
+            : '<tr><td class="px-3 py-4 text-gray-400" colspan="4">No agents minted yet — use “Mint agent”.</td></tr>';
+    }
+
+    function grantsFor(key) {
+        if (!OV) return '…';
+        const entry = (OV.grants || []).find(g => g.key_id.endsWith(key.id) || key.id.endsWith(g.key_id));
+        if (!entry) return '—';
+        if (!(entry.grants || []).length) return 'none';
+        return entry.grants.map(g => {
+            const scope = (OV.scopes || []).find(s => s.uuid.endsWith(g.scope_uuid) || g.scope_uuid.endsWith(s.uuid));
+            return scope ? scopeLabel(scope) : g.scope_uuid.slice(0, 8);
+        }).join(', ');
+    }
+
+    function scopeLabel(s) { return (s.data ? s.data.label : s.label) || s.uuid; }
+
+    function renderKeys(keys) {
+        const unbound = keys.filter(k => !(k.agent_entity_id || k.agent_id)).map(k => k.name);
+        const warn = el('unboundWarning');
+        if (unbound.length) {
+            warn.textContent = 'Unbound keys: ' + unbound.join(', ') + ' — attribution collapses to actor_type=api_key. Bind or retire.';
+            warn.classList.remove('hidden');
+        } else {
+            warn.classList.add('hidden');
+        }
+
+        el('keysBody').innerHTML = keys.length
+            ? keys.map(k => {
+                const agentId = k.agent_entity_id || k.agent_id;
+                const bindControl = agentList.length
+                    ? `<div class="flex items-center gap-1">
+                        <select id="bindSelect-${esc(k.id)}" class="border border-gray-300 rounded px-1.5 py-1 text-xs max-w-28">
+                            <option value="">${agentId ? 'Unbind agent' : 'Bind to agent…'}</option>
+                            ${agentList.map(a => `<option value="${esc(a.agent_id)}" ${a.agent_id === agentId ? 'selected' : ''}>${esc(a.label)}</option>`).join('')}
+                        </select>
+                        <button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" data-bind-key="${esc(k.id)}">Apply</button>
+                    </div>`
+                    : '<span class="text-xs text-gray-400">mint an agent first</span>';
+                return `<tr class="border-b border-gray-100">
+                    <td class="px-3 py-2"><b>${esc(k.name)}</b><div class="text-xs text-gray-400">${esc(k.key_prefix || '')}</div></td>
+                    <td class="px-3 py-2 text-xs">${bindControl}</td>
+                    <td class="px-3 py-2 text-xs">${esc(grantsFor(k))}</td>
+                    <td class="px-3 py-2 text-xs">${fmtTime(k.last_seen)}</td>
+                    <td class="px-3 py-2 text-right">
+                        <button class="px-2 py-1 text-xs border border-red-200 text-red-600 rounded hover:bg-red-50" data-revoke-key="${esc(k.id)}">Revoke</button>
+                    </td>
+                  </tr>`;
+            }).join('')
+            : '<tr><td class="px-3 py-4 text-gray-400" colspan="5">No keys minted yet — use “Mint key”.</td></tr>';
+
+        // Action handlers live on data-* attributes carrying only uuids —
+        // free-text values (key names, labels) never enter attribute or JS
+        // string position (the e26f5e0 rule). The revoke confirm reads the
+        // name back from the row's DOM.
+        el('keysBody').querySelectorAll('[data-bind-key]').forEach(btn =>
+            btn.addEventListener('click', () => applyBinding(btn.dataset.bindKey)));
+        el('keysBody').querySelectorAll('[data-revoke-key]').forEach(btn =>
+            btn.addEventListener('click', () => revokeKey(btn.dataset.revokeKey,
+                btn.closest('tr').querySelector('td b').textContent)));
+    }
+
+    async function applyBinding(keyId) {
+        const select = el('bindSelect-' + keyId);
+        try {
+            await api('/api-keys/' + encodeURIComponent(keyId), {
+                method: 'PATCH',
+                body: { agent_id: select && select.value ? select.value : null },
+            });
+            await loadIdentity();
+        } catch (error) {
+            showError('Bind failed: ' + error.message);
+        }
+    }
+
+    async function revokeKey(keyId, keyName) {
+        if (!confirm('Revoke key "' + keyName + '"? This cannot be undone.')) return;
+        try {
+            await api('/api-keys/' + encodeURIComponent(keyId), { method: 'DELETE' });
+            await loadIdentity();
+        } catch (error) {
+            showError('Revoke failed: ' + error.message);
+        }
+    }
+
+    // ---- Mint agents ----
+    el('mintAgentBtn').addEventListener('click', () => el('mintAgentForm').classList.toggle('hidden'));
+    el('mintAgentGo').addEventListener('click', async function() {
+        const label = el('agentLabel').value.trim();
+        el('mintAgentError').textContent = '';
+        if (!label) {
+            el('mintAgentError').textContent = 'Label is required.';
+            return;
+        }
+        const body = { label: label };
+        const desc = el('agentDesc').value.trim();
+        if (desc) body.description = desc;
+        try {
+            await api('/agents', { method: 'POST', body: body });
+            el('agentLabel').value = '';
+            el('agentDesc').value = '';
+            el('mintAgentForm').classList.add('hidden');
+            await loadIdentity();
+        } catch (error) {
+            el('mintAgentError').textContent = error.message;
+        }
+    });
+
+    // ---- Mint keys ----
+    el('mintKeyBtn').addEventListener('click', function() {
+        el('mintKeyForm').classList.toggle('hidden');
+        if (!el('mintKeyForm').classList.contains('hidden')) fillAgentOptions();
+    });
+
+    function fillAgentOptions() {
+        const select = el('keyAgent');
+        const current = select.value;
+        select.innerHTML = '<option value="">No agent — attributes to your username</option>'
+            + agentList.map(a => `<option value="${esc(a.agent_id)}">${esc(a.label)}</option>`).join('');
+        select.value = current;
+    }
+
+    el('mintKeyGo').addEventListener('click', async function() {
+        const name = el('keyName').value.trim();
+        el('mintKeyError').textContent = '';
+        if (!name) {
+            el('mintKeyError').textContent = 'Name is required.';
+            return;
+        }
+        const body = { name: name };
+        const expiresRaw = el('keyExpires').value;
+        if (expiresRaw) body.expires_at = new Date(expiresRaw).toISOString();
+        const agentId = el('keyAgent').value;
+        if (agentId) body.agent_id = agentId;
+        try {
+            const result = await api('/api-keys/', { method: 'POST', body: body });
+            el('keyName').value = '';
+            el('keyExpires').value = '';
+            el('keyAgent').value = '';
+            el('mintKeyForm').classList.add('hidden');
+            el('revealKey').value = result.key;
+            el('revealCopied').classList.add('hidden');
+            el('revealModal').classList.remove('hidden');
+            await loadIdentity();
+        } catch (error) {
+            el('mintKeyError').textContent = error.message;
+        }
+    });
+
+    // ---- One-time reveal modal ----
+    el('revealCopy').addEventListener('click', async function() {
+        const value = el('revealKey').value;
+        try {
+            await navigator.clipboard.writeText(value);
+        } catch (error) {
+            el('revealKey').select();
+            document.execCommand('copy');
+        }
+        el('revealCopied').classList.remove('hidden');
+    });
+    el('revealDone').addEventListener('click', function() {
+        el('revealKey').value = '';
+        el('revealModal').classList.add('hidden');
+    });
 })();
 </script>
 {% endblock %}
