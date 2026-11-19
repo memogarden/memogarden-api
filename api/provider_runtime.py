@@ -664,14 +664,17 @@ def _make_scope_resolver():
     """Resolve a policy scope reference to a plain scope uuid, cached per run.
 
     A reference is a core_-prefixed uuid, a bare uuid, a builtin alias
-    ("triage"/"private" — mapped to the builtin labels), or a Scope label.
+    ("triage"/"personal" — mapped to the builtin labels), or a Scope label.
     Unknown references resolve to None — the item is left unscoped and the
     miss is logged (visible failure beats silent mislabeling).
     """
     cache: dict = {}
     # Builtin aliases (§4.1): the runtime's policies address the builtin
     # scopes by short name; ensure_builtin_scopes seeds them under labels.
-    BUILTIN_ALIASES = {"triage": "Triage / Untrusted", "private": "Private"}
+    # "Personal" (renamed from "Private", 2026-11-19) — clean break, no
+    # legacy alias: policies still naming "private" fail loudly at
+    # resolution instead of silently relabeling.
+    BUILTIN_ALIASES = {"triage": "Triage / Untrusted", "personal": "Personal"}
 
     def resolve(ref):
         if ref in cache:

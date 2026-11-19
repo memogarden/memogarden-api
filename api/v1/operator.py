@@ -44,14 +44,15 @@ _ENTITY_SCOPES_SQL = """
 
 
 # Builtin aliases (RFC-011 §4.1) — same mapping as the runtime's
-# policy resolver (provider_runtime._make_scope_resolver).
-_BUILTIN_ALIASES = {"triage": "Triage / Untrusted", "private": "Private"}
+# policy resolver (provider_runtime._make_scope_resolver). "Personal"
+# (renamed from "Private", 2026-11-19) — clean break, no legacy alias.
+_BUILTIN_ALIASES = {"triage": "Triage / Untrusted", "personal": "Personal"}
 
 
 def _resolve_scope(scope_ref: str) -> dict:
     """Resolve a scope by uuid, builtin alias, or label to its entity row.
 
-    Accepts: plain/prefixed uuid, builtin alias ('triage', 'private'), or
+    Accepts: plain/prefixed uuid, builtin alias ('triage', 'personal'), or
     the scope's label ('Triage / Untrusted'). Raises ValidationError if
     nothing matches — the builtin scopes are seeded at startup, so a
     missing triage scope means a broken deployment, not an empty queue.
