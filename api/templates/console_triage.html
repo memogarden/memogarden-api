@@ -22,6 +22,10 @@
     <button id="applyRelabel" class="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">
         Apply relabel <span class="text-xs opacity-75">OP</span>
     </button>
+    <button id="makePublicBulk" class="px-3 py-1.5 border border-amber-300 text-amber-700 rounded-lg text-sm hover:bg-amber-50"
+        title="remove all scopes from the selection — items become unscoped (globally visible)">
+        → Public <span class="text-xs opacity-75">OP</span>
+    </button>
     <span class="text-xs text-gray-400">agents may sort with grants on triage + target — under enforcement</span>
 </div>
 
@@ -100,6 +104,7 @@ function renderTriage() {
                     ${OVERVIEW.scopes.filter(s => (s.data ? s.data.label : s.label) !== 'Triage / Untrusted').map(s =>
                         `<button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="relabel('${esc(f.uuid)}','fact',['${esc(s.uuid)}'])">→ ${esc(s.label)}</button>`
                     ).join('')}
+                    <button class="px-2 py-1 text-xs border border-amber-300 text-amber-700 rounded hover:bg-amber-50" title="remove all scopes — the item becomes unscoped (globally visible to any principal)" onclick="makePublic('${esc(f.uuid)}','fact')">→ Public</button>
                     <button class="px-2 py-1 text-xs border border-gray-200 rounded text-gray-400" title="defer visually — the item stays in triage and returns on reload" onclick="dismissRow('${esc(f.uuid)}')">keep</button>
                 </div>
             </div>`;
@@ -124,6 +129,7 @@ function renderTriage() {
                     ${OVERVIEW.scopes.filter(s => (s.data ? s.data.label : s.label) !== 'Triage / Untrusted').map(s =>
                         `<button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="relabel('${esc(e.uuid)}','entity',['${esc(s.uuid)}'])">→ ${esc(s.label)}</button>`
                     ).join('')}
+                    <button class="px-2 py-1 text-xs border border-amber-300 text-amber-700 rounded hover:bg-amber-50" title="remove all scopes — the item becomes unscoped (globally visible to any principal)" onclick="makePublic('${esc(e.uuid)}','entity')">→ Public</button>
                 </div>
             </div>`;
         }).join('');
@@ -170,6 +176,47 @@ function dismissRow(uuid) {
     dismissed.add(uuid);
     renderTriage();
 }
+
+// → Public: remove ALL scopes (facts: metadata.scopes=[], entities:
+// data.scopes=[]) — the item becomes unscoped, i.e. the global space every
+// authenticated principal can see (RFC-011 SG-1). Exposure-widening: under
+// enforcement this requires a grant on triage (D2 symmetric removal gate);
+// the operator is sovereign.
+async function makePublic(targetUuid, kind) {
+    clearError();
+    try {
+        let result;
+        if (kind === 'fact') {
+            const item = TRIAGE.facts.find(f => f.uuid === targetUuid);
+            result = await mg({ op: 'amend', target: targetUuid, data: item.data, metadata: { scopes: [] } });
+        } else {
+            const item = TRIAGE.entities.find(e => e.uuid === targetUuid);
+            result = await mg({ op: 'edit', target: targetUuid, set: Object.assign({}, item.data, { scopes: [] }) });
+        }
+        if (result && result.ok === false) throw new Error(result.error ? result.error.message : 'amend failed');
+        removeFromQueue(targetUuid, kind);
+    } catch (error) {
+        showError('Make public failed: ' + error.message);
+    }
+}
+
+document.getElementById('makePublicBulk').addEventListener('click', async function() {
+    const checked = Array.from(document.querySelectorAll('#factsList input[type="checkbox"]:checked'));
+    if (!checked.length) { showError('Select at least one item'); return; }
+    if (!confirm(`Make ${checked.length} item(s) public? They become visible to every principal (unscoped).`)) return;
+    this.disabled = true;
+    let failures = 0;
+    for (const cb of checked) {
+        try {
+            const item = TRIAGE.facts.find(f => f.uuid === cb.dataset.uuid);
+            const result = await mg({ op: 'amend', target: cb.dataset.uuid, data: item.data, metadata: { scopes: [] } });
+            if (result && result.ok === false) throw new Error('amend failed');
+            removeFromQueue(cb.dataset.uuid, 'fact');
+        } catch (error) { failures += 1; }
+    }
+    this.disabled = false;
+    if (failures) showError(`${failures} of ${checked.length} make-public calls failed — see audit`);
+});
 
 async function relabel(targetUuid, kind, scopeUuids) {
     clearError();
