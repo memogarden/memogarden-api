@@ -165,6 +165,21 @@ def validate_provider_origin(module: str, mod) -> None:
     )
 
 
+def _fresh_import(module: str) -> None:
+    """Drop the module (and its submodules) from the interpreter's cache so
+    the next import re-executes the on-disk source. Used by the capability
+    refresh: provider code evolves while module identity is fixed, and an
+    un-refreshed sys.modules entry would serve the import-time snapshot."""
+    import sys
+
+    for name in [
+        m
+        for m in sys.modules
+        if m == module or m.startswith(module + ".")
+    ]:
+        del sys.modules[name]
+
+
 def validate_provider_class(module: str, class_name: str) -> list[str]:
     """Import the module and check Provider Protocol conformance.
 
@@ -342,7 +357,24 @@ def update_provider(name: str, data: UpdateProviderRequest) -> dict:
     """
     get_provider(name)  # 404 if unknown
 
+    # Capability refresh (tada entity lane, #30/#29): re-derive capabilities
+    # from the module's CURRENT on-disk source. Same Protocol validation
+    # registration ran, so a refresh can never grant a capability the class
+    # no longer declares. A flag, not a column — handled before the generic
+    # field loop.
+    if data.refresh_capabilities:
+        manifest = get_provider(name)
+        _fresh_import(manifest["module"])
+        capabilities = validate_provider_class(manifest["module"], manifest["class"])
+        core = get_core()
+        core._conn.execute(
+            "UPDATE providers SET capabilities = ? WHERE name = ?",
+            (json.dumps(capabilities), name),
+        )
+        core._conn.commit()
+
     fields = data.model_dump(exclude_unset=True)
+    fields.pop("refresh_capabilities", None)  # a flag, not a column
     if fields:
         assignments, params = [], []
         for key, value in fields.items():
