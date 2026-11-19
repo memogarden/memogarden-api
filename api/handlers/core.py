@@ -290,6 +290,25 @@ def handle_edit(request: EditRequest, actor: str) -> dict:
                 f"Semantic API (RFC-010 identity protection)"
             )
 
+        # RFC-011 D1 extended (RFC-015 review finding): a Scope's label IS
+        # the boundary vocabulary — editing it is shape-governing, the same
+        # authority minting requires. Unconditional, like the minting gate.
+        # RFC-011 D1 extended (RFC-015 review finding): a Scope's label IS
+        # the boundary vocabulary — editing it is shape-governing, the same
+        # authority minting requires. Unconditional, like the minting gate.
+        # Lookup BOTH stored forms: management-endpoint rows (agents/keys)
+        # carry prefixed uuids, core.entity.create rows (scopes) are plain.
+        identity_row = core._conn.execute(
+            "SELECT type FROM entity WHERE uuid IN (?, ?)",
+            (canonical, entity_id),
+        ).fetchone()
+        if identity_row and identity_row["type"] == "Scope" and not requester_has_all_scopes():
+            raise PermissionDenied(
+                "Scope entities are operator-governed — mint, edit, and forget "
+                "all require an operator session (RFC-011 D1)",
+                {"scope": canonical, "code": "scope_governance_denied"},
+            )
+
         # Get current entity state (Core API returns dict with parsed JSON data)
         current = core.entity.get_by_id(entity_id)
 
@@ -359,6 +378,20 @@ def handle_forget(request: ForgetRequest, actor: str) -> dict:
             raise PermissionDenied(
                 f"Entity type '{identity_row['type']}' cannot be forgotten "
                 f"(RFC-010 identity protection)"
+            )
+
+        # RFC-011 D1 extended (RFC-015 review finding): deleting a scope is
+        # boundary-shaping — same operator-gated authority as minting.
+        # Both stored forms, as in handle_edit (scopes are stored plain).
+        identity_row = core._conn.execute(
+            "SELECT type FROM entity WHERE uuid IN (?, ?)",
+            (canonical, entity_id),
+        ).fetchone()
+        if identity_row and identity_row["type"] == "Scope" and not requester_has_all_scopes():
+            raise PermissionDenied(
+                "Scope entities are operator-governed — mint, edit, and forget "
+                "all require an operator session (RFC-011 D1)",
+                {"scope": canonical, "code": "scope_governance_denied"},
             )
 
         # Verify entity exists
