@@ -68,16 +68,15 @@ def _make_event(core, title: str, starts: str, ends: str | None,
     uuid = core.entity.create(entity_type="Event", data=data)
     core._conn.commit()
     if occurred_at:
-        # Mirror the crash-free mark-occurred state: occurrence fact present.
+        # Mirror the crash-free mark-occurred state: the Event fact is present.
         with get_soil() as soil:
             soil.create_fact(Fact(
                 uuid=generate_soil_uuid(),
-                _type="EventOccurrence",
+                _type="Event",
                 realized_at=isodatetime.now(),
                 canonical_at=occurred_at,
-                data={"event_uuid": "core_" + uuid, "occurred_at": occurred_at,
-                      "snapshot": {}},
-                metadata=None,
+                data={"event_uuid": "core_" + uuid, "kind": "event"},
+                metadata={"status": "occurred", "resolved_at": occurred_at},
                 integrity_hash=None,
                 fidelity="full",
             ))

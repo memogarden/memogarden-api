@@ -3,12 +3,15 @@
 The belief-revision action: marks a Core Event entity as occurred. This
 is the ONLY path from schedule (Core, mutable belief) to memory (Soil,
 immutable fact) — never automatic, never on date passage (RFC-014 D1/D3).
+Since the 2026-11-19 convergence (#31), the memory it creates IS the
+universal Event fact (the same type the tada lane lands; the legacy
+EventOccurrence type is retired — zero instances existed at convergence).
 
 Authz (RFC-014 §6.2): operator JWT or agent-bound API key. Unbound API
 keys are refused (they share the owning username's frame — not separate
 principals, RFC-010), keeping the fact stream's attribution honest.
 Every marking writes an Action fact (actor per RFC-010 attribution)
-alongside the EventOccurrence fact.
+alongside the Event fact.
 
 Cross-DB ordering follows the provider seam (RFC-014 §3.2): Core commits
 before Soil — a crash between them can lose the occurrence fact (the
@@ -16,7 +19,6 @@ repair path recreates it from the entity's stored stamp on the next mark
 call) but can never leave a fact whose entity update did not commit.
 """
 
-import copy
 import json
 import logging
 import threading
@@ -49,17 +51,25 @@ _MARK_TOLERANCE = timedelta(minutes=5)
 # Double-submit serialization for mark-occurred (see _mark_locked).
 _MARK_LOCK = threading.Lock()
 
-# Event entity fields captured in the occurrence snapshot (immutable
-# memory of the schedule as believed at marking time, RFC-014 §6.3).
-_SNAPSHOT_FIELDS = (
+# Event entity fields projected FLAT into the Event fact (the 2026-11-19
+# convergence: no snapshot nest — the occurrence memory is an authored
+# Event record, schemas/event.yaml FACT section). The entity's belief
+# status (confirmed/tentative) deliberately stays on the entity: the
+# fact's verdict is metadata.status ("occurred"), not the schedule belief.
+_FLAT_FIELDS = (
     "title",
     "starts_at",
     "ends_at",
     "location",
     "participants",
     "organizer",
-    "status",
 )
+
+_SCHEMA_FIELD_NAMES = {"starts_at": "start_at"}  # belief->record renames
+
+
+def _to_schema_field(field: str) -> str:
+    return _SCHEMA_FIELD_NAMES.get(field, field)
 
 
 def _parse_occurred_at(raw: str | None) -> str:
@@ -109,14 +119,15 @@ def _load_event(core, event_uuid: str) -> dict:
 
 
 def _existing_occurrence(soil, plain_uuid: str) -> dict | None:
-    """Idempotency probe: the EventOccurrence fact for this event, if any.
+    """Idempotency probe: the Event fact for this event, if any (#31 — the
+    convergence retired the EventOccurrence type; zero instances existed).
 
     Private-connection access mirrors the tada provider / RFC-008 checker
     precedent; Soil has no public content query yet.
     """
     row = soil._get_connection().execute(
         """SELECT * FROM item
-           WHERE _type = 'EventOccurrence'
+           WHERE _type = 'Event'
              AND superseded_by IS NULL
              AND json_extract(data, '$.event_uuid') IN (?, ?)
            LIMIT 1""",
@@ -144,12 +155,12 @@ def mark_occurred(event_uuid: str, data: MarkOccurredRequest):
     unbound API keys are refused with 403.
 
     Idempotent: marking an already-marked event returns the existing
-    EventOccurrence fact (200, no new facts, no duplicate Action). If the
+    Event fact (200, no new facts, no duplicate Action). If the
     entity is marked but its fact is missing (crash between the Core and
     Soil commits), the facts are repaired from the entity's stored stamp.
 
     Returns:
-        201: First marking — the EventOccurrence + Action facts created.
+        201: First marking — the Event + Action facts created.
         200: Idempotent re-mark or repair — the existing occurrence.
 
     Raises:
@@ -173,7 +184,7 @@ def mark_occurred(event_uuid: str, data: MarkOccurredRequest):
     # probe → core update → fact write. Covers the realistic double-submit
     # case (review UI); a cross-worker residual race remains and is
     # documented — the airtight fix is a partial unique index on
-    # EventOccurrence.event_uuid (schema-version bump, deferred; the
+    # Event.data.event_uuid (schema-version bump, deferred; the
     # runtime upsert path shares this posture).
     with _MARK_LOCK:
         return _mark_locked(plain, occurred_at, now)
@@ -201,13 +212,6 @@ def _mark_locked(plain: str, occurred_at: str, now: str):
             repaired = True
             occurred_at = entity_data["occurred_at"]
 
-        # Deepcopy: the snapshot must not share mutable structure with the
-        # dict handed to update_data (review P2).
-        snapshot = {
-            field: copy.deepcopy(entity_data.get(field))
-            for field in _SNAPSHOT_FIELDS
-        }
-
         if not repaired:
             core.entity.update_data(
                 plain, {**entity_data, "occurred_at": occurred_at}
@@ -230,24 +234,31 @@ def _mark_locked(plain: str, occurred_at: str, now: str):
                     "event_uuid": uid.add_core_prefix(plain),
                     "occurrence": _occurrence_view(duplicate),
                 }), 200
+            # Flat Event fact (#31): the belief fields project directly
+            # (starts_at -> start_at rename per the unified schema); the
+            # verdict is metadata.status ("occurred" — source vocabulary).
+            flat_data = {
+                "event_uuid": uid.add_core_prefix(plain),
+                "source_id": entity_data.get("source_id"),
+                "kind": "event",
+            }
+            flat_data.update({
+                _to_schema_field(f): entity_data.get(f)
+                for f in _FLAT_FIELDS
+            })
             soil.create_fact(
                 Fact(
                     uuid=occurrence_uuid,
-                    _type="EventOccurrence",
+                    _type="Event",
                     realized_at=now,
                     canonical_at=occurred_at,
-                    data={
-                        # core_-prefixed per the entitydelta/action schema
-                        # convention for entity references.
-                        "event_uuid": uid.add_core_prefix(plain),
-                        "occurred_at": occurred_at,
-                        "snapshot": snapshot,
-                    },
+                    data=flat_data,
                     metadata={
                         "source": entity_data.get("source"),
+                        "status": "occurred",
+                        "resolved_at": occurred_at,
                         "account": entity_data.get("account"),
                         "calendar_id": entity_data.get("calendar_id"),
-                        "source_id": entity_data.get("source_id"),
                     },
                     integrity_hash=None,  # computed by create_fact
                     fidelity="full",
@@ -301,7 +312,7 @@ def pending_review():
     An Event is a belief; only review creates memory (RFC-014 D3). This
     read backs the console's review queue: events whose scheduled end has
     passed within the review window, `occurred_at` still null, and no
-    EventOccurrence fact yet. Date-only events (all-day) compare
+    Event fact yet. Date-only events (all-day) compare
     lexicographically against the ISO cutoff — a past `YYYY-MM-DD` sorts
     before any full ISO timestamp of today, a future one sorts after it.
 
@@ -359,8 +370,8 @@ def pending_review():
         [*params, limit],
     ).fetchall()
 
-    # Exclude events that already have an occurrence fact (idempotency
-    # probe pattern from mark_occurred — occurrence data stores the
+    # Exclude events that already have an Event fact (the idempotency
+    # probe pattern from mark_occurred — the fact's data carries the
     # core_-prefixed event uuid).
     candidates = {row["uuid"]: row for row in rows}
     marked = set()
@@ -373,7 +384,7 @@ def pending_review():
                 for r in sconn.execute(
                     f"""SELECT DISTINCT json_extract(data, '$.event_uuid') AS ev
                         FROM item
-                        WHERE _type = 'EventOccurrence' AND superseded_by IS NULL
+                        WHERE _type = 'Event' AND superseded_by IS NULL
                           AND json_extract(data, '$.event_uuid') IN ({placeholders})""",
                     [uid.add_core_prefix(u) for u in candidates],
                 ).fetchall()
