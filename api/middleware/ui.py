@@ -36,7 +36,7 @@ ADMIN_REGISTER_HTML = """
 <html>
 <head>
     <title>MemoGarden Setup</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/static/console.css">
 </head>
 <body class="bg-gray-50 min-h-screen flex items-center justify-center px-4">
     <div class="bg-white shadow-md rounded-lg p-8 max-w-md w-full">

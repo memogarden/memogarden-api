@@ -268,7 +268,10 @@ document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', f
 async function loadRelabelLog() {
     try {
         const result = await mg({ op: 'query', target_type: 'fact', type: 'Action', filters: { operation: 'amend' }, limit: 30 });
-        const actions = (result && result.ok !== false && result.results ? result.results : (result.facts || result.results || []))
+        // mg() returns the /mg envelope {ok, result, ...} — the query rows
+        // live at envelope.result.results (RFC-005 envelope, §/mg).
+        const payload = (result && result.result) ? result.result : (result || {});
+        const actions = ((payload.results || payload.facts || []))
             .filter(a => (a.data || {}).operation === 'amend')
             .slice(0, 8);
         document.getElementById('relabelLog').innerHTML = actions.length

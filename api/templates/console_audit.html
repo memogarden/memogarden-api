@@ -62,7 +62,10 @@ async function loadAudit() {
             filters: filters, limit: 200,
         });
         if (result && result.ok === false) throw new Error(result.error ? result.error.message : 'query failed');
-        const items = result.results || result.facts || [];
+        // mg() returns the /mg envelope {ok, result, ...} — the query rows
+        // live at envelope.result.results (RFC-005 envelope, §/mg).
+        const payload = (result && result.result) ? result.result : (result || {});
+        const items = payload.results || payload.facts || [];
         const body = items.map(item => {
             const d = item.data || {};
             const who = esc(String(d.actor || '—'));
