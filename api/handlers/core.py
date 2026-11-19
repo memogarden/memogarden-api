@@ -28,7 +28,9 @@ from ..middleware.scope_access import (
     active_scope_for,
     enforcement_enabled,
     filter_visible,
+    item_visible,
     normalize_scopes,
+    public_scope_uuids,
     require_scope_grant,
     requester_has_all_scopes,
 )
@@ -252,6 +254,21 @@ def handle_get(request: GetRequest, actor: str) -> dict:
     """
     with get_core() as core:
         entity = core.entity.get_by_id(request.target)
+
+        # RFC-011 §4.9(2): entity reads enforce §4.5 like fact reads.
+        # READ semantics — public-visibility labels relax this gate
+        # (most permissive wins); writes elsewhere stay frame-gated.
+        if enforcement_enabled() and not requester_has_all_scopes():
+            entity_scopes = (entity.get("data") or {}).get("scopes") or []
+            if not item_visible(
+                entity_scopes, active_scope_for(actor), public_scope_uuids()
+            ):
+                raise PermissionDenied(
+                    "Entity is in a scope you are not inside",
+                    {"target": request.target, "item_scopes": entity_scopes,
+                     "code": "scope_read_denied"},
+                )
+
         return _add_core_prefix(entity)
 
 
@@ -315,6 +332,18 @@ def handle_edit(request: EditRequest, actor: str) -> dict:
         # Data is already a dict (parsed by Core API)
         current_data = current.get("data") or {}
 
+        # RFC-011 §4.9(2): entity WRITES enforce like fact writes (the
+        # amend precedent) — strict frame gate, no public-visibility
+        # short-circuit: visibility relaxes reads only.
+        old_labels = set(current_data.get("scopes") or [])
+        if enforcement_enabled() and not requester_has_all_scopes():
+            if not item_visible(sorted(old_labels), active_scope_for(actor)):
+                raise PermissionDenied(
+                    "Entity is in a scope you are not inside",
+                    {"target": request.target, "item_scopes": sorted(old_labels),
+                     "code": "scope_write_denied"},
+                )
+
         # Apply set operations
         if request.set:
             # RFC-011: entity scope labels live in data.scopes as plain
@@ -325,6 +354,18 @@ def handle_edit(request: EditRequest, actor: str) -> dict:
             if "scopes" in request.set:
                 request.set["scopes"] = normalize_scopes(request.set["scopes"] or [])
             current_data.update(request.set)
+
+        # RFC-011 v1.2 (D2) for entities: symmetric label grants on the
+        # edit's relabel channel — a label added OR removed requires the
+        # grant on that scope, removal being the exposure-widening
+        # direction. Ungated previously (the decorated-not-protected gap).
+        if enforcement_enabled() and not requester_has_all_scopes():
+            if request.unset and "scopes" in request.unset:
+                new_labels: set = set()
+            else:
+                new_labels = set(current_data.get("scopes") or [])
+            for changed in old_labels.symmetric_difference(new_labels):
+                require_scope_grant(changed)
 
         # Apply unset operations
         if request.unset:
@@ -394,8 +435,18 @@ def handle_forget(request: ForgetRequest, actor: str) -> dict:
                 {"scope": canonical, "code": "scope_governance_denied"},
             )
 
-        # Verify entity exists
-        core.entity.get_by_id(entity_id)
+        # Verify entity exists (+ RFC-011 §4.9(2) write gate: forgetting a
+        # scoped entity is a write on it — strict frame gate, edit/amend
+        # precedent; no public-visibility short-circuit on writes)
+        current = core.entity.get_by_id(entity_id)
+        if enforcement_enabled() and not requester_has_all_scopes():
+            forget_scopes = (current.get("data") or {}).get("scopes") or []
+            if not item_visible(forget_scopes, active_scope_for(actor)):
+                raise PermissionDenied(
+                    "Entity is in a scope you are not inside",
+                    {"target": request.target, "item_scopes": forget_scopes,
+                     "code": "scope_write_denied"},
+                )
 
         # Create tombstone entity
         tombstone_id = core.entity.create(entity_type="Tombstone")
@@ -461,6 +512,15 @@ def handle_query(request: QueryRequest, actor: str) -> dict:
 
         # Convert rows to response format (already dicts with parsed JSON)
         results = [_add_core_prefix(entity) for entity in rows]
+
+        # RFC-011 §4.9(2): query results are visibility-filtered (SG-10),
+        # mirroring the fact query handler: WHERE-level data filters run
+        # before pagination; the visible-set exclusion runs after fetch —
+        # `total` reflects the fetched set, `count` reflects what is
+        # actually returned (accepted cardinality posture).
+        results = filter_visible(
+            results, actor, lambda r: (r.get("data") or {}).get("scopes")
+        )
 
         return {
             "results": results,
@@ -754,6 +814,34 @@ def handle_explore(request: ExploreRequest, actor: str) -> dict:
         # BFS traversal
         from collections import deque
 
+        # RFC-011 §4.9(2)/(4): graph reads enforce §4.5. The anchor is a
+        # direct read and gates like one; edges stay fully listed
+        # (containerizing-not-hiding: structure is not concealed), while
+        # nodes the requester cannot read are presented as UNRESOLVED
+        # REFERENCES — stub shape, truthful count — not omitted silently.
+        # Reads honor public-visibility labels; writes elsewhere do not.
+        # Flag-off and sovereign callers resolve every node fully —
+        # advisory byte-identity and SG-11 both depend on that.
+        enforce = enforcement_enabled() and not requester_has_all_scopes()
+        if enforce:
+            active_scope = active_scope_for(actor)
+            public_scopes = public_scope_uuids()
+            anchor_plain = uid.strip_prefix(request.anchor)
+            anchor_labels = []
+            try:
+                anchor_row = core.entity.get_by_id(anchor_plain)
+                anchor_labels = (anchor_row.get("data") or {}).get("scopes") or []
+            except ResourceNotFound:
+                with get_soil() as soil:
+                    anchor_item = soil.get_fact(anchor_plain)
+                if anchor_item is not None:
+                    anchor_labels = (anchor_item.metadata or {}).get("scopes") or []
+            if not item_visible(anchor_labels, active_scope, public_scopes):
+                raise PermissionDenied(
+                    "Anchor is in a scope you are not inside",
+                    {"anchor": request.anchor, "code": "scope_read_denied"},
+                )
+
         # Queue: (current_uuid, distance)
         queue = deque([(uid.strip_prefix(request.anchor), 0)])
 
@@ -832,6 +920,17 @@ def handle_explore(request: ExploreRequest, actor: str) -> dict:
             # Try to get from Core first
             try:
                 entity_row = core.entity.get_by_id(node_uuid)
+                entity_scopes = (entity_row.get("data") or {}).get("scopes") or []
+                if enforce and not item_visible(
+                    entity_scopes, active_scope, public_scopes
+                ):
+                    # §4.9(4): unresolved reference, not silent omission
+                    nodes.append({
+                        "uuid": uid.add_core_prefix(entity_row["uuid"]),
+                        "layer": "core",
+                        "unresolved": True,
+                    })
+                    continue
                 nodes.append({
                     "uuid": uid.add_core_prefix(entity_row["uuid"]),
                     "layer": "core",
@@ -851,11 +950,22 @@ def handle_explore(request: ExploreRequest, actor: str) -> dict:
                 with get_soil() as soil:
                     item = soil.get_fact(node_uuid)
                     if item:
-                        nodes.append({
-                            "uuid": uid.add_soil_prefix(item.uuid),
-                            "layer": "soil",
-                            "type": item._type,
-                        })
+                        item_scopes = (item.metadata or {}).get("scopes") or []
+                        if enforce and not item_visible(
+                            item_scopes, active_scope, public_scopes
+                        ):
+                            # §4.9(4): unresolved reference, not silent omission
+                            nodes.append({
+                                "uuid": uid.add_soil_prefix(item.uuid),
+                                "layer": "soil",
+                                "unresolved": True,
+                            })
+                        else:
+                            nodes.append({
+                                "uuid": uid.add_soil_prefix(item.uuid),
+                                "layer": "soil",
+                                "type": item._type,
+                            })
             except ResourceNotFound:
                 # Fact not found in Soil either - skip
                 pass
@@ -1168,6 +1278,22 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
     """
     from system.soil import get_soil
 
+    # RFC-011 §4.9(3): scope enforcement is PRE-MATCH (RFC-005 v8) — the
+    # system searches exclude scoped items outside the allowed set before
+    # LIKE evaluation, ORDER, and LIMIT, so a scoped hit can never
+    # displace a real match and result counts stay truthful. Allowed set
+    # = the requester's active frame + public-visibility scopes (read
+    # semantics; most permissive wins). The convenience `scope` request
+    # field narrows results further; enforcement is independent of it.
+    if enforcement_enabled() and not requester_has_all_scopes():
+        active = active_scope_for(actor)
+        allowed_scopes = sorted(
+            ({active} if active else set()) | set(public_scope_uuids())
+        )
+    else:
+        allowed_scopes = None
+    scope_uuid = uid.strip_prefix(request.scope) if request.scope else None
+
     # Collect results based on target_type
     results = []
     entity_results = []
@@ -1180,7 +1306,9 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
             entity_rows = core.entity.search(
                 query=request.query,
                 coverage=request.coverage,
-                limit=request.limit
+                limit=request.limit,
+                allowed_scopes=allowed_scopes,
+                scope_uuid=scope_uuid,
             )
 
             # Convert to response format (already dicts with parsed JSON)
@@ -1194,7 +1322,9 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
             item_rows = soil.search_items(
                 query=request.query,
                 coverage=request.coverage,
-                limit=request.limit
+                limit=request.limit,
+                allowed_scopes=allowed_scopes,
+                scope_uuid=scope_uuid,
             )
 
             # Convert to response format
@@ -1225,19 +1355,9 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
     # Session 9: Simple concatenation (entities first, then facts)
     results = entity_results + fact_results
 
-    # RFC-011 §4.9(3): scope filtering BEFORE the response is built —
-    # scoped items outside the requester's active scope never surface as
-    # matches (a hit itself is a leak). The convenience `scope` request
-    # filter is a client-side refinement; enforcement is independent.
-    def _result_scopes(result: dict) -> list | None:
-        return (
-            (result.get("metadata") or {}).get("scopes")
-            or (result.get("data") or {}).get("scopes")
-            if isinstance(result, dict)
-            else None
-        )
-
-    results = filter_visible(results, actor, _result_scopes)
+    # RFC-011 §4.9(3): pre-match filtering happened at the SQL level in
+    # the system searches (above) — scoped items outside the requester's
+    # allowed set never became matches, so no post-fetch exclusion here.
 
     # TODO: Continuation token implementation (RFC-005)
     # Session 9: Deferred - requires encoding offset/limit in base64

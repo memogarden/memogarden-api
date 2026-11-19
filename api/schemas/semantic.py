@@ -419,6 +419,14 @@ class SearchRequest(SemanticRequest):
         default="all",
         description="Target type to search"
     )
+    scope: str | None = Field(
+        default=None,
+        description=(
+            "Convenience refinement ONLY (RFC-005 v8): restrict results to "
+            "one scope (uuid or core_-prefixed). Access enforcement is "
+            "automatic and independent of this field (RFC-011 §4.9(3))."
+        ),
+    )
     coverage: Literal["names", "content", "full"] = Field(
         default="content",
         description="Search coverage level"

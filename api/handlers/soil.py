@@ -34,6 +34,7 @@ from ..middleware.scope_access import (
     filter_visible,
     item_visible,
     normalize_scopes,
+    public_scope_uuids,
     requester_has_all_scopes,
     require_scope_grant,
 )
@@ -385,9 +386,13 @@ def handle_get_fact(request: GetRequest, actor: str) -> dict:
 
         # RFC-011 §4.5 read gate (SG-1/SG-5): scoped items are readable
         # only from inside one of their scopes (operator JWT bypasses).
+        # READ semantics — public-visibility labels relax this gate (most
+        # permissive wins); the amend write gate below stays strict.
         if enforcement_enabled() and not requester_has_all_scopes():
             item_scopes = (item.metadata or {}).get("scopes") or []
-            if not item_visible(item_scopes, active_scope_for(actor)):
+            if not item_visible(
+                item_scopes, active_scope_for(actor), public_scope_uuids()
+            ):
                 raise PermissionDenied(
                     "Item is in a scope you are not inside",
                     {"target": request.target, "item_scopes": item_scopes,

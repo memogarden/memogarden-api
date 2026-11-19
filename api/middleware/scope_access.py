@@ -77,14 +77,49 @@ def require_scope_grant(scope_uuid: str) -> None:
     )
 
 
-def item_visible(item_scopes: list | None, active_scope: str | None) -> bool:
+def public_scope_uuids() -> frozenset:
+    """Plain uuids of live scopes carrying visibility: "public" (visibility
+    addendum). READ paths only — public visibility relaxes reads from any
+    frame, never writes (grants govern entry/writes; ratified 2026-11-19).
+    Empty when enforcement is off (callers are flag-gated anyway) — the
+    predicate keeps today's behavior.
+
+    Read paths resolve this ONCE per request and hand it to the predicate;
+    it short-circuits per label: any public label makes the item readable
+    from any frame (most permissive wins on mixed labels).
+    """
+    if not enforcement_enabled():
+        return frozenset()
+    from system.core import get_core
+
+    with get_core() as core:
+        rows = core._conn.execute(
+            "SELECT uuid FROM entity WHERE type = 'Scope' "
+            "AND superseded_by IS NULL "
+            "AND json_extract(data, '$.visibility') = 'public'"
+        ).fetchall()
+    return frozenset(row["uuid"] for row in rows)
+
+
+def item_visible(
+    item_scopes: list | None,
+    active_scope: str | None,
+    public_scopes: frozenset = frozenset(),
+) -> bool:
     """The §4.5 access predicate for one item.
 
     Args:
         item_scopes: The item's metadata.scopes labels (empty/None = unscoped)
         active_scope: The requester's active scope (None = unscoped operation)
+        public_scopes: Plain uuids of public-visibility scopes (read paths
+            only). Any public label short-circuits visible — most permissive
+            wins on mixed public/private labels (visibility addendum).
+            WRITE gates deliberately omit this argument: visibility relaxes
+            reads only, writes still require being inside the frame.
     """
     if not item_scopes:
+        return True
+    if public_scopes and any(label in public_scopes for label in item_scopes):
         return True
     return active_scope is not None and active_scope in item_scopes
 
@@ -125,7 +160,8 @@ def filter_visible(items: list, actor: str, get_scopes) -> list:
     if not enforcement_enabled() or requester_has_all_scopes():
         return items
     active_scope = active_scope_for(actor)
+    public_scopes = public_scope_uuids()
     return [
         item for item in items
-        if item_visible(get_scopes(item), active_scope)
+        if item_visible(get_scopes(item), active_scope, public_scopes)
     ]
