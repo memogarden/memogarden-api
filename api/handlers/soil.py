@@ -426,14 +426,30 @@ def handle_query_facts(request: QueryRequest, actor: str) -> dict:
         # "params.resource"). Powers per-agent traceability:
         #   {"op": "query", "target_type": "fact", "type": "Action",
         #    "filters": {"actor": "core_...", "actor_type": "agent"}}
+        # The reserved `metadata.` dotted prefix addresses the metadata
+        # column instead (same path rule) — Event facts carry their
+        # terminal verdict and provenance there (source/status/
+        # resolved_at), so without it "all completed tada tasks" is
+        # inexpressible (#65). Bare "metadata" is rejected as ambiguous.
         if request.filters:
             for field, value in request.filters.items():
                 if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", field):
                     raise ValidationError(
                         f"Invalid filter field: {field!r} (expected plain or dotted data field name)"
                     )
-                where_parts.append("json_extract(data, ?) = ?")
-                params.append(f"$.{field}")
+                if field == "metadata":
+                    raise ValidationError(
+                        "Ambiguous filter field 'metadata' (reserved "
+                        "prefix — use dotted keys like 'metadata.source')"
+                    )
+                if field.startswith("metadata."):
+                    column = "metadata"
+                    path = field[len("metadata."):]
+                else:
+                    column = "data"
+                    path = field
+                where_parts.append(f"json_extract({column}, ?) = ?")
+                params.append(f"$.{path}")
                 params.append(value)
 
         # Filter by superseded status (default: exclude superseded)
