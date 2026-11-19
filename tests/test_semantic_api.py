@@ -625,6 +625,56 @@ class TestAddVerb:
         assert qdata["ok"] is True
         assert qdata["result"]["total"] >= 1
 
+    def test_query_facts_metadata_filters(self, client, auth_headers):
+        """The reserved `metadata.` prefix filters the metadata column
+        (#65): Event facts carry verdict and provenance there, so without
+        it 'all completed tada events' is inexpressible. Bare `metadata`
+        is rejected as ambiguous; data filters keep working alongside."""
+        tada_done = {
+            "op": "add", "type": "Event",
+            "data": {"source_id": "mg-meta-1", "title": "Tada done"},
+            "metadata": {"source": "tada", "status": "completed",
+                         "resolved_at": "2026-11-19T08:00:00+00:00"},
+        }
+        gcal_event = {
+            "op": "add", "type": "Event",
+            "data": {"source_id": "mg-meta-2", "title": "Gcal occurred"},
+            "metadata": {"source": "google_calendar", "status": "occurred"},
+        }
+        for payload in (tada_done, gcal_event):
+            r = client.post("/mg", json=payload, headers=auth_headers)
+            assert r.status_code == 200
+
+        def query(filters):
+            return client.post("/mg", json={
+                "op": "query", "target_type": "fact", "type": "Event",
+                "filters": filters,
+            }, headers=auth_headers).get_json()["result"]
+
+        done = query({"metadata.source": "tada",
+                      "metadata.status": "completed"})
+        ids = [f["data"]["source_id"] for f in done["results"]]
+        assert "mg-meta-1" in ids and "mg-meta-2" not in ids
+
+        occurred = query({"metadata.source": "google_calendar"})
+        assert "mg-meta-2" in [f["data"]["source_id"]
+                               for f in occurred["results"]]
+        assert "mg-meta-1" not in [f["data"]["source_id"]
+                                   for f in occurred["results"]]
+
+        # data filter still routes to data, metadata filter to metadata
+        both = query({"source_id": "mg-meta-1",
+                      "metadata.status": "completed"})
+        assert both["total"] == 1
+
+        # bare 'metadata' rejected as ambiguous
+        r = client.post("/mg", json={
+            "op": "query", "target_type": "fact", "type": "Event",
+            "filters": {"metadata": "tada"},
+        }, headers=auth_headers)
+        assert r.status_code == 400
+        assert "metadata" in r.get_json()["error"]["message"]
+
     def test_add_unsupported_type_fails(self, client, auth_headers):
         """Test adding unsupported fact type fails."""
         response = client.post(
