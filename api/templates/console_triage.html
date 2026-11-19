@@ -94,13 +94,13 @@ function renderTriage() {
             const src = (f.metadata || {}).source || (f.metadata || {}).provider || '';
             const kept = dismissed.has(f.uuid);
             return `
-            <div class="bg-white shadow rounded-lg p-3 flex items-start gap-3 ${kept ? 'opacity-40' : ''}">
+            <div class="bg-white shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2 ${kept ? 'opacity-40' : ''}">
                 <input type="checkbox" data-uuid="${esc(f.uuid)}" data-kind="fact" class="mt-1 rounded triage-cb" onchange="updateCount()">
                 <div class="flex-1 min-w-0">
                     <div class="text-sm font-medium text-gray-900 truncate">${esc(title)}</div>
                     <div class="text-xs text-gray-500">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.realized_at)} · ${shortUuid(f.uuid)}</div>
                 </div>
-                <div class="flex gap-1 flex-wrap">
+                <div class="flex gap-1 flex-wrap w-full sm:w-auto">
                     ${OVERVIEW.scopes.filter(s => (s.data ? s.data.label : s.label) !== 'Triage / Untrusted').map(s =>
                         `<button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="relabel('${esc(f.uuid)}','fact',['${esc(s.uuid)}'])">→ ${esc(s.label)}</button>`
                     ).join('')}
@@ -120,12 +120,12 @@ function renderTriage() {
             const title = d.title || d.label || e.uuid;
             const account = d.account || '';
             return `
-            <div class="bg-white shadow rounded-lg p-3 flex items-start gap-3">
+            <div class="bg-white shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2">
                 <div class="flex-1 min-w-0">
                     <div class="text-sm font-medium text-gray-900 truncate">${esc(title)}</div>
                     <div class="text-xs text-gray-500">${esc(e.type)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(e.updated_at)} · ${shortUuid(e.uuid)}</div>
                 </div>
-                <div class="flex gap-1 flex-wrap">
+                <div class="flex gap-1 flex-wrap w-full sm:w-auto">
                     ${OVERVIEW.scopes.filter(s => (s.data ? s.data.label : s.label) !== 'Triage / Untrusted').map(s =>
                         `<button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="relabel('${esc(e.uuid)}','entity',['${esc(s.uuid)}'])">→ ${esc(s.label)}</button>`
                     ).join('')}
