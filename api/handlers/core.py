@@ -70,6 +70,9 @@ logger = logging.getLogger(__name__)
 BASELINE_ENTITY_TYPES = {
     "Transaction",
     "Recurrence",
+    # The request entity (tada ontology; schemas/task.yaml) — agents file
+    # requests via /mg create; providers bypass this whitelist.
+    "Task",
     "Artifact",
     "Label",
     "Entity",  # Generic entity type

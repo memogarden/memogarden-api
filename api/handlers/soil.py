@@ -50,6 +50,10 @@ BASELINE_ITEM_TYPES = {
     "ToolCall",
     "EntityDelta",
     "SystemEvent",
+    # The occurrence record (tada ontology; schemas/event.yaml FACT section)
+    # — agents record occurrences via /mg add; providers bypass this
+    # whitelist. gcal's legacy EventOccurrence converges here (#31).
+    "Event",
     # Operator-authored (memogarden import opml): one fact per subscribed
     # RSS/Atom feed; Entry facts themselves enter via the provider runtime,
     # not this verb (schemas/subscription.yaml).

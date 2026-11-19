@@ -38,6 +38,11 @@ class UpdateProviderRequest(BaseModel):
     enabled: bool | None = None
     description: str | None = None
     config: dict[str, Any] | None = None
+    # Capability refresh (tada entity lane): re-derive capabilities from the
+    # module's CURRENT on-disk source (bypassing the interpreter's module
+    # cache) — provider code evolves while module identity is fixed. A flag,
+    # not a column.
+    refresh_capabilities: bool = False
 
 
 class ScopePolicyRule(BaseModel):
