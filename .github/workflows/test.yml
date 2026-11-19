@@ -31,6 +31,15 @@ jobs:
           repository: memogarden/memogarden-system
           path: memogarden-system
 
+      # memogarden-system carries the memogarden/memogarden submodule (the
+      # SQL schemas — public since 2026-11-20); get_sql_schema() resolves
+      # through it, so the sibling checkout must init it too. Explicit and
+      # path-scoped: actions/checkout's submodules input is always
+      # --recursive, and the schemas repo carries unregistered gitlinks
+      # (app-budget, hacm, mars, ...) that break recursion.
+      - name: Init schemas submodule in system sibling
+        run: git -C "$GITHUB_WORKSPACE/memogarden-system" submodule update --init system/schemas/memogarden
+
       - name: Position siblings
         run: |
           mv "$GITHUB_WORKSPACE/memogarden-utils" "$GITHUB_WORKSPACE/../memogarden-utils"
