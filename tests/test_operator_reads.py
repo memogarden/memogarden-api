@@ -132,6 +132,30 @@ def test_triage_entities_labeled(client, auth_headers, core):
     assert data["entities"][0]["data"]["title"] == "unmarked"
 
 
+def test_triage_reports_containment(client, auth_headers, core):
+    """Families: tada-style children (metadata.task_source_id -> parent
+    data.source_id) map to their in-window parent; unlinked items are
+    absent from the map."""
+    triage = _make_scope(core, "Triage / Untrusted")
+    def _fact(_type, data, metadata):
+        with get_soil() as soil:
+            return soil.create_fact(Fact(
+                uuid=generate_soil_uuid(), _type=_type,
+                realized_at=isodatetime.now(), canonical_at=isodatetime.now(),
+                data=data, metadata=metadata, integrity_hash=None, fidelity="full",
+            ))
+    parent = _fact("Event", {"source_id": "tada-1", "title": "parent task", "kind": "task"}, {"scopes": [triage]})
+    child = _fact("Note", {"description": "child note"}, {"scopes": [triage], "task_source_id": "tada-1"})
+    _labeled_fact("standalone", [triage])
+
+    response = client.get("/api/v1/triage", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.get_json()
+    # generate_soil_uuid() returns already-prefixed uuids; the endpoint
+    # passes them through prefixed exactly once.
+    assert data["containment"]["child_parent"] == {child: parent}
+
+
 def test_triage_unknown_scope_400(client, auth_headers):
     response = client.get("/api/v1/triage?scope=nonexistent-scope", headers=auth_headers)
     assert response.status_code == 400

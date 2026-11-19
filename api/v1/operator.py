@@ -155,6 +155,38 @@ def triage_queue():
             return json.loads(value)
         return value
 
+    # Families (RFC-015 §3.3): children are grouped under their parent so a
+    # triage decision covers the family (console cascades filings). Two
+    # linkages exist today: tada Notes (child metadata.task_source_id ->
+    # parent fact data.source_id) and generic contained_by relations
+    # (child -> parent). Only pairs with BOTH endpoints inside the returned
+    # window are reported; children whose parent fell outside the window
+    # render as standalone rows.
+    child_parent: dict = {}
+    parents_by_source_id: dict = {}
+    for r in facts:
+        source_id = (_loads(r["data"]) or {}).get("source_id")
+        if source_id:
+            parents_by_source_id[source_id] = uid.add_soil_prefix(r["uuid"])
+    for r in facts:
+        task_source_id = (_loads(r["metadata"]) or {}).get("task_source_id")
+        if task_source_id and task_source_id in parents_by_source_id:
+            child_parent[uid.add_soil_prefix(r["uuid"])] = parents_by_source_id[task_source_id]
+    item_by_bare: dict = {}
+    for r in facts:
+        prefixed = uid.add_soil_prefix(r["uuid"])
+        item_by_bare[prefixed.removeprefix("soil_")] = prefixed
+    for r in entities:
+        prefixed = uid.add_core_prefix(r["uuid"])
+        item_by_bare[prefixed.removeprefix("core_")] = prefixed
+    for rel in core._conn.execute(
+        "SELECT source, target FROM user_relation WHERE kind = 'contained_by'"
+    ).fetchall():
+        child = item_by_bare.get(rel["source"].removeprefix("soil_").removeprefix("core_"))
+        parent = item_by_bare.get(rel["target"].removeprefix("soil_").removeprefix("core_"))
+        if child and parent and child != parent:
+            child_parent[child] = parent
+
     return jsonify({
         "scope": {
             "uuid": uid.add_core_prefix(scope_uuid),
@@ -182,6 +214,7 @@ def triage_queue():
         ],
         "total_facts": total_facts,
         "total_entities": total_entities,
+        "containment": {"child_parent": child_parent},
     })
 
 

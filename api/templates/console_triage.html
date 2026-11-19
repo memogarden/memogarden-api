@@ -49,6 +49,8 @@ let TRIAGE = null;
 let OVERVIEW = null;
 let dismissed = new Set();
 let activeTab = 'facts';
+let CHILD_PARENT = {};
+let CHILDREN_BY_PARENT = {};
 
 document.getElementById('selAll').addEventListener('change', function() {
     document.querySelectorAll('#factsList input[type="checkbox"]').forEach(cb => {
@@ -83,28 +85,40 @@ function renderTriage() {
     document.getElementById('cntFacts').textContent = String(TRIAGE.facts.length);
     document.getElementById('cntEntities').textContent = String(TRIAGE.entities.length);
 
+    // Families (RFC-015 §3.3): containment.child_parent maps child uuid ->
+    // in-window parent uuid. Children render as members under their parent;
+    // filings on the parent cascade to the family.
+    CHILD_PARENT = (TRIAGE.containment && TRIAGE.containment.child_parent) || {};
+    CHILDREN_BY_PARENT = {};
+    for (const [child, parent] of Object.entries(CHILD_PARENT)) {
+        (CHILDREN_BY_PARENT[parent] = CHILDREN_BY_PARENT[parent] || []).push(child);
+    }
+
     const facts = document.getElementById('factsList');
-    if (!TRIAGE.facts.length) {
+    const topFacts = TRIAGE.facts.filter(f => !CHILD_PARENT[f.uuid]);
+    if (!topFacts.length) {
         facts.innerHTML = '<div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">Nothing left in this window — reload for the next slice.</div>';
     } else {
-        facts.innerHTML = TRIAGE.facts.map(f => {
+        facts.innerHTML = topFacts.map(f => {
             const d = f.data || {};
             const title = d.subject || d.title || d.filename || d.description || d.summary || f.uuid;
             const account = (f.metadata || {}).account || d.account || '';
             const src = (f.metadata || {}).source || (f.metadata || {}).provider || '';
             const kept = dismissed.has(f.uuid);
+            const kids = (CHILDREN_BY_PARENT[f.uuid] || []).map(findItem).filter(Boolean);
             return `
             <div class="bg-white shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2 ${kept ? 'opacity-40' : ''}">
                 <input type="checkbox" data-uuid="${esc(f.uuid)}" data-kind="fact" class="mt-1 rounded triage-cb" onchange="updateCount()">
                 <div class="flex-1 min-w-0">
                     <div class="text-sm font-medium text-gray-900 truncate">${esc(title)}</div>
                     <div class="text-xs text-gray-500">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.realized_at)} · ${shortUuid(f.uuid)}</div>
+                    ${familyBlock(kids)}
                 </div>
                 <div class="flex gap-1 flex-wrap w-full sm:w-auto">
                     ${OVERVIEW.scopes.filter(s => (s.data ? s.data.label : s.label) !== 'Triage / Untrusted').map(s =>
                         `<button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="relabel('${esc(f.uuid)}','fact',['${esc(s.uuid)}'])">→ ${esc(s.label)}</button>`
                     ).join('')}
-                    <button class="px-2 py-1 text-xs border border-amber-300 text-amber-700 rounded hover:bg-amber-50" title="remove all scopes — the item becomes unscoped (globally visible to any principal)" onclick="makePublic('${esc(f.uuid)}','fact')">→ Public</button>
+                    <button class="px-2 py-1 text-xs border border-amber-300 text-amber-700 rounded hover:bg-amber-50" title="remove all scopes from this item AND its members — they become unscoped (globally visible to any principal)" onclick="makePublic('${esc(f.uuid)}','fact')">→ Public</button>
                     <button class="px-2 py-1 text-xs border border-gray-200 rounded text-gray-400" title="defer visually — the item stays in triage and returns on reload" onclick="dismissRow('${esc(f.uuid)}')">keep</button>
                 </div>
             </div>`;
@@ -112,24 +126,27 @@ function renderTriage() {
     }
 
     const ents = document.getElementById('entitiesList');
-    if (!TRIAGE.entities.length) {
+    const topEntities = TRIAGE.entities.filter(e => !CHILD_PARENT[e.uuid]);
+    if (!topEntities.length) {
         ents.innerHTML = '<div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">No scoped entities.</div>';
     } else {
-        ents.innerHTML = TRIAGE.entities.map(e => {
+        ents.innerHTML = topEntities.map(e => {
             const d = e.data || {};
             const title = d.title || d.label || e.uuid;
             const account = d.account || '';
+            const kids = (CHILDREN_BY_PARENT[e.uuid] || []).map(findItem).filter(Boolean);
             return `
             <div class="bg-white shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2">
                 <div class="flex-1 min-w-0">
                     <div class="text-sm font-medium text-gray-900 truncate">${esc(title)}</div>
                     <div class="text-xs text-gray-500">${esc(e.type)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(e.updated_at)} · ${shortUuid(e.uuid)}</div>
+                    ${familyBlock(kids)}
                 </div>
                 <div class="flex gap-1 flex-wrap w-full sm:w-auto">
                     ${OVERVIEW.scopes.filter(s => (s.data ? s.data.label : s.label) !== 'Triage / Untrusted').map(s =>
                         `<button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="relabel('${esc(e.uuid)}','entity',['${esc(s.uuid)}'])">→ ${esc(s.label)}</button>`
                     ).join('')}
-                    <button class="px-2 py-1 text-xs border border-amber-300 text-amber-700 rounded hover:bg-amber-50" title="remove all scopes — the item becomes unscoped (globally visible to any principal)" onclick="makePublic('${esc(e.uuid)}','entity')">→ Public</button>
+                    <button class="px-2 py-1 text-xs border border-amber-300 text-amber-700 rounded hover:bg-amber-50" title="remove all scopes from this item AND its members — they become unscoped (globally visible to any principal)" onclick="makePublic('${esc(e.uuid)}','entity')">→ Public</button>
                 </div>
             </div>`;
         }).join('');
@@ -137,15 +154,45 @@ function renderTriage() {
     updateSelectAll();
 }
 
-// In-place state update after a successful relabel: the item has LEFT the
-// scope, so drop it from the window, decrement totals, re-render — never a
-// page reload (that reset the tab, scroll, and kept rows).
-function removeFromQueue(targetUuid, kind) {
-    const list = kind === 'fact' ? TRIAGE.facts : TRIAGE.entities;
-    const idx = list.findIndex(x => x.uuid === targetUuid);
-    if (idx >= 0) list.splice(idx, 1);
-    if (kind === 'fact') TRIAGE.total_facts = Math.max(0, TRIAGE.total_facts - 1);
-    else TRIAGE.total_entities = Math.max(0, TRIAGE.total_entities - 1);
+function findItem(uuid) {
+    return TRIAGE.facts.find(x => x.uuid === uuid) || TRIAGE.entities.find(x => x.uuid === uuid);
+}
+
+function itemKind(uuid) {
+    return TRIAGE.facts.some(x => x.uuid === uuid) ? 'fact' : 'entity';
+}
+
+// Member list rendered under a parent card (read-only; filings cascade).
+function familyBlock(kids) {
+    if (!kids.length) return '';
+    return `<div class="mt-1 ml-1 pl-2 border-l border-gray-200 space-y-0.5">
+        ${kids.map(k => {
+            const kd = k.data || {};
+            const ktitle = kd.description || kd.subject || kd.title || kd.label || kd.filename || k.uuid;
+            return `<div class="text-xs text-gray-500 truncate" title="${esc(k.uuid)}">↳ ${esc(k.type || k._type || 'item')} · ${esc(ktitle)}</div>`;
+        }).join('')}
+    </div>`;
+}
+
+// In-place state update after a successful filing: the family has LEFT the
+// scope, so drop all its members from the window, decrement totals (only for
+// members actually present), re-render — never a page reload (that reset the
+// tab, scroll, and kept rows).
+function familyOf(uuid) {
+    return [uuid].concat(CHILDREN_BY_PARENT[uuid] || []);
+}
+
+function removeFromQueue(targetUuid) {
+    for (const u of familyOf(targetUuid)) {
+        const kind = itemKind(u);
+        const list = kind === 'fact' ? TRIAGE.facts : TRIAGE.entities;
+        const idx = list.findIndex(x => x.uuid === u);
+        if (idx >= 0) {
+            list.splice(idx, 1);
+            if (kind === 'fact') TRIAGE.total_facts = Math.max(0, TRIAGE.total_facts - 1);
+            else TRIAGE.total_entities = Math.max(0, TRIAGE.total_entities - 1);
+        }
+    }
     renderTriage();
     updateBadge();
 }
@@ -171,9 +218,10 @@ function updateSelectAll() {
 }
 
 function dismissRow(uuid) {
-    // Visual defer only — nothing is sent; the item stays in triage and
-    // returns on reload.
+    // Visual defer only — nothing is sent; the family stays in triage and
+    // returns on reload. The parent card dims with its members inside.
     dismissed.add(uuid);
+    for (const u of familyOf(uuid)) dismissed.add(u);
     renderTriage();
 }
 
@@ -181,20 +229,27 @@ function dismissRow(uuid) {
 // data.scopes=[]) — the item becomes unscoped, i.e. the global space every
 // authenticated principal can see (RFC-011 SG-1). Exposure-widening: under
 // enforcement this requires a grant on triage (D2 symmetric removal gate);
-// the operator is sovereign.
+// the operator is sovereign. Family cascade: members are filed with the
+// parent (the Note filed apart from its Task would orphan in triage).
+async function applyPublicOne(uuid) {
+    const kind = itemKind(uuid);
+    if (kind === 'fact') {
+        const item = TRIAGE.facts.find(f => f.uuid === uuid);
+        const result = await mg({ op: 'amend', target: uuid, data: item.data, metadata: { scopes: [] } });
+        if (result && result.ok === false) throw new Error(result.error ? result.error.message : 'amend failed');
+    } else {
+        const item = TRIAGE.entities.find(e => e.uuid === uuid);
+        const result = await mg({ op: 'edit', target: uuid, set: Object.assign({}, item.data, { scopes: [] }) });
+        if (result && result.ok === false) throw new Error(result.error ? result.error.message : 'edit failed');
+    }
+}
+
 async function makePublic(targetUuid, kind) {
     clearError();
+    const family = familyOf(targetUuid);
     try {
-        let result;
-        if (kind === 'fact') {
-            const item = TRIAGE.facts.find(f => f.uuid === targetUuid);
-            result = await mg({ op: 'amend', target: targetUuid, data: item.data, metadata: { scopes: [] } });
-        } else {
-            const item = TRIAGE.entities.find(e => e.uuid === targetUuid);
-            result = await mg({ op: 'edit', target: targetUuid, set: Object.assign({}, item.data, { scopes: [] }) });
-        }
-        if (result && result.ok === false) throw new Error(result.error ? result.error.message : 'amend failed');
-        removeFromQueue(targetUuid, kind);
+        for (const u of family) await applyPublicOne(u);
+        removeFromQueue(targetUuid);
     } catch (error) {
         showError('Make public failed: ' + error.message);
     }
@@ -203,36 +258,42 @@ async function makePublic(targetUuid, kind) {
 document.getElementById('makePublicBulk').addEventListener('click', async function() {
     const checked = Array.from(document.querySelectorAll('#factsList input[type="checkbox"]:checked'));
     if (!checked.length) { showError('Select at least one item'); return; }
-    if (!confirm(`Make ${checked.length} item(s) public? They become visible to every principal (unscoped).`)) return;
+    const families = checked.map(cb => familyOf(cb.dataset.uuid));
+    const total = families.reduce((n, fam) => n + fam.length, 0);
+    if (!confirm(`Make ${total} item(s) (${families.length} rows incl. members) public? They become visible to every principal (unscoped).`)) return;
     this.disabled = true;
     let failures = 0;
-    for (const cb of checked) {
+    for (const fam of families) {
         try {
-            const item = TRIAGE.facts.find(f => f.uuid === cb.dataset.uuid);
-            const result = await mg({ op: 'amend', target: cb.dataset.uuid, data: item.data, metadata: { scopes: [] } });
-            if (result && result.ok === false) throw new Error('amend failed');
-            removeFromQueue(cb.dataset.uuid, 'fact');
+            for (const u of fam) await applyPublicOne(u);
+            removeFromQueue(fam[0]);
         } catch (error) { failures += 1; }
     }
     this.disabled = false;
-    if (failures) showError(`${failures} of ${checked.length} make-public calls failed — see audit`);
+    if (failures) showError(`${failures} of ${families.length} rows failed — see audit`);
 });
+
+// Amend overlays metadata wholesale — send the full desired scope list.
+// SG-9: the amended fact carries exactly the destination labels.
+async function applyRelabelOne(uuid, scopeUuids) {
+    const kind = itemKind(uuid);
+    if (kind === 'fact') {
+        const item = TRIAGE.facts.find(f => f.uuid === uuid);
+        const result = await mg({ op: 'amend', target: uuid, data: item.data, metadata: { scopes: scopeUuids } });
+        if (result && result.ok === false) throw new Error(result.error ? result.error.message : 'relabel failed');
+    } else {
+        const item = TRIAGE.entities.find(e => e.uuid === uuid);
+        const result = await mg({ op: 'edit', target: uuid, set: Object.assign({}, item.data, { scopes: scopeUuids }) });
+        if (result && result.ok === false) throw new Error(result.error ? result.error.message : 'edit failed');
+    }
+}
 
 async function relabel(targetUuid, kind, scopeUuids) {
     clearError();
+    const family = familyOf(targetUuid);
     try {
-        let result;
-        if (kind === 'fact') {
-            const item = TRIAGE.facts.find(f => f.uuid === targetUuid);
-            // Amend overlays metadata wholesale — send the full desired scope list.
-            // SG-9: the amended fact carries exactly the destination labels.
-            result = await mg({ op: 'amend', target: targetUuid, data: item.data, metadata: { scopes: scopeUuids } });
-        } else {
-            const item = TRIAGE.entities.find(e => e.uuid === targetUuid);
-            result = await mg({ op: 'edit', target: targetUuid, set: Object.assign({}, item.data, { scopes: scopeUuids }) });
-        }
-        if (result && result.ok === false) throw new Error(result.error ? result.error.message : 'relabel failed');
-        removeFromQueue(targetUuid, kind);
+        for (const u of family) await applyRelabelOne(u, scopeUuids);
+        removeFromQueue(targetUuid);
     } catch (error) {
         showError('Relabel failed: ' + error.message);
     }
@@ -243,18 +304,18 @@ document.getElementById('applyRelabel').addEventListener('click', async function
     if (!dest) { showError('Pick a destination scope'); return; }
     const checked = Array.from(document.querySelectorAll('#factsList input[type="checkbox"]:checked'));
     if (!checked.length) { showError('Select at least one item'); return; }
+    const families = checked.map(cb => familyOf(cb.dataset.uuid));
+    const total = families.reduce((n, fam) => n + fam.length, 0);
     this.disabled = true;
     let failures = 0;
-    for (const cb of checked) {
+    for (const fam of families) {
         try {
-            const item = TRIAGE.facts.find(f => f.uuid === cb.dataset.uuid);
-            const result = await mg({ op: 'amend', target: cb.dataset.uuid, data: item.data, metadata: { scopes: [dest] } });
-            if (result && result.ok === false) throw new Error('amend failed');
-            removeFromQueue(cb.dataset.uuid, 'fact');
+            for (const u of fam) await applyRelabelOne(u, [dest]);
+            removeFromQueue(fam[0]);
         } catch (error) { failures += 1; }
     }
     this.disabled = false;
-    if (failures) showError(`${failures} of ${checked.length} relabels failed — see audit`);
+    if (failures) showError(`${failures} of ${families.length} rows failed — see audit`);
 });
 
 document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', function() {
