@@ -17,10 +17,13 @@ from system.soil import Fact, generate_soil_uuid, get_soil
 from utils import isodatetime
 
 
-def _make_scope(core, label: str) -> str:
+def _make_scope(core, label: str, visibility: str | None = None) -> str:
+    data = {"label": label, "active_participants": [], "artifact_uuids": []}
+    if visibility is not None:
+        data["visibility"] = visibility
     uuid = core.entity.create(
         entity_type="Scope",
-        data={"label": label, "active_participants": [], "artifact_uuids": []},
+        data=data,
     )
     core._conn.commit()
     return uuid
@@ -160,6 +163,24 @@ def test_scopes_overview_shape(client, auth_headers, core):
     assert triage_entry["fact_count"] == 2
     assert isinstance(data["grants"], list)
     assert isinstance(data["provider_policies"], dict)
+
+
+def test_scopes_overview_exposes_visibility(client, auth_headers, core):
+    """RFC-011 visibility addendum: every scope row carries its visibility.
+
+    Public rides through as stored; scopes predating the attribute default
+    to private (the migration stamps private, this is the defensive read).
+    """
+    _make_scope(core, "Quiet", visibility="private")
+    _make_scope(core, "Household", visibility="public")
+    _make_scope(core, "Legacy")  # no attribute → defaults private
+
+    response = client.get("/api/v1/scopes/overview", headers=auth_headers)
+    assert response.status_code == 200
+    scopes = {s["label"]: s for s in response.get_json()["scopes"]}
+    assert scopes["Household"]["visibility"] == "public"
+    assert scopes["Quiet"]["visibility"] == "private"
+    assert scopes["Legacy"]["visibility"] == "private"
 
 
 def test_scopes_overview_includes_provider_policy(client, auth_headers, core):

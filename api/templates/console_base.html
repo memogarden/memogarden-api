@@ -6,15 +6,17 @@
 <div class="min-h-screen bg-gray-50">
     <!-- Header -->
     <header class="bg-white shadow">
-        <div class="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8 flex justify-between items-center gap-4">
-            <div class="flex items-baseline gap-3">
+        <div class="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8 flex justify-between items-center gap-2 sm:gap-4">
+            <div class="flex items-baseline gap-2 sm:gap-3 min-w-0">
                 <h1 class="text-xl font-bold text-gray-900">MemoGarden</h1>
-                <span class="text-sm font-medium text-gray-500">Operator Console</span>
+                <span class="text-sm font-medium text-gray-500 hidden sm:inline">Operator Console</span>
                 <span class="text-xs text-gray-400 hidden sm:inline">RFC-015 · OP = operator-only · DELE = delegable, verify</span>
             </div>
-            <div class="flex items-center gap-3">
-                <span id="enforcementChip" class="text-xs px-2 py-1 rounded border border-gray-300 text-gray-500">enforcement…</span>
-                <span id="userDisplay" class="text-sm text-gray-700"></span>
+            <div class="flex items-center gap-2 sm:gap-3 flex-shrink-0">
+                <span id="enforcementChip" class="text-xs px-2 py-1 rounded border border-gray-300 text-gray-500 whitespace-nowrap">
+                    <span id="enforcementChipDot" class="inline-block w-1.5 h-1.5 rounded-full bg-gray-400 align-middle"></span><span id="enforcementChipText" class="hidden sm:inline">enforcement…</span>
+                </span>
+                <span id="userDisplay" class="text-sm text-gray-700 hidden sm:inline"></span>
                 <a href="/console/settings" class="text-sm text-gray-600 hover:text-gray-900">Settings</a>
                 <button id="logoutBtn" class="text-sm text-gray-600 hover:text-gray-900">Logout</button>
             </div>
@@ -24,17 +26,17 @@
     <div class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8 flex flex-col lg:flex-row gap-6">
         <!-- Sidebar -->
         <aside class="lg:w-56 flex-shrink-0">
-            <nav id="consoleNav" data-page="{% block console_page %}{% endblock %}" class="space-y-1">
-                <a href="/console/triage" data-nav="triage" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200">
-                    Triage review <span id="badgeTriage" class="hidden float-right text-xs bg-gray-200 text-gray-700 rounded-full px-2"></span>
+            <nav id="consoleNav" data-page="{% block console_page %}{% endblock %}" class="flex gap-1 overflow-x-auto pb-1 lg:block lg:space-y-1 lg:overflow-visible lg:pb-0">
+                <a href="/console/triage" data-nav="triage" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200 whitespace-nowrap lg:whitespace-normal">
+                    Triage review <span id="badgeTriage" class="hidden float-none ml-1 lg:float-right lg:ml-0 text-xs bg-gray-200 text-gray-700 rounded-full px-2"></span>
                 </a>
-                <a href="/console/scopes" data-nav="scopes" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200">Scopes &amp; grants</a>
-                <a href="/console/identity" data-nav="identity" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200">Keys &amp; agents</a>
-                <a href="/console/providers" data-nav="providers" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200">Providers</a>
-                <a href="/console/occurrences" data-nav="occurrences" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200">
-                    Occurrences <span id="badgeOccurrences" class="hidden float-right text-xs bg-gray-200 text-gray-700 rounded-full px-2"></span>
+                <a href="/console/scopes" data-nav="scopes" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200 whitespace-nowrap lg:whitespace-normal">Scopes &amp; grants</a>
+                <a href="/console/identity" data-nav="identity" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200 whitespace-nowrap lg:whitespace-normal">Keys &amp; agents</a>
+                <a href="/console/providers" data-nav="providers" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200 whitespace-nowrap lg:whitespace-normal">Providers</a>
+                <a href="/console/occurrences" data-nav="occurrences" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200 whitespace-nowrap lg:whitespace-normal">
+                    Occurrences <span id="badgeOccurrences" class="hidden float-none ml-1 lg:float-right lg:ml-0 text-xs bg-gray-200 text-gray-700 rounded-full px-2"></span>
                 </a>
-                <a href="/console/audit" data-nav="audit" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200">Audit</a>
+                <a href="/console/audit" data-nav="audit" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200 whitespace-nowrap lg:whitespace-normal">Audit</a>
             </nav>
         </aside>
 
@@ -84,20 +86,6 @@
             }
         });
     }
-
-    document.getElementById('logoutBtn').addEventListener('click', function() {
-        localStorage.removeItem('access_token');
-        localStorage.removeItem('user_info');
-        window.location.href = '/login';
-    });
-
-    // Highlight the active nav item
-    const navPage = document.getElementById('consoleNav').dataset.page;
-    document.querySelectorAll('.console-nav').forEach(function(link) {
-        if (link.dataset.nav === navPage) {
-            link.classList.add('bg-gray-200', 'font-medium', 'text-gray-900');
-        }
-    });
 
     // Authenticated JSON fetch with uniform error surfacing
     async function api(path, options) {
@@ -174,12 +162,16 @@
             setBadge('badgeTriage', (triage.total_facts || 0) + (triage.total_entities || 0));
             setBadge('badgeOccurrences', pending.total_unmarked || 0);
             const chip = document.getElementById('enforcementChip');
+            const chipText = document.getElementById('enforcementChipText');
+            const chipDot = document.getElementById('enforcementChipDot');
             if (overview.enforcement) {
-                chip.textContent = 'enforcement ON';
-                chip.className = 'text-xs px-2 py-1 rounded border border-green-300 bg-green-50 text-green-700';
+                chipText.textContent = 'enforcement ON';
+                chip.className = 'text-xs px-2 py-1 rounded border border-green-300 bg-green-50 text-green-700 whitespace-nowrap';
+                chipDot.className = 'inline-block w-1.5 h-1.5 rounded-full bg-green-500 align-middle';
             } else {
-                chip.textContent = 'enforcement advisory (flag off)';
-                chip.className = 'text-xs px-2 py-1 rounded border border-amber-300 bg-amber-50 text-amber-700';
+                chipText.textContent = 'enforcement advisory (flag off)';
+                chip.className = 'text-xs px-2 py-1 rounded border border-amber-300 bg-amber-50 text-amber-700 whitespace-nowrap';
+                chipDot.className = 'inline-block w-1.5 h-1.5 rounded-full bg-amber-500 align-middle';
                 chip.title = 'Flip MEMOGARDEN_SCOPE_ENFORCEMENT in the service env + restart to make label gates real';
             }
             window.__scopesOverview = overview;  // pages may reuse

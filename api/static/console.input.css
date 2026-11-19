@@ -1,5 +1,7 @@
-/* Build: npx tailwindcss@3.4.17 -c tailwind.config.js -i console.input.css -o console.css --minify
-   content: api/templates/**/*.html + api/middleware/*.py (see repo root docs) */
+/* Build (from api/static/): npx tailwindcss@3.4.17 -c tailwind.config.js -i console.input.css -o console.css --minify
+   Content globs live in tailwind.config.js: templates + middleware + this file.
+   (Never put glob stars inside this comment — a star-star-slash terminates
+   the block comment mid-glob and postcss chokes on the rest.) */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

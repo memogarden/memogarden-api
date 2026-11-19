@@ -27,7 +27,12 @@
         <div id="mintScopeForm" class="hidden bg-white shadow rounded-lg p-3 mt-2 space-y-2">
             <input id="scopeLabel" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm" placeholder="Label (e.g. Finances)">
             <input id="scopeDesc" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm" placeholder="Description (optional)">
+            <select id="scopeVisibility" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <option value="private" selected>private — reads need a grant + the scope frame</option>
+                <option value="public">public — items readable from any frame, no grant needed</option>
+            </select>
             <button id="mintScopeGo" class="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm">Create</button>
+            <p class="text-xs text-gray-400">Visibility relaxes reads only (most permissive label wins); entering a public scope still needs its grant.</p>
         </div>
     </section>
 
@@ -79,6 +84,13 @@ let OV = null;
 
 function scopeLabel(s) { return (s.data ? s.data.label : s.label) || s.uuid; }
 
+// Visibility badge (RFC-011 visibility addendum: scope attribute public|private)
+function visBadge(isPublic) {
+    return isPublic
+        ? '<span class="inline-block text-xs px-1.5 py-0.5 rounded-full border border-amber-300 bg-amber-50 text-amber-700" title="public — items readable from any frame, no grant needed">public</span>'
+        : '<span class="inline-block text-xs px-1.5 py-0.5 rounded-full border border-gray-300 bg-gray-100 text-gray-500" title="private — reads need a grant + the scope frame">private</span>';
+}
+
 function renderOverview() {
     const banner = document.getElementById('enforcementBanner');
     if (OV.enforcement) {
@@ -94,15 +106,22 @@ function renderOverview() {
     document.getElementById('scopesBody').innerHTML = OV.scopes.map(s => {
         const builtin = BUILTIN_LABELS.includes(scopeLabel(s));
         const entityTotal = Object.values(s.entity_counts || {}).reduce((a, b) => a + b, 0);
+        const isPublic = s.visibility === 'public';
         return `<tr class="border-b border-gray-100">
             <td class="px-3 py-2"><b>${esc(scopeLabel(s))}</b> ${builtin ? '<span class="text-xs text-gray-400">builtin</span>' : ''}
+                ${visBadge(isPublic)}
+                <button class="ml-1 px-1.5 py-0.5 text-xs border rounded align-middle ${isPublic ? 'border-gray-300 text-gray-600 hover:bg-gray-100' : 'border-amber-300 text-amber-700 hover:bg-amber-50'}"
+                    title="${isPublic ? 'Back to grant+frame-gated reads. Existing member items lose the public read short-circuit in one audited edit.' : 'Items labeled into it become readable from any frame without a grant (most permissive label wins; entry still needs its grant).'}"
+                    data-flip-visibility="${esc(s.uuid)}" data-to="${isPublic ? 'private' : 'public'}">make ${isPublic ? 'private' : 'public'}</button>
                 <div class="text-xs text-gray-400">${shortUuid(s.uuid)}</div></td>
             <td class="px-3 py-2">${s.fact_count}</td>
             <td class="px-3 py-2">${entityTotal}</td>
-            <td class="px-3 py-2 text-right">${builtin ? '' :
-                // Scope labels are user-editable (handle_edit has no Scope gate),
-                // so the label never enters an inline JS string — the confirm
-                // dialog reads it back from the overview, attribute holds the uuid.
+            <td class="px-3 py-2 text-right whitespace-nowrap">
+                ${builtin ? '' :
+                // Scope labels are user-editable (handle_edit has a Scope
+                // operator gate), so the label never enters an inline JS
+                // string — the confirm dialog reads it back from the
+                // overview, attribute holds the uuid.
                 `<button class="px-2 py-1 text-xs border border-red-200 text-red-600 rounded hover:bg-red-50" data-delete-scope="${esc(s.uuid)}">delete</button>`}
             </td></tr>`;
     }).join('');
@@ -172,13 +191,31 @@ document.getElementById('mintScopeGo').addEventListener('click', async function(
     const description = document.getElementById('scopeDesc').value.trim();
     if (!label) { showError('Label required'); return; }
     try {
-        const data = { label: label };
+        const data = { label: label, visibility: document.getElementById('scopeVisibility').value };
         if (description) data.description = description;
         const result = await mg({ op: 'create', type: 'Scope', data: data });
         if (result.ok === false) throw new Error(result.error ? result.error.message : 'create failed');
         window.location.reload();
     } catch (error) { showError('Mint scope failed: ' + error.message); }
 });
+
+// Visibility flip (RFC-011 visibility addendum §6 item 4: warn on flip —
+// one audited edit changes every member item's effective visibility).
+async function flipVisibility(uuid, to) {
+    clearError();
+    const scope = OV.scopes.find(s => s.uuid === uuid);
+    const label = scope ? scopeLabel(scope) : uuid;
+    const count = scope ? scope.fact_count : 0;
+    const warn = to === 'public'
+        ? `Make "${label}" public? Its ${count} labeled fact(s) (plus labeled entities) become readable from any frame, without a grant — in one audited edit (containerizing, not hiding: the scope's existence was never concealed).`
+        : `Make "${label}" private again? Member items lose the public read short-circuit; reads need a grant + the scope frame.`;
+    if (!confirm(warn)) return;
+    try {
+        const result = await mg({ op: 'edit', target: uuid, set: { visibility: to } });
+        if (result.ok === false) throw new Error(result.error ? result.error.message : 'edit failed');
+        window.location.reload();
+    } catch (error) { showError('Visibility flip failed: ' + error.message); }
+}
 
 async function deleteScope(uuid) {
     clearError();
@@ -195,6 +232,8 @@ async function deleteScope(uuid) {
 // Delegated handler — scope labels are user-editable, so they never ride
 // in inline onclick strings; the attribute carries only the server uuid.
 document.getElementById('scopesBody').addEventListener('click', function(evt) {
+    const flip = evt.target.closest('[data-flip-visibility]');
+    if (flip) flipVisibility(flip.dataset.flipVisibility, flip.dataset.to);
     const btn = evt.target.closest('[data-delete-scope]');
     if (btn) deleteScope(btn.dataset.deleteScope);
 });

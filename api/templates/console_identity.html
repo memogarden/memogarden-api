@@ -17,7 +17,7 @@
         <div class="bg-white shadow rounded-lg overflow-x-auto">
             <table class="w-full text-sm">
                 <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
-                    <th class="px-3 py-2">Agent</th><th class="px-3 py-2">Entity</th><th class="px-3 py-2">Description</th><th class="px-3 py-2">Bound keys</th>
+                    <th class="px-3 py-2">Agent</th><th class="px-3 py-2 hidden md:table-cell">Entity</th><th class="px-3 py-2">Description</th><th class="px-3 py-2">Bound keys</th>
                 </tr></thead>
                 <tbody id="agentsBody"><tr><td class="px-3 py-4 text-gray-400" colspan="4">Loading…</td></tr></tbody>
             </table>
@@ -115,7 +115,7 @@
         el('agentsBody').innerHTML = agents.length
             ? agents.map(a => `<tr class="border-b border-gray-100">
                 <td class="px-3 py-2"><b>${esc(a.label || a.name || '')}</b></td>
-                <td class="px-3 py-2 text-xs text-gray-500" title="${esc(a.agent_id || a.uuid || '')}">${shortUuid(a.agent_id || a.uuid)}</td>
+                <td class="px-3 py-2 text-xs text-gray-500 hidden md:table-cell" title="${esc(a.agent_id || a.uuid || '')}">${shortUuid(a.agent_id || a.uuid)}</td>
                 <td class="px-3 py-2 text-xs text-gray-500">${esc(a.description || '—')}</td>
                 <td class="px-3 py-2 text-xs">${(a.bound_key_count || 0)}${(a.key_prefixes || []).length
                     ? ` <span class="text-gray-400">${esc(a.key_prefixes.join(', '))}</span>` : ''}</td>

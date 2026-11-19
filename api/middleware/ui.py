@@ -204,9 +204,10 @@ def admin_register_page():
         }), 403
 
     # Check if any users exist
-    core = get_core()
     try:
-        if core.has_admin_user():
+        with get_core() as core:
+            has_admin = core.has_admin_user()
+        if has_admin:
             logger.info("Account already exists, redirecting to login")
             from flask import redirect
             return redirect('/login?existing=true')

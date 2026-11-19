@@ -224,6 +224,7 @@ def scopes_overview():
             "uuid": uid.add_core_prefix(row["uuid"]),
             "label": data.get("label"),
             "description": data.get("description"),
+            "visibility": data.get("visibility") or "private",
             "created_at": row["created_at"],
             "fact_count": fact_counts.get(row["uuid"], 0),
             "entity_counts": entity_counts.get(row["uuid"], {}),
