@@ -16,9 +16,10 @@ import jwt
 from flask import g, request
 
 from system.core import get_core
-from system.exceptions import AuthenticationError
+from system.exceptions import AuthenticationError, PermissionDenied
 
 from . import api_keys, service, token
+from .capabilities import CAPABILITY_ROUTES
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def _authenticate_request():
     if api_key:
         result = api_keys.verify_api_key_and_get_user(core._conn, api_key)
         if result:
-            user_id, api_key_id, agent_entity_id, grants = result
+            user_id, api_key_id, agent_entity_id, grants, capabilities = result
 
             # Get user details
             user = service.get_user_by_id(core._conn, user_id)
@@ -106,6 +107,10 @@ def _authenticate_request():
                 # RFC-011 §4.3: the presenting key's scope grants ([] =
                 # unscoped-only; JWT sessions carry None = sovereignty)
                 g.grants = grants
+                # E3: restricted key classes — non-empty capabilities limit
+                # the key to the capabilities' endpoint surface (checked
+                # below, before dispatch)
+                g.key_capabilities = capabilities
                 # RFC-010: bound keys attribute to the Agent entity;
                 # unbound keys attribute to the owning username with
                 # actor_type "api_key" (the queryable attribution gap)
@@ -115,6 +120,24 @@ def _authenticate_request():
                 else:
                     g.actor = user.username
                     g.actor_type = "api_key"
+
+                # E3 enforcement: a restricted key may only call endpoints
+                # covered by its capabilities' route sets. JWT sessions are
+                # operator-sovereign and skip this gate. Read-only over the
+                # key row (auth hot-path invariant).
+                if capabilities:
+                    allowed: set[str] = set()
+                    for cap in capabilities:
+                        allowed |= CAPABILITY_ROUTES.get(cap, frozenset())
+                    if request.endpoint not in allowed:
+                        raise PermissionDenied(
+                            "API key capabilities do not cover this endpoint",
+                            {
+                                "code": "capability_denied",
+                                "capabilities": capabilities,
+                                "endpoint": request.endpoint,
+                            },
+                        )
 
                 logger.debug(f"API key authentication successful for user {g.username}")
                 return  # Authentication succeeded

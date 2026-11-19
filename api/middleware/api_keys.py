@@ -184,9 +184,10 @@ def create_api_key(conn: sqlite3.Connection, user_id: str, data: APIKeyCreate) -
 
     # Create API key entity (foreign key to entity)
     conn.execute(
-        """INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix, agent_entity_id, expires_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (api_key_id, user_id, data.name, key_hash, key_prefix, agent_entity_id, expires_at_str, now)
+        """INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix, agent_entity_id, capabilities, expires_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (api_key_id, user_id, data.name, key_hash, key_prefix, agent_entity_id,
+         json.dumps(data.capabilities or []), expires_at_str, now)
     )
 
     # RFC-011 §6: a key created bound to an agent inherits the agent's
@@ -200,6 +201,7 @@ def create_api_key(conn: sqlite3.Connection, user_id: str, data: APIKeyCreate) -
         key=plain_key,  # Full key only shown on creation
         prefix=key_prefix,
         agent_id=agent_entity_id,
+        capabilities=data.capabilities or [],
         expires_at=data.expires_at if isinstance(data.expires_at, datetime) else (isodatetime.to_datetime(data.expires_at) if data.expires_at else None),
         created_at=isodatetime.to_datetime(now),
         last_seen=None,
@@ -226,7 +228,7 @@ def list_api_keys(conn: sqlite3.Connection, user_id: str) -> list[APIKeyListResp
     ```
     """
     cursor = conn.execute(
-        """SELECT id, name, key_prefix, agent_entity_id, expires_at, created_at, last_seen, revoked_at
+        """SELECT id, name, key_prefix, agent_entity_id, capabilities, expires_at, created_at, last_seen, revoked_at
         FROM api_keys
         WHERE user_id = ?
         ORDER BY created_at DESC""",
@@ -240,6 +242,7 @@ def list_api_keys(conn: sqlite3.Connection, user_id: str) -> list[APIKeyListResp
             name=row["name"],
             prefix=row["key_prefix"],
             agent_id=row["agent_entity_id"],
+            capabilities=json.loads(row["capabilities"] or "[]"),
             expires_at=isodatetime.to_datetime(row["expires_at"]) if row["expires_at"] else None,
             created_at=isodatetime.to_datetime(row["created_at"]),
             last_seen=isodatetime.to_datetime(row["last_seen"]) if row["last_seen"] else None,
@@ -297,7 +300,7 @@ def get_api_key_by_id(conn: sqlite3.Connection, api_key_id: str) -> APIKeyListRe
     ```
     """
     cursor = conn.execute(
-        """SELECT id, name, key_prefix, agent_entity_id, expires_at, created_at, last_seen, revoked_at
+        """SELECT id, name, key_prefix, agent_entity_id, capabilities, expires_at, created_at, last_seen, revoked_at
         FROM api_keys
         WHERE id = ?""",
         (api_key_id,)
@@ -312,6 +315,7 @@ def get_api_key_by_id(conn: sqlite3.Connection, api_key_id: str) -> APIKeyListRe
         name=row["name"],
         prefix=row["key_prefix"],
         agent_id=row["agent_entity_id"],
+        capabilities=json.loads(row["capabilities"] or "[]"),
         expires_at=isodatetime.to_datetime(row["expires_at"]) if row["expires_at"] else None,
         created_at=isodatetime.to_datetime(row["created_at"]),
         last_seen=isodatetime.to_datetime(row["last_seen"]) if row["last_seen"] else None,
@@ -373,14 +377,14 @@ def verify_api_key_and_get_user(conn: sqlite3.Connection, plain_key: str) -> tup
     ```python
     result = verify_api_key_and_get_user(conn, plain_key)
     if result:
-        user_id, api_key_id, agent_entity_id, grants = result
+        user_id, api_key_id, agent_entity_id, grants, capabilities = result
         print(f"Authenticated user {user_id}, agent binding: {agent_entity_id}")
     ```
     """
     # Get all active API keys and check each one
     # (We can't hash the input key and look it up because bcrypt has random salts)
     cursor = conn.execute(
-        """SELECT id, user_id, key_hash, agent_entity_id, grants
+        """SELECT id, user_id, key_hash, agent_entity_id, grants, capabilities
         FROM api_keys
         WHERE revoked_at IS NULL"""
     )
@@ -390,7 +394,8 @@ def verify_api_key_and_get_user(conn: sqlite3.Connection, plain_key: str) -> tup
             # Update last_seen timestamp
             update_last_seen(conn, row["id"])
             grants = json.loads(row["grants"]) if row["grants"] else []
-            return (row["user_id"], row["id"], row["agent_entity_id"], grants)
+            capabilities = json.loads(row["capabilities"]) if row["capabilities"] else []
+            return (row["user_id"], row["id"], row["agent_entity_id"], grants, capabilities)
 
     return None
 
@@ -644,6 +649,58 @@ def bind_agent_to_key(
     conn.execute(
         "UPDATE api_keys SET agent_entity_id = ? WHERE id = ? AND user_id = ?",
         (agent_entity_id, api_key_id, user_id)
+    )
+
+    key = get_api_key_by_id(conn, api_key_id)
+    assert key is not None  # row existence verified above
+    return key
+
+
+def set_key_capabilities(
+    conn: sqlite3.Connection,
+    api_key_id: str,
+    user_id: str,
+    capabilities: list[str] | None,
+) -> APIKeyListResponse:
+    """Replace an API key's capability set (E3 restricted key classes).
+
+    Explicit operator action, same guard shape as bind_agent_to_key:
+    ownership enforced, revoked keys refused. Empty list = unrestricted
+    (legacy behavior); validation of capability ids happened in the
+    request schema.
+
+    Args:
+        conn: Database connection
+        api_key_id: API key to update
+        user_id: Owning user id (authorization)
+        capabilities: Replacement capability list (possibly empty)
+
+    Returns:
+        Updated APIKeyListResponse
+
+    Raises:
+        ResourceNotFound: Key not found (or not owned by user_id)
+        LockConflictError: Key is revoked (409)
+    """
+    row = conn.execute(
+        "SELECT revoked_at FROM api_keys WHERE id = ? AND user_id = ?",
+        (api_key_id, user_id)
+    ).fetchone()
+
+    if row is None:
+        raise ResourceNotFound(
+            "API key not found",
+            {"api_key_id": api_key_id}
+        )
+    if row["revoked_at"] is not None:
+        raise LockConflictError(
+            "Cannot update a revoked API key",
+            {"api_key_id": api_key_id}
+        )
+
+    conn.execute(
+        "UPDATE api_keys SET capabilities = ? WHERE id = ? AND user_id = ?",
+        (json.dumps(capabilities or []), api_key_id, user_id)
     )
 
     key = get_api_key_by_id(conn, api_key_id)

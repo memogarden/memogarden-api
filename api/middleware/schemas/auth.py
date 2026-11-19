@@ -192,6 +192,24 @@ class APIKeyCreate(APIKeyBase):
         default=None,
         description="Optional Agent entity uuid (core_...) to bind this key to (RFC-010)",
     )
+    capabilities: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Restricted key classes (E3): non-empty = key may ONLY call "
+            "endpoints covered by these capabilities. Empty = unrestricted "
+            "(legacy behavior)."
+        ),
+    )
+
+    @field_validator("capabilities")
+    @classmethod
+    def _validate_capabilities(cls, v: list[str]) -> list[str]:
+        from ..capabilities import validate_capabilities
+
+        try:
+            return validate_capabilities(v)
+        except ValueError as e:
+            raise ValueError(str(e)) from e
 
 
 class GrantCreate(BaseModel):
@@ -238,12 +256,34 @@ class APIKeyUpdate(BaseModel):
     - field absent: no change
     - field null: unbind (attribution reverts to the owning username)
     - field set: bind / re-bind to the given Agent entity
+
+    capabilities follows the same semantics: absent = no change; a list
+    (possibly empty) replaces the key's capability set (E3).
     """
 
     agent_id: str | None = Field(
         default=None,
         description="Agent entity uuid to bind, null to unbind; absent = no change",
     )
+    capabilities: list[str] | None = Field(
+        default=None,
+        description=(
+            "Replacement capability set; absent = no change. Empty list "
+            "makes the key unrestricted. (E3)"
+        ),
+    )
+
+    @field_validator("capabilities")
+    @classmethod
+    def _validate_capabilities(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        from ..capabilities import validate_capabilities
+
+        try:
+            return validate_capabilities(v)
+        except ValueError as e:
+            raise ValueError(str(e)) from e
 
 
 class APIKeyResponse(APIKeyBase):
@@ -277,6 +317,9 @@ class APIKeyResponse(APIKeyBase):
     agent_id: str | None = Field(
         default=None,
         description="Bound Agent entity uuid (core_...), null if unbound (RFC-010)")
+    capabilities: list[str] = Field(
+        default_factory=list,
+        description="Restricted capability classes (E3); empty = unrestricted")
     expires_at: datetime | None = Field(
         default=None, description="Expiration timestamp (ISO 8601 UTC, null if no expiry)")
     created_at: datetime = Field(..., description="When the API key was created (ISO 8601 UTC)")
@@ -313,6 +356,9 @@ class APIKeyListResponse(APIKeyBase):
     agent_id: str | None = Field(
         default=None,
         description="Bound Agent entity uuid (core_...), null if unbound (RFC-010)")
+    capabilities: list[str] = Field(
+        default_factory=list,
+        description="Restricted capability classes (E3); empty = unrestricted")
     expires_at: datetime | None = Field(
         default=None, description="Expiration timestamp (ISO 8601 UTC, null if no expiry)")
     created_at: datetime = Field(..., description="When the API key was created (ISO 8601 UTC)")

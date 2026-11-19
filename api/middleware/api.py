@@ -695,24 +695,40 @@ def update_api_key(data: APIKeyUpdate, api_key_id: str):
     """
     payload = _authenticate_jwt()
 
-    if "agent_id" not in data.model_fields_set:
+    sets_agent = "agent_id" in data.model_fields_set
+    sets_capabilities = "capabilities" in data.model_fields_set
+    if not sets_agent and not sets_capabilities:
         raise ValidationError(
-            "PATCH body must set agent_id (uuid to bind, null to unbind)",
-            {"expected_fields": ["agent_id"]}
+            "PATCH body must set agent_id (bind/unbind) and/or capabilities "
+            "(restricted key classes, E3)",
+            {"expected_fields": ["agent_id", "capabilities"]}
         )
 
     core = get_core()
-    key = api_keys.bind_agent_to_key(core._conn, api_key_id, payload.sub, data.agent_id)
+    key = None
+    if sets_agent:
+        key = api_keys.bind_agent_to_key(core._conn, api_key_id, payload.sub, data.agent_id)
+    if sets_capabilities:
+        key = api_keys.set_key_capabilities(
+            core._conn, api_key_id, payload.sub, data.capabilities)
     core._conn.commit()
 
     # RFC-010 INV-2 / §5.3: (re-)attribution is explicit and auditable
-    _record_identity_action(
-        "bind",
-        {"api_key_id": api_key_id, "agent_id": data.agent_id},
-    )
+    if sets_agent:
+        _record_identity_action(
+            "bind",
+            {"api_key_id": api_key_id, "agent_id": data.agent_id},
+        )
+    if sets_capabilities:
+        _record_identity_action(
+            "set_capabilities",
+            {"api_key_id": api_key_id, "capabilities": data.capabilities},
+        )
 
     logger.info(
-        f"API key binding updated: {api_key_id} -> agent {data.agent_id} "
+        f"API key updated: {api_key_id} "
+        f"(agent_id={data.agent_id if sets_agent else 'unchanged'}, "
+        f"capabilities={data.capabilities if sets_capabilities else 'unchanged'}) "
         f"by user {payload.sub}"
     )
 
