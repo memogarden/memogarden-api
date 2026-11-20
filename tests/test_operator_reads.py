@@ -458,3 +458,73 @@ def test_legacy_ui_pages_redirect_into_console(client):
         response = client.get(path)
         assert response.status_code == 302, path
         assert response.headers["Location"].endswith(target), path
+
+
+def test_sup_map_cache_ttls_and_rekeys(monkeypatch):
+    """_load_sup_map caches per soil db path within the TTL (RFC-015 perf).
+
+    The triage endpoint used to rescan all superseded rows per request
+    (67k+ in production). The cache must: hit within TTL, refresh past it,
+    and re-key immediately when the soil db path changes (test fixtures
+    each carry their own database — and a deployment move too).
+    """
+    import api.v1.operator as operator_mod
+
+    loads = {"n": 0}
+    results = [
+        [("u1", "u2")],   # first load
+        [("u1", "u3")],   # post-TTL reload must see new rows
+    ]
+    state = {"db": "/tmp/soilA.db"}
+    clock = {"t": 100.0}
+
+    class _FakeSoil:
+        db_path = property(lambda self: state["db"])
+
+        def _get_connection(self):
+            outer = self
+
+            class _Conn:
+                def execute(self, _sql):
+                    outer_exec = self
+
+                    class _Cur:
+                        def fetchall(self):
+                            rows = results[min(loads["n"], len(results) - 1)]
+                            loads["n"] += 1
+                            return [{"uuid": u, "superseded_by": s} for u, s in rows]
+                    return _Cur()
+            return _Conn()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(operator_mod, "get_soil", lambda *a, **kw: _FakeSoil())
+    monkeypatch.setattr(operator_mod.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(
+        operator_mod, "_sup_map_cache",
+        {"key": None, "at": -operator_mod._SUP_MAP_TTL, "map": {}},
+    )
+
+    # Cold load
+    assert operator_mod._load_sup_map() == {"u1": "u2"}
+    assert loads["n"] == 1
+
+    # Within TTL: warm hit, no new query
+    clock["t"] += 10
+    assert operator_mod._load_sup_map() == {"u1": "u2"}
+    assert loads["n"] == 1
+
+    # Past TTL: reload sees the new supersedes rows
+    clock["t"] += 31
+    assert operator_mod._load_sup_map() == {"u1": "u3"}
+    assert loads["n"] == 2
+
+    # DB path change re-keys immediately, even within TTL
+    clock["t"] += 1
+    state["db"] = "/tmp/soilB.db"
+    operator_mod._load_sup_map()
+    assert loads["n"] == 3

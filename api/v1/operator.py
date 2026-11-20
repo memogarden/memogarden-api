@@ -11,6 +11,7 @@ configuration out of API-key hands even in read form.
 
 import json
 import logging
+import time
 
 from flask import Blueprint, jsonify, request
 
@@ -77,6 +78,34 @@ def _resolve_scope(scope_ref: str) -> dict:
             {"scope": scope_ref},
         )
     return {"uuid": row["uuid"], "data": row["data"], "created_at": row["created_at"]}
+
+
+# The triage queue collapses supersedes chains for family/stub captions
+# (system#11 semantics). That needs every superseded soil row — 67k+ and
+# growing with each amend — and rebuilding the map on every request cost
+# ~0.5s of each triage load. The map only changes when an amend writes a new
+# supersedes edge, and amend goes through the generic handlers (no single
+# invalidation seam), so cache with a short TTL: captions may lag a relabel
+# by at most _SUP_MAP_TTL seconds. Keyed on the soil db path so test
+# fixtures (each with its own database) never share entries. Returns a
+# SHARED mapping — read-only use.
+_SUP_MAP_TTL = 30.0
+_sup_map_cache: dict = {"key": None, "at": -_SUP_MAP_TTL, "map": {}}
+
+
+def _load_sup_map() -> dict:
+    with get_soil() as soil_conn:
+        key = str(soil_conn.db_path)
+        now = time.monotonic()
+        if _sup_map_cache["key"] == key and now - _sup_map_cache["at"] < _SUP_MAP_TTL:
+            return _sup_map_cache["map"]
+        rows = soil_conn._get_connection().execute(
+            "SELECT uuid, superseded_by FROM item WHERE superseded_by IS NOT NULL"
+        ).fetchall()
+    _sup_map_cache["key"] = key
+    _sup_map_cache["at"] = now
+    _sup_map_cache["map"] = {r["uuid"]: r["superseded_by"] for r in rows}
+    return _sup_map_cache["map"]
 
 
 @operator_bp.get("/triage")
@@ -202,10 +231,7 @@ def triage_queue():
         rel_rows = rconn.execute(
             "SELECT source, target FROM system_relation WHERE kind = 'contained_by'"
         ).fetchall()
-        sup_rows = rconn.execute(
-            "SELECT uuid, superseded_by FROM item WHERE superseded_by IS NOT NULL"
-        ).fetchall()
-    sup_map = {r["uuid"]: r["superseded_by"] for r in sup_rows}
+    sup_map = _load_sup_map()
 
     def _live_target(prefixed: str) -> str:
         seen: set = set()
