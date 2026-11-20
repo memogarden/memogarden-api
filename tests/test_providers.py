@@ -99,6 +99,18 @@ class TestRegistration:
         assert response.status_code == 409
         assert response.get_json()["error"]["type"] == "ConflictError"
 
+    def test_register_requires_jwt(
+        self, client, auth_headers, auth_headers_apikey, dummy_module
+    ):
+        """Registering ingestion code is a trust act (RFC-015 §2.1 #6):
+        JWT-only, mirroring PUT /<name>/scope-policy and account
+        registration — API keys keep read + run-trigger access (#58)."""
+        denied = _register(client, auth_headers_apikey, _payload(dummy_module))
+        assert denied.status_code == 401
+
+        allowed = _register(client, auth_headers, _payload(dummy_module))
+        assert allowed.status_code == 201
+
     def test_register_rejects_reserved_name_run(self, client, auth_headers, dummy_module):
         response = _register(client, auth_headers, _payload(dummy_module, name="run"))
         assert response.status_code == 400

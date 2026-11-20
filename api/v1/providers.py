@@ -30,6 +30,11 @@ providers_bp = Blueprint("providers", __name__, url_prefix="/providers")
 def register_provider(data: RegisterProviderRequest):
     """Register a data provider.
 
+    Operator-gated (JWT only): registering ingestion code is a trust act
+    (RFC-015 §2.1 #6) — D1's invariant applied to those who shape it, the
+    same gate PUT /<name>/scope-policy and POST /<name>/accounts already
+    carry. API keys keep full read and run-trigger access (#58).
+
     The server validates the registration at the door: module must be
     importable in the server environment, class must conform to the Provider
     Protocol; derived capabilities are stored in the manifest.
@@ -42,6 +47,7 @@ def register_provider(data: RegisterProviderRequest):
              mismatch, reserved name)
         409: Name already registered
     """
+    _authenticate_jwt()
     return jsonify(provider_registry.register_provider(data)), 201
 
 
