@@ -1,10 +1,11 @@
 name: Deploy to RPi
 
+# PAUSED 2026-11-21: the RPi deploy webhook has never succeeded end-to-end
+# (tracked in #44) — per-push runs only produced failure issues (#63–89).
+# Deploys currently happen manually (git pull + service restart on the host).
+# Re-enable the push trigger only after #44 is fixed.
 on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:  # Manual trigger only while #44 is unresolved
 
 jobs:
   deploy:
