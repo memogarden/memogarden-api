@@ -189,11 +189,44 @@ def triage_queue():
     for r in entities:
         prefixed = uid.add_core_prefix(r["uuid"])
         item_by_bare[prefixed.removeprefix("core_")] = prefixed
-    for rel in core._conn.execute(
+
+    # contained_by pairs live in BOTH relation stores: soil's system_relation
+    # (provider-created — gmail attachments -> emails, session links) and
+    # core's user_relation (RFC-002, dormant). Relation targets may sit on a
+    # superseded email version — system#11 semantics: an amended email's
+    # attachments keep parented to the version they were captured for — so
+    # collapse supersedes chains to the live parent before matching the
+    # window.
+    with get_soil() as soil2:
+        rconn = soil2._get_connection()
+        rel_rows = rconn.execute(
+            "SELECT source, target FROM system_relation WHERE kind = 'contained_by'"
+        ).fetchall()
+        sup_rows = rconn.execute(
+            "SELECT uuid, superseded_by FROM item WHERE superseded_by IS NOT NULL"
+        ).fetchall()
+    sup_map = {r["uuid"]: r["superseded_by"] for r in sup_rows}
+
+    def _live_target(prefixed: str) -> str:
+        seen: set = set()
+        u = prefixed
+        while u in sup_map and u not in seen:
+            seen.add(u)
+            u = sup_map[u]
+        if u in sup_map:
+            # A supersedes cycle is data corruption; degrade to dropping the
+            # pair rather than hanging, but say so.
+            logger.warning("supersedes cycle detected at %s; containment pair dropped", prefixed)
+        return u
+
+    user_rel_rows = core._conn.execute(
         "SELECT source, target FROM user_relation WHERE kind = 'contained_by'"
-    ).fetchall():
+    ).fetchall()
+    for rel in list(rel_rows) + list(user_rel_rows):
         child = item_by_bare.get(rel["source"].removeprefix("soil_").removeprefix("core_"))
-        parent = item_by_bare.get(rel["target"].removeprefix("soil_").removeprefix("core_"))
+        parent = item_by_bare.get(
+            _live_target(rel["target"]).removeprefix("soil_").removeprefix("core_")
+        )
         if child and parent and child != parent:
             child_parent[child] = parent
 
@@ -244,18 +277,20 @@ def triage_queue():
             parent_stubs[child_uuid] = _stub_from_item(prow)
 
     # contained_by children without in-window parents: resolve the target's
-    # live version (the target may live in either layer).
-    for rel in core._conn.execute(
-        "SELECT source, target FROM user_relation WHERE kind = 'contained_by'"
-    ).fetchall():
+    # live version (the target may live in either layer). Same dual-store
+    # read + supersedes collapse as the families map above. NB: soil stores
+    # item uuids WITH the soil_ prefix (system_relation targets match), so
+    # the item lookup uses the prefixed form; entity rows are bare.
+    for rel in list(rel_rows) + list(user_rel_rows):
         child = item_by_bare.get(rel["source"].removeprefix("soil_").removeprefix("core_"))
         if child is None or child in child_parent:
             continue
-        bare_target = rel["target"].removeprefix("soil_").removeprefix("core_")
+        live_target = _live_target(rel["target"])
+        bare_target = live_target.removeprefix("soil_").removeprefix("core_")
         with get_soil() as soil2:
             prow = soil2._get_connection().execute(
                 "SELECT uuid, _type, data, metadata FROM item "
-                "WHERE uuid = ? AND superseded_by IS NULL LIMIT 1", (bare_target,)
+                "WHERE uuid = ? AND superseded_by IS NULL LIMIT 1", (live_target,)
             ).fetchone()
         if prow:
             parent_stubs[child] = _stub_from_item(prow)

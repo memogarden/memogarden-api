@@ -14,6 +14,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 from system.soil import Fact, generate_soil_uuid, get_soil
+from system.soil.relation import SystemRelation
 from utils import isodatetime
 
 
@@ -57,6 +58,16 @@ def _unlabeled_fact(title: str) -> str:
             metadata=None,
             integrity_hash=None,
             fidelity="full",
+        ))
+
+
+def _fact(_type: str, data: dict, metadata: dict | None) -> str:
+    """Generic soil fact helper (emails, attachments, notes, ...)."""
+    with get_soil() as soil:
+        return soil.create_fact(Fact(
+            uuid=generate_soil_uuid(), _type=_type,
+            realized_at=isodatetime.now(), canonical_at=isodatetime.now(),
+            data=data, metadata=metadata, integrity_hash=None, fidelity="full",
         ))
 
 
@@ -195,6 +206,98 @@ def test_triage_reports_containment(client, auth_headers, core):
     assert stubs[child2]["uuid"] == parent2
     assert stubs[child2]["title"] == "filed parent"
     assert stubs[child2]["scopes"] == []
+
+
+def _soil_relation(child: str, parent: str) -> None:
+    """Soil contained_by edge — the store provider create_relations hooks
+    actually write (gmail attachments -> emails, session links)."""
+    with get_soil() as soil:
+        soil.create_relation(SystemRelation(
+            uuid=generate_soil_uuid(), kind="contained_by",
+            source=child, target=parent,
+            source_type="item", target_type="item",
+            created_at=0, evidence=None, metadata=None,
+        ))
+
+
+def test_triage_families_soil_contained_by(client, auth_headers, core):
+    """Attachment -> email families group via soil system_relation (the
+    console previously only read core user_relation, which has no rows, so
+    gmail families never rendered)."""
+    triage = _make_scope(core, "Triage / Untrusted")
+    parent = _fact("Email", {"title": "thread parent"}, {"scopes": [triage], "account": "gmail"})
+    child = _fact("Attachment", {"filename": "invoice.pdf"}, {"scopes": [triage], "email_uuid": parent})
+    _soil_relation(child, parent)
+
+    response = client.get("/api/v1/triage", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["containment"]["child_parent"] == {child: parent}
+
+
+def test_triage_families_follow_supersedes_multi_hop(client, auth_headers, core):
+    """system#11 semantics: an amended email's attachment keeps parented to
+    the version it was captured for — the family must resolve through the
+    supersedes chain (here two hops) to the LIVE parent version."""
+    triage = _make_scope(core, "Triage / Untrusted")
+    old_parent = _fact("Email", {"title": "v1"}, {"scopes": [triage], "account": "gmail"})
+    child = _fact("Attachment", {"filename": "invoice.pdf"}, {"scopes": [triage], "email_uuid": old_parent})
+    _soil_relation(child, old_parent)
+    mid_parent = _fact("Email", {"title": "v2"}, {"scopes": [triage], "account": "gmail"})
+    with get_soil() as soil:
+        soil.mark_superseded(old_parent, mid_parent, isodatetime.now())
+    newest_parent = _fact("Email", {"title": "v3"}, {"scopes": [triage], "account": "gmail"})
+    with get_soil() as soil:
+        soil.mark_superseded(mid_parent, newest_parent, isodatetime.now())
+
+    response = client.get("/api/v1/triage", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["containment"]["child_parent"] == {child: newest_parent}
+
+
+def test_triage_orphan_stub_soil_relation(client, auth_headers, core):
+    """Attachment whose parent is not in the window (filed elsewhere /
+    unscoped) gets a stub resolved via the soil relation, so the console
+    captions the orphan instead of showing a mystery row."""
+    triage = _make_scope(core, "Triage / Untrusted")
+    parent = _fact("Email", {"title": "filed elsewhere"}, {"scopes": []})
+    child = _fact("Attachment", {"filename": "invoice.pdf"}, {"scopes": [triage], "email_uuid": parent})
+    _soil_relation(child, parent)
+
+    response = client.get("/api/v1/triage", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.get_json()
+    stubs = data["containment"]["parent_stubs"]
+    assert stubs[child]["uuid"] == parent
+    assert stubs[child]["title"] == "filed elsewhere"
+    assert stubs[child]["scopes"] == []
+    assert child not in data["containment"]["child_parent"]
+
+
+def test_triage_orphan_stub_follows_supersedes(client, auth_headers, core):
+    """The stub path resolves the target's supersedes chain too — this exact
+    lookup previously used the bare uuid form and could never match soil's
+    prefixed item rows."""
+    triage = _make_scope(core, "Triage / Untrusted")
+    old_parent = _fact("Email", {"title": "v1"}, {"scopes": []})
+    child = _fact("Attachment", {"filename": "invoice.pdf"},
+                  {"scopes": [triage], "email_uuid": old_parent})
+    _soil_relation(child, old_parent)
+    mid_parent = _fact("Email", {"title": "v2"}, {"scopes": []})
+    with get_soil() as soil:
+        soil.mark_superseded(old_parent, mid_parent, isodatetime.now())
+    newest_parent = _fact("Email", {"title": "v3"}, {"scopes": []})
+    with get_soil() as soil:
+        soil.mark_superseded(mid_parent, newest_parent, isodatetime.now())
+
+    response = client.get("/api/v1/triage", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.get_json()
+    stub = data["containment"]["parent_stubs"][child]
+    assert stub["uuid"] == newest_parent
+    assert stub["title"] == "v3"
+    assert stub["scopes"] == []
 
 
 def test_triage_unknown_scope_400(client, auth_headers):
