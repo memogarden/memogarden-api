@@ -148,8 +148,19 @@ def worker_int(worker):
 
 def worker_abort(worker):
     """Called when a worker receives the SIGABRT signal."""
+    import faulthandler
     import logging
+    import sys
     logging.error(f"Worker received SIGABRT signal (pid: {worker.pid})")
+    # The worker is about to die on the arbiter's timeout — dump every
+    # thread's stack so the freeze point is diagnosable from the error
+    # log (watchdog murders were undiagnosable before this, 2026-11-20).
+    try:
+        logging.error("--- thread stacks at abort ---")
+        faulthandler.dump_traceback(file=sys.stderr)
+        logging.error("--- end thread stacks ---")
+    except Exception:
+        pass
 
 def pre_request(worker, req):
     """Called just before a worker processes the request."""
