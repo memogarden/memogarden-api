@@ -161,7 +161,8 @@ def triage_queue():
     # parent fact data.source_id) and generic contained_by relations
     # (child -> parent). Only pairs with BOTH endpoints inside the returned
     # window are reported; children whose parent fell outside the window
-    # render as standalone rows.
+    # get a parent STUB (live version resolved anywhere in the corpus) so
+    # the console can caption the orphan instead of showing a mystery row.
     child_parent: dict = {}
     parents_by_source_id: dict = {}
     for r in facts:
@@ -186,6 +187,76 @@ def triage_queue():
         parent = item_by_bare.get(rel["target"].removeprefix("soil_").removeprefix("core_"))
         if child and parent and child != parent:
             child_parent[child] = parent
+
+    # Orphan stubs: for window children with no in-window parent, resolve the
+    # parent's LIVE version (supersede chain collapsed) anywhere in the
+    # corpus — triage-labeled on an older page, filed elsewhere, or unscoped —
+    # so the console captions the orphan instead of showing a mystery row.
+    # v1 keeps actions on the child itself: the parent already had its filing
+    # decision, and cascading to an out-of-window parent would hide where the
+    # decision actually landed.
+    parent_stubs: dict = {}
+
+    def _stub_from_item(row) -> dict:
+        data = _loads(row["data"]) or {}
+        meta = _loads(row["metadata"]) or {}
+        return {
+            "uuid": uid.add_soil_prefix(row["uuid"]),
+            "type": row["_type"],
+            "title": data.get("title") or data.get("subject")
+            or data.get("description") or data.get("label") or "",
+            "scopes": meta.get("scopes") or [],
+        }
+
+    def _stub_from_entity(row) -> dict:
+        data = _loads(row["data"]) or {}
+        return {
+            "uuid": uid.add_core_prefix(row["uuid"]),
+            "type": row["type"],
+            "title": data.get("title") or data.get("subject")
+            or data.get("description") or data.get("label") or "",
+            "scopes": data.get("scopes") or [],
+        }
+
+    # tada-style children: resolve the live parent by source_id.
+    for r in facts:
+        task_source_id = (_loads(r["metadata"]) or {}).get("task_source_id")
+        child_uuid = uid.add_soil_prefix(r["uuid"])
+        if not task_source_id or child_uuid in child_parent:
+            continue
+        with get_soil() as soil2:
+            prow = soil2._get_connection().execute(
+                "SELECT uuid, _type, data, metadata FROM item "
+                "WHERE json_extract(data, '$.source_id') = ? "
+                "AND superseded_by IS NULL LIMIT 1",
+                (task_source_id,),
+            ).fetchone()
+        if prow:
+            parent_stubs[child_uuid] = _stub_from_item(prow)
+
+    # contained_by children without in-window parents: resolve the target's
+    # live version (the target may live in either layer).
+    for rel in core._conn.execute(
+        "SELECT source, target FROM user_relation WHERE kind = 'contained_by'"
+    ).fetchall():
+        child = item_by_bare.get(rel["source"].removeprefix("soil_").removeprefix("core_"))
+        if child is None or child in child_parent:
+            continue
+        bare_target = rel["target"].removeprefix("soil_").removeprefix("core_")
+        with get_soil() as soil2:
+            prow = soil2._get_connection().execute(
+                "SELECT uuid, _type, data, metadata FROM item "
+                "WHERE uuid = ? AND superseded_by IS NULL LIMIT 1", (bare_target,)
+            ).fetchone()
+        if prow:
+            parent_stubs[child] = _stub_from_item(prow)
+            continue
+        erow = core._conn.execute(
+            "SELECT uuid, type, data FROM entity "
+            "WHERE uuid = ? AND superseded_by IS NULL LIMIT 1", (bare_target,)
+        ).fetchone()
+        if erow:
+            parent_stubs[child] = _stub_from_entity(erow)
 
     return jsonify({
         "scope": {
@@ -214,7 +285,10 @@ def triage_queue():
         ],
         "total_facts": total_facts,
         "total_entities": total_entities,
-        "containment": {"child_parent": child_parent},
+        "containment": {
+            "child_parent": child_parent,
+            "parent_stubs": parent_stubs,
+        },
     })
 
 

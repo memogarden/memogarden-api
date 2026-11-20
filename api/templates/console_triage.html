@@ -112,6 +112,7 @@ function renderTriage() {
                 <div class="flex-1 min-w-0">
                     <div class="text-sm font-medium text-gray-900 truncate">${esc(title)}</div>
                     <div class="text-xs text-gray-500">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.realized_at)} · ${shortUuid(f.uuid)}</div>
+                    ${orphanCaption(f.uuid)}
                     ${familyBlock(kids)}
                 </div>
                 <div class="flex gap-1 flex-wrap w-full sm:w-auto">
@@ -140,6 +141,7 @@ function renderTriage() {
                 <div class="flex-1 min-w-0">
                     <div class="text-sm font-medium text-gray-900 truncate">${esc(title)}</div>
                     <div class="text-xs text-gray-500">${esc(e.type)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(e.updated_at)} · ${shortUuid(e.uuid)}</div>
+                    ${orphanCaption(e.uuid)}
                     ${familyBlock(kids)}
                 </div>
                 <div class="flex gap-1 flex-wrap w-full sm:w-auto">
@@ -172,6 +174,22 @@ function familyBlock(kids) {
             return `<div class="text-xs text-gray-500 truncate" title="${esc(k.uuid)}">↳ ${esc(k.type || k._type || 'item')} · ${esc(ktitle)}</div>`;
         }).join('')}
     </div>`;
+}
+
+// Orphan caption: the child's parent is OUTSIDE the window — the endpoint
+// resolved the parent's live version so the row says what it belongs to
+// (in triage on an older page / filed to some scope / unscoped) instead of
+// reading as a mystery bare row. Actions stay on the child.
+function orphanCaption(uuid) {
+    const stub = TRIAGE.containment && TRIAGE.containment.parent_stubs
+        ? TRIAGE.containment.parent_stubs[uuid] : null;
+    if (!stub) return '';
+    const bare = u => String(u || '').replace(/^(soil_|core_)/, '');
+    const triageBare = bare(TRIAGE.scope && TRIAGE.scope.uuid);
+    const status = !stub.scopes || !stub.scopes.length ? 'unscoped'
+        : stub.scopes.some(s => bare(s) === triageBare) ? 'still in triage — older page'
+        : 'filed';
+    return `<div class="mt-1 text-xs text-gray-500 truncate">↳ part of ${esc(stub.type)} · ${esc(stub.title || stub.uuid)} · ${status}</div>`;
 }
 
 // In-place state update after a successful filing: the family has LEFT the

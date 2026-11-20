@@ -146,6 +146,11 @@ def test_triage_reports_containment(client, auth_headers, core):
             ))
     parent = _fact("Event", {"source_id": "tada-1", "title": "parent task", "kind": "task"}, {"scopes": [triage]})
     child = _fact("Note", {"description": "child note"}, {"scopes": [triage], "task_source_id": "tada-1"})
+    # Orphan: parent exists (live, UNSCOPED — filed elsewhere) but is not in
+    # the triage set, so the pair cannot be in-window; the endpoint resolves
+    # a stub so the console can caption the child.
+    parent2 = _fact("Event", {"source_id": "tada-2", "title": "filed parent", "kind": "task"}, {"scopes": []})
+    child2 = _fact("Note", {"description": "orphan note"}, {"scopes": [triage], "task_source_id": "tada-2"})
     _labeled_fact("standalone", [triage])
 
     response = client.get("/api/v1/triage", headers=auth_headers)
@@ -154,6 +159,10 @@ def test_triage_reports_containment(client, auth_headers, core):
     # generate_soil_uuid() returns already-prefixed uuids; the endpoint
     # passes them through prefixed exactly once.
     assert data["containment"]["child_parent"] == {child: parent}
+    stubs = data["containment"]["parent_stubs"]
+    assert stubs[child2]["uuid"] == parent2
+    assert stubs[child2]["title"] == "filed parent"
+    assert stubs[child2]["scopes"] == []
 
 
 def test_triage_unknown_scope_400(client, auth_headers):
