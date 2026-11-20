@@ -3,22 +3,34 @@
 {% block title %}{% block console_title %}Operator Console{% endblock %} - MemoGarden{% endblock %}
 
 {% block body %}
-<div class="min-h-screen bg-gray-50">
+<div class="min-h-screen bg-gray-50 dark:bg-gray-950">
     <!-- Header -->
-    <header class="bg-white shadow">
+    <header class="bg-white dark:bg-gray-900 shadow">
         <div class="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8 flex justify-between items-center gap-2 sm:gap-4">
             <div class="flex items-baseline gap-2 sm:gap-3 min-w-0">
-                <h1 class="text-xl font-bold text-gray-900">MemoGarden</h1>
-                <span class="text-sm font-medium text-gray-500 hidden sm:inline">Operator Console</span>
-                <span class="text-xs text-gray-400 hidden sm:inline">RFC-015 · OP = operator-only · DELE = delegable, verify</span>
+                <h1 class="text-xl font-bold text-gray-900 dark:text-gray-100">MemoGarden</h1>
+                <span class="text-sm font-medium text-gray-500 dark:text-gray-400 hidden sm:inline">Operator Console</span>
+                <span class="text-xs text-gray-400 dark:text-gray-500 hidden sm:inline">RFC-015 · OP = operator-only · DELE = delegable, verify</span>
             </div>
             <div class="flex items-center gap-2 sm:gap-3 flex-shrink-0">
-                <span id="enforcementChip" class="text-xs px-2 py-1 rounded border border-gray-300 text-gray-500 whitespace-nowrap">
+                <span id="enforcementChip" class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-gray-500 dark:text-gray-400 whitespace-nowrap">
                     <span id="enforcementChipDot" class="inline-block w-1.5 h-1.5 rounded-full bg-gray-400 align-middle"></span><span id="enforcementChipText" class="hidden sm:inline">enforcement…</span>
                 </span>
-                <span id="userDisplay" class="text-sm text-gray-700 hidden sm:inline"></span>
-                <a href="/console/settings" class="text-sm text-gray-600 hover:text-gray-900">Settings</a>
-                <button id="logoutBtn" class="text-sm text-gray-600 hover:text-gray-900">Logout</button>
+                <span id="userDisplay" class="text-sm text-gray-700 dark:text-gray-300 hidden sm:inline"></span>
+                <button id="themeToggle" type="button" class="p-1.5 rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700" aria-label="Theme" title="Theme">
+                    <svg data-theme-icon="auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 17.25v1.007a3 3 0 0 1-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0 1 15 18.257v-1.007a3 3 0 0 0-.879-2.122H9Z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 4.5h16.5a.75.75 0 0 1 .75.75v9a.75.75 0 0 1-.75.75H3.75a.75.75 0 0 1-.75-.75v-9a.75.75 0 0 1 .75-.75Z" />
+                    </svg>
+                    <svg data-theme-icon="light" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 hidden" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v2.25m6.364.386-1.591 1.591M21 12h-2.25m-.386 6.364-1.591-1.591M12 18.75V21m-4.773-4.227-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0Z" />
+                    </svg>
+                    <svg data-theme-icon="dark" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 hidden" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M21.752 15.002A9.72 9.72 0 0 1 18 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 0 0 3 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 0 0 9.002-5.998Z" />
+                    </svg>
+                </button>
+                <a href="/console/settings" class="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100">Settings</a>
+                <button id="logoutBtn" class="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100">Logout</button>
             </div>
         </div>
     </header>
@@ -27,16 +39,16 @@
         <!-- Sidebar -->
         <aside class="lg:w-56 flex-shrink-0">
             <nav id="consoleNav" data-page="{% block console_page %}{% endblock %}" class="flex gap-1 overflow-x-auto pb-1 lg:block lg:space-y-1 lg:overflow-visible lg:pb-0">
-                <a href="/console/triage" data-nav="triage" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200 whitespace-nowrap lg:whitespace-normal">
-                    Triage review <span id="badgeTriage" class="hidden float-none ml-1 lg:float-right lg:ml-0 text-xs bg-gray-200 text-gray-700 rounded-full px-2"></span>
+                <a href="/console/triage" data-nav="triage" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 whitespace-nowrap lg:whitespace-normal">
+                    Triage review <span id="badgeTriage" class="hidden float-none ml-1 lg:float-right lg:ml-0 text-xs bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-full px-2"></span>
                 </a>
-                <a href="/console/scopes" data-nav="scopes" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200 whitespace-nowrap lg:whitespace-normal">Scopes &amp; grants</a>
-                <a href="/console/identity" data-nav="identity" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200 whitespace-nowrap lg:whitespace-normal">Keys &amp; agents</a>
-                <a href="/console/providers" data-nav="providers" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200 whitespace-nowrap lg:whitespace-normal">Providers</a>
-                <a href="/console/occurrences" data-nav="occurrences" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200 whitespace-nowrap lg:whitespace-normal">
-                    Occurrences <span id="badgeOccurrences" class="hidden float-none ml-1 lg:float-right lg:ml-0 text-xs bg-gray-200 text-gray-700 rounded-full px-2"></span>
+                <a href="/console/scopes" data-nav="scopes" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 whitespace-nowrap lg:whitespace-normal">Scopes &amp; grants</a>
+                <a href="/console/identity" data-nav="identity" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 whitespace-nowrap lg:whitespace-normal">Keys &amp; agents</a>
+                <a href="/console/providers" data-nav="providers" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 whitespace-nowrap lg:whitespace-normal">Providers</a>
+                <a href="/console/occurrences" data-nav="occurrences" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 whitespace-nowrap lg:whitespace-normal">
+                    Occurrences <span id="badgeOccurrences" class="hidden float-none ml-1 lg:float-right lg:ml-0 text-xs bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-full px-2"></span>
                 </a>
-                <a href="/console/audit" data-nav="audit" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-200 whitespace-nowrap lg:whitespace-normal">Audit</a>
+                <a href="/console/audit" data-nav="audit" class="console-nav block px-3 py-2 rounded-lg text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 whitespace-nowrap lg:whitespace-normal">Audit</a>
             </nav>
         </aside>
 
@@ -71,6 +83,35 @@
         loadChromeData();
     }
 
+    // ---- Theme toggle: cycles auto → light → dark (default auto = system).
+    // The <html> class is applied pre-paint by the base.html head bootstrap;
+    // here we only override the preference and keep the icon in sync. ----
+    function themeMode() {
+        const mode = localStorage.getItem('theme');
+        return (mode === 'light' || mode === 'dark') ? mode : 'auto';
+    }
+
+    function applyTheme(mode) {
+        const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.classList.toggle('dark', mode === 'dark' || (mode === 'auto' && systemDark));
+        document.querySelectorAll('#themeToggle [data-theme-icon]').forEach(function(icon) {
+            icon.classList.toggle('hidden', icon.dataset.themeIcon !== mode);
+        });
+        const label = mode === 'auto' ? 'Theme: auto (system)' : 'Theme: ' + mode + ' — click for ' + (mode === 'light' ? 'dark' : (mode === 'dark' ? 'auto' : 'light'));
+        const toggle = document.getElementById('themeToggle');
+        toggle.title = label;
+        toggle.setAttribute('aria-label', label);
+    }
+
+    function setupThemeToggle() {
+        applyTheme(themeMode());
+        document.getElementById('themeToggle').addEventListener('click', function() {
+            const mode = themeMode() === 'auto' ? 'light' : (themeMode() === 'light' ? 'dark' : 'auto');
+            localStorage.setItem('theme', mode);
+            applyTheme(mode);
+        });
+    }
+
     function setupChrome() {
         document.getElementById('logoutBtn').addEventListener('click', function() {
             localStorage.removeItem('access_token');
@@ -78,11 +119,13 @@
             window.location.href = '/login';
         });
 
+        setupThemeToggle();
+
         // Highlight the active nav item
         const navPage = document.getElementById('consoleNav').dataset.page;
         document.querySelectorAll('.console-nav').forEach(function(link) {
             if (link.dataset.nav === navPage) {
-                link.classList.add('bg-gray-200', 'font-medium', 'text-gray-900');
+                link.classList.add('bg-gray-200', 'dark:bg-gray-700', 'font-medium', 'text-gray-900', 'dark:text-gray-100');
             }
         });
     }
@@ -166,11 +209,11 @@
             const chipDot = document.getElementById('enforcementChipDot');
             if (overview.enforcement) {
                 chipText.textContent = 'enforcement ON';
-                chip.className = 'text-xs px-2 py-1 rounded border border-green-300 bg-green-50 text-green-700 whitespace-nowrap';
+                chip.className = 'text-xs px-2 py-1 rounded border border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-900/40 text-green-700 dark:text-green-300 whitespace-nowrap';
                 chipDot.className = 'inline-block w-1.5 h-1.5 rounded-full bg-green-500 align-middle';
             } else {
                 chipText.textContent = 'enforcement advisory (flag off)';
-                chip.className = 'text-xs px-2 py-1 rounded border border-amber-300 bg-amber-50 text-amber-700 whitespace-nowrap';
+                chip.className = 'text-xs px-2 py-1 rounded border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 whitespace-nowrap';
                 chipDot.className = 'inline-block w-1.5 h-1.5 rounded-full bg-amber-500 align-middle';
                 chip.title = 'Flip MEMOGARDEN_SCOPE_ENFORCEMENT in the service env + restart to make label gates real';
             }

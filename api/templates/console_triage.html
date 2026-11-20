@@ -5,41 +5,41 @@
 
 {% block console_content %}
 <div class="flex justify-between items-center mb-2">
-    <h2 class="text-lg font-semibold text-gray-900">Triage review</h2>
-    <span id="scopeContext" class="text-xs text-gray-500"></span>
+    <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Triage review</h2>
+    <span id="scopeContext" class="text-xs text-gray-500 dark:text-gray-400"></span>
 </div>
-<p class="text-sm text-gray-600 mb-4">
+<p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
     Items land here by provider scope policy or the fail-closed default. Sorting = relabel into a destination scope
     (amend; D2 gates every label change).
 </p>
 
-<div class="flex flex-wrap gap-2 sm:gap-3 items-center mb-4 bg-white shadow rounded-lg p-3 sticky top-0 z-20">
+<div class="flex flex-wrap gap-2 sm:gap-3 items-center mb-4 bg-white dark:bg-gray-900 shadow rounded-lg p-3 sticky top-0 z-20">
     <label class="flex items-center gap-1 text-sm">
         <input type="checkbox" id="selAll" class="rounded"> <span><b id="selCount">0</b><span class="hidden sm:inline"> selected</span></span>
     </label>
-    <span class="text-sm text-gray-600 hidden sm:inline">file to</span>
-    <select id="destScope" class="flex-1 sm:flex-none min-w-0 border border-gray-300 rounded-lg px-3 py-1.5 text-sm"></select>
+    <span class="text-sm text-gray-600 dark:text-gray-400 hidden sm:inline">file to</span>
+    <select id="destScope" class="flex-1 sm:flex-none min-w-0 border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm"></select>
     <button id="applyRelabel" class="px-3 sm:px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">
         Apply<span class="hidden sm:inline"> relabel</span> <span class="text-xs opacity-75 hidden sm:inline">OP</span>
     </button>
-    <button id="makePublicBulk" class="px-3 py-1.5 border border-amber-300 text-amber-700 rounded-lg text-sm hover:bg-amber-50"
+    <button id="makePublicBulk" class="px-3 py-1.5 border border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-300 rounded-lg text-sm hover:bg-amber-50 dark:hover:bg-amber-900/40"
         title="remove all scopes from the selection — items become unscoped (globally visible)">
         → Public <span class="text-xs opacity-75 hidden sm:inline">OP</span>
     </button>
-    <span class="text-xs text-gray-400 hidden sm:inline">agents may sort with grants on triage + target — under enforcement</span>
+    <span class="text-xs text-gray-400 dark:text-gray-500 hidden sm:inline">agents may sort with grants on triage + target — under enforcement</span>
 </div>
 
 <ul id="tabs" class="flex gap-2 mb-3 text-sm">
-    <li><button data-tab="facts" class="tab px-3 py-1 rounded-lg bg-gray-200 font-medium">Facts (<span id="cntFacts">…</span>)</button></li>
-    <li><button data-tab="entities" class="tab px-3 py-1 rounded-lg text-gray-600">Entities (<span id="cntEntities">…</span>)</button></li>
+    <li><button data-tab="facts" class="tab px-3 py-1 rounded-lg bg-gray-200 dark:bg-gray-700 font-medium">Facts (<span id="cntFacts">…</span>)</button></li>
+    <li><button data-tab="entities" class="tab px-3 py-1 rounded-lg text-gray-600 dark:text-gray-400">Entities (<span id="cntEntities">…</span>)</button></li>
 </ul>
 
 <div id="factsList" class="space-y-2"></div>
 <div id="entitiesList" class="space-y-2 hidden"></div>
 
 <div class="mt-8">
-    <h3 class="text-sm font-semibold text-gray-900 mb-2">Recent relabels <span class="text-xs text-gray-400">DELE</span></h3>
-    <div id="relabelLog" class="bg-white shadow rounded-lg divide-y divide-gray-100 text-sm"></div>
+    <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-2">Recent relabels <span class="text-xs text-gray-400 dark:text-gray-500">DELE</span></h3>
+    <div id="relabelLog" class="bg-white dark:bg-gray-900 shadow rounded-lg divide-y divide-gray-100 dark:divide-gray-800 text-sm"></div>
 </div>
 {% endblock %}
 
@@ -97,7 +97,7 @@ function renderTriage() {
     const facts = document.getElementById('factsList');
     const topFacts = TRIAGE.facts.filter(f => !CHILD_PARENT[f.uuid]);
     if (!topFacts.length) {
-        facts.innerHTML = '<div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">Nothing left in this window — reload for the next slice.</div>';
+        facts.innerHTML = '<div class="bg-white dark:bg-gray-900 shadow rounded-lg p-8 text-center text-gray-400 dark:text-gray-500">Nothing left in this window — reload for the next slice.</div>';
     } else {
         facts.innerHTML = topFacts.map(f => {
             const d = f.data || {};
@@ -107,20 +107,20 @@ function renderTriage() {
             const kept = dismissed.has(f.uuid);
             const kids = (CHILDREN_BY_PARENT[f.uuid] || []).map(findItem).filter(Boolean);
             return `
-            <div class="bg-white shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2 ${kept ? 'opacity-40' : ''}">
+            <div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2 ${kept ? 'opacity-40' : ''}">
                 <input type="checkbox" data-uuid="${esc(f.uuid)}" data-kind="fact" class="mt-1 rounded triage-cb" onchange="updateCount()">
                 <div class="flex-1 min-w-0">
-                    <div class="text-sm font-medium text-gray-900 truncate">${esc(title)}</div>
-                    <div class="text-xs text-gray-500">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.canonical_at || f.realized_at)} · ${shortUuid(f.uuid)}</div>
+                    <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">${esc(title)}</div>
+                    <div class="text-xs text-gray-500 dark:text-gray-400">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.canonical_at || f.realized_at)} · ${shortUuid(f.uuid)}</div>
                     ${orphanCaption(f.uuid)}
                     ${familyBlock(kids)}
                 </div>
                 <div class="flex gap-1 flex-wrap w-full sm:w-auto">
                     ${OVERVIEW.scopes.filter(s => (s.data ? s.data.label : s.label) !== 'Triage / Untrusted').map(s =>
-                        `<button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="relabel('${esc(f.uuid)}','fact',['${esc(s.uuid)}'])">→ ${esc(s.label)}</button>`
+                        `<button class="px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800" onclick="relabel('${esc(f.uuid)}','fact',['${esc(s.uuid)}'])">→ ${esc(s.label)}</button>`
                     ).join('')}
-                    <button class="px-2 py-1 text-xs border border-amber-300 text-amber-700 rounded hover:bg-amber-50" title="remove all scopes from this item AND its members — they become unscoped (globally visible to any principal)" onclick="makePublic('${esc(f.uuid)}','fact')">→ Public</button>
-                    <button class="px-2 py-1 text-xs border border-gray-200 rounded text-gray-400" title="defer visually — the item stays in triage and returns on reload" onclick="dismissRow('${esc(f.uuid)}')">keep</button>
+                    <button class="px-2 py-1 text-xs border border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-300 rounded hover:bg-amber-50 dark:hover:bg-amber-900/40" title="remove all scopes from this item AND its members — they become unscoped (globally visible to any principal)" onclick="makePublic('${esc(f.uuid)}','fact')">→ Public</button>
+                    <button class="px-2 py-1 text-xs border border-gray-200 dark:border-gray-700 rounded text-gray-400 dark:text-gray-500" title="defer visually — the item stays in triage and returns on reload" onclick="dismissRow('${esc(f.uuid)}')">keep</button>
                 </div>
             </div>`;
         }).join('');
@@ -129,7 +129,7 @@ function renderTriage() {
     const ents = document.getElementById('entitiesList');
     const topEntities = TRIAGE.entities.filter(e => !CHILD_PARENT[e.uuid]);
     if (!topEntities.length) {
-        ents.innerHTML = '<div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">No scoped entities.</div>';
+        ents.innerHTML = '<div class="bg-white dark:bg-gray-900 shadow rounded-lg p-8 text-center text-gray-400 dark:text-gray-500">No scoped entities.</div>';
     } else {
         ents.innerHTML = topEntities.map(e => {
             const d = e.data || {};
@@ -137,18 +137,18 @@ function renderTriage() {
             const account = d.account || '';
             const kids = (CHILDREN_BY_PARENT[e.uuid] || []).map(findItem).filter(Boolean);
             return `
-            <div class="bg-white shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2">
+            <div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2">
                 <div class="flex-1 min-w-0">
-                    <div class="text-sm font-medium text-gray-900 truncate">${esc(title)}</div>
-                    <div class="text-xs text-gray-500">${esc(e.type)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(e.canonical_at || e.updated_at)} · ${shortUuid(e.uuid)}</div>
+                    <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">${esc(title)}</div>
+                    <div class="text-xs text-gray-500 dark:text-gray-400">${esc(e.type)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(e.canonical_at || e.updated_at)} · ${shortUuid(e.uuid)}</div>
                     ${orphanCaption(e.uuid)}
                     ${familyBlock(kids)}
                 </div>
                 <div class="flex gap-1 flex-wrap w-full sm:w-auto">
                     ${OVERVIEW.scopes.filter(s => (s.data ? s.data.label : s.label) !== 'Triage / Untrusted').map(s =>
-                        `<button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="relabel('${esc(e.uuid)}','entity',['${esc(s.uuid)}'])">→ ${esc(s.label)}</button>`
+                        `<button class="px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800" onclick="relabel('${esc(e.uuid)}','entity',['${esc(s.uuid)}'])">→ ${esc(s.label)}</button>`
                     ).join('')}
-                    <button class="px-2 py-1 text-xs border border-amber-300 text-amber-700 rounded hover:bg-amber-50" title="remove all scopes from this item AND its members — they become unscoped (globally visible to any principal)" onclick="makePublic('${esc(e.uuid)}','entity')">→ Public</button>
+                    <button class="px-2 py-1 text-xs border border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-300 rounded hover:bg-amber-50 dark:hover:bg-amber-900/40" title="remove all scopes from this item AND its members — they become unscoped (globally visible to any principal)" onclick="makePublic('${esc(e.uuid)}','entity')">→ Public</button>
                 </div>
             </div>`;
         }).join('');
@@ -167,11 +167,11 @@ function itemKind(uuid) {
 // Member list rendered under a parent card (read-only; filings cascade).
 function familyBlock(kids) {
     if (!kids.length) return '';
-    return `<div class="mt-1 ml-1 pl-2 border-l border-gray-200 space-y-0.5">
+    return `<div class="mt-1 ml-1 pl-2 border-l border-gray-200 dark:border-gray-700 space-y-0.5">
         ${kids.map(k => {
             const kd = k.data || {};
             const ktitle = kd.description || kd.subject || kd.title || kd.label || kd.filename || k.uuid;
-            return `<div class="text-xs text-gray-500 truncate" title="${esc(k.uuid)}">↳ ${esc(k.type || k._type || 'item')} · ${esc(ktitle)}</div>`;
+            return `<div class="text-xs text-gray-500 dark:text-gray-400 truncate" title="${esc(k.uuid)}">↳ ${esc(k.type || k._type || 'item')} · ${esc(ktitle)}</div>`;
         }).join('')}
     </div>`;
 }
@@ -189,7 +189,7 @@ function orphanCaption(uuid) {
     const status = !stub.scopes || !stub.scopes.length ? 'unscoped'
         : stub.scopes.some(s => bare(s) === triageBare) ? 'still in triage — older page'
         : 'filed';
-    return `<div class="mt-1 text-xs text-gray-500 truncate">↳ part of ${esc(stub.type)} · ${esc(stub.title || stub.uuid)} · ${status}</div>`;
+    return `<div class="mt-1 text-xs text-gray-500 dark:text-gray-400 truncate">↳ part of ${esc(stub.type)} · ${esc(stub.title || stub.uuid)} · ${status}</div>`;
 }
 
 // In-place state update after a successful filing: the family has LEFT the
@@ -338,8 +338,8 @@ document.getElementById('applyRelabel').addEventListener('click', async function
 
 document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', function() {
     activeTab = this.dataset.tab;
-    document.querySelectorAll('.tab').forEach(b => b.className = 'tab px-3 py-1 rounded-lg text-gray-600');
-    this.className = 'tab px-3 py-1 rounded-lg bg-gray-200 font-medium';
+    document.querySelectorAll('.tab').forEach(b => b.className = 'tab px-3 py-1 rounded-lg text-gray-600 dark:text-gray-400');
+    this.className = 'tab px-3 py-1 rounded-lg bg-gray-200 dark:bg-gray-700 font-medium';
     document.getElementById('factsList').classList.toggle('hidden', activeTab !== 'facts');
     document.getElementById('entitiesList').classList.toggle('hidden', activeTab !== 'entities');
 }));
@@ -356,11 +356,11 @@ async function loadRelabelLog() {
         document.getElementById('relabelLog').innerHTML = actions.length
             ? actions.map(a => {
                 const d = a.data || {};
-                return `<div class="px-3 py-2">${fmtTime(a.realized_at)} · <b>${esc((d.actor_type === 'agent') ? (d.actor || 'agent') : (d.actor || 'operator'))}</b> · amend ${shortUuid((d.params || {}).target)} <span class="text-xs text-gray-400">${esc(d.actor_type || '')}</span></div>`;
+                return `<div class="px-3 py-2">${fmtTime(a.realized_at)} · <b>${esc((d.actor_type === 'agent') ? (d.actor || 'agent') : (d.actor || 'operator'))}</b> · amend ${shortUuid((d.params || {}).target)} <span class="text-xs text-gray-400 dark:text-gray-500">${esc(d.actor_type || '')}</span></div>`;
               }).join('')
-            : '<div class="px-3 py-4 text-gray-400">No amends recorded yet.</div>';
+            : '<div class="px-3 py-4 text-gray-400 dark:text-gray-500">No amends recorded yet.</div>';
     } catch (error) {
-        document.getElementById('relabelLog').innerHTML = `<div class="px-3 py-2 text-gray-400">Relabel log unavailable: ${esc(error.message)}</div>`;
+        document.getElementById('relabelLog').innerHTML = `<div class="px-3 py-2 text-gray-400 dark:text-gray-500">Relabel log unavailable: ${esc(error.message)}</div>`;
     }
 }
 

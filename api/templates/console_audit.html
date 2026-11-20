@@ -4,17 +4,17 @@
 {% block console_page %}audit{% endblock %}
 
 {% block console_content %}
-<h2 class="text-lg font-semibold text-gray-900 mb-1">Action audit</h2>
-<p class="text-sm text-gray-600 mb-4">Action facts record every operation — including reads (RFC-005 full-op audit) and identity issuance (RFC-010 INV-2). Attribution is how delegation gets verified.</p>
+<h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-1">Action audit</h2>
+<p class="text-sm text-gray-600 dark:text-gray-400 mb-4">Action facts record every operation — including reads (RFC-005 full-op audit) and identity issuance (RFC-010 INV-2). Attribution is how delegation gets verified.</p>
 
 <div class="flex flex-wrap gap-2 items-center mb-3 text-sm">
-    <select id="fActorType" class="border border-gray-300 rounded-lg px-3 py-1.5">
+    <select id="fActorType" class="border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5">
         <option value="">actor type: all</option>
         <option value="operator">operator</option>
         <option value="agent">agent</option>
         <option value="api_key">api_key (unbound)</option>
     </select>
-    <select id="fOp" class="border border-gray-300 rounded-lg px-3 py-1.5">
+    <select id="fOp" class="border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5">
         <option value="">operation: all</option>
         <option value="amend">amend (relabels)</option>
         <option value="mark_occurred">mark_occurred</option>
@@ -23,24 +23,24 @@
         <option value="mint_api_key">mint_api_key</option>
         <option value="bind_agent_to_key">bind</option>
     </select>
-    <select id="fMode" class="border border-gray-300 rounded-lg px-3 py-1.5">
+    <select id="fMode" class="border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5">
         <option value="Action">actions</option>
         <option value="ActionResult">action results (errors)</option>
     </select>
-    <input id="fActor" class="border border-gray-300 rounded-lg px-3 py-1.5" placeholder="actor contains…">
-    <button id="applyFilters" class="px-3 py-1.5 bg-gray-200 rounded-lg text-sm hover:bg-gray-300">Apply</button>
+    <input id="fActor" class="border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5" placeholder="actor contains…">
+    <button id="applyFilters" class="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 rounded-lg text-sm hover:bg-gray-300 dark:hover:bg-gray-600">Apply</button>
 </div>
 
-<div class="bg-white shadow rounded-lg table-scroll">
+<div class="bg-white dark:bg-gray-900 shadow rounded-lg table-scroll">
     <table class="w-full text-sm">
-        <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+        <thead><tr class="text-left text-xs text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
             <th class="px-3 py-2">Time</th><th class="px-3 py-2">Actor</th><th class="px-3 py-2">Type</th>
             <th class="px-3 py-2">Operation</th><th class="px-3 py-2">Detail</th>
         </tr></thead>
-        <tbody id="auditBody"><tr><td class="px-3 py-4 text-gray-400" colspan="5">Loading…</td></tr></tbody>
+        <tbody id="auditBody"><tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="5">Loading…</td></tr></tbody>
     </table>
 </div>
-<p class="text-xs text-gray-400 mt-2">Showing the latest 200 matching facts. ActionResult mode lists completion records (result / error / duration) — pair by time and operation.</p>
+<p class="text-xs text-gray-400 dark:text-gray-500 mt-2">Showing the latest 200 matching facts. ActionResult mode lists completion records (result / error / duration) — pair by time and operation.</p>
 {% endblock %}
 
 {% block console_scripts %}
@@ -70,8 +70,8 @@ async function loadAudit() {
             const d = item.data || {};
             const who = esc(String(d.actor || '—'));
             const whoType = esc(String(d.actor_type || '—'));
-            const whoCls = whoType === 'agent' ? 'text-gray-900 font-medium'
-                : whoType === 'api_key' ? 'text-amber-600' : 'text-gray-900';
+            const whoCls = whoType === 'agent' ? 'text-gray-900 dark:text-gray-100 font-medium'
+                : whoType === 'api_key' ? 'text-amber-600 dark:text-amber-400' : 'text-gray-900 dark:text-gray-100';
             // Detail rides in the DOM (never an attribute — esc() does not
             // escape quotes), preview truncated to one line, expand on demand.
             let detailRaw = mode === 'Action'
@@ -80,25 +80,25 @@ async function loadAudit() {
             const fullDetail = esc(detailRaw.slice(0, 2000));
             const preview = esc(detailRaw.slice(0, 48));
             const errorDetail = mode !== 'Action' && d.error;
-            const errorCls = errorDetail ? 'text-red-600' : '';
-            const detailCell = `<td class="px-3 py-2 text-xs text-gray-500 max-w-[14rem]">
+            const errorCls = errorDetail ? 'text-red-600 dark:text-red-400' : '';
+            const detailCell = `<td class="px-3 py-2 text-xs text-gray-500 dark:text-gray-400 max-w-[14rem]">
                     <span class="detail-full hidden whitespace-pre-wrap break-all ${errorCls}">${fullDetail}</span>
                     <span class="detail-preview block truncate ${errorCls}">${preview}</span>
-                    <button class="detail-toggle text-blue-600 hover:underline ml-1" data-state="collapsed">show</button>
+                    <button class="detail-toggle text-blue-600 dark:text-blue-400 hover:underline ml-1" data-state="collapsed">show</button>
                 </td>`;
-            return `<tr class="border-b border-gray-100">
+            return `<tr class="border-b border-gray-100 dark:border-gray-800">
                 <td class="px-3 py-2 text-xs whitespace-nowrap">${fmtTime(item.realized_at)}</td>
-                <td class="px-3 py-2 whitespace-nowrap ${whoCls}">${who} <span class="text-xs text-gray-400">${whoType}</span></td>
+                <td class="px-3 py-2 whitespace-nowrap ${whoCls}">${who} <span class="text-xs text-gray-400 dark:text-gray-500">${whoType}</span></td>
                 <td class="px-3 py-2 text-xs">${esc(item.type || item._type || mode)}</td>
                 <td class="px-3 py-2 text-xs">${esc(String(d.operation || '—'))}</td>
                 ${detailCell}
             </tr>`;
         }).join('');
         document.getElementById('auditBody').innerHTML = body ||
-            '<tr><td class="px-3 py-4 text-gray-400" colspan="5">No matching actions.</td></tr>';
+            '<tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="5">No matching actions.</td></tr>';
     } catch (error) {
         document.getElementById('auditBody').innerHTML =
-            `<tr><td class="px-3 py-4 text-gray-400" colspan="5">${esc(error.message)}</td></tr>`;
+            `<tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="5">${esc(error.message)}</td></tr>`;
     }
 }
 

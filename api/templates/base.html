@@ -4,6 +4,23 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}MemoGarden{% endblock %}</title>
+    <script>
+        // Theme bootstrap — runs before first paint so a dark page never
+        // flashes light. localStorage 'theme': 'light' | 'dark' | anything
+        // else (unset/'auto') = follow the system; in auto, live-follows
+        // prefers-color-scheme changes. The console header toggle (RFC-015)
+        // writes the preference.
+        (function () {
+            var apply = function (systemDark) {
+                var pref = localStorage.getItem('theme');
+                var dark = pref === 'dark' || (pref !== 'light' && systemDark);
+                document.documentElement.classList.toggle('dark', dark);
+            };
+            var media = window.matchMedia('(prefers-color-scheme: dark)');
+            apply(media.matches);
+            media.addEventListener('change', function (evt) { apply(evt.matches); });
+        })();
+    </script>
     <!-- Precompiled Tailwind (api/static/console.css) — replaces the Play CDN:
          the CDN's runtime required <style type="text/tailwindcss"> for @apply,
          and the plain <style> block here compiled to EMPTY rules since the
@@ -11,7 +28,7 @@
          cards). Rebuild: see api/static/console.input.css. -->
     <link rel="stylesheet" href="{{ url_for('static', filename='console.css') }}">
 </head>
-<body class="bg-gray-50 min-h-screen">
+<body class="bg-gray-50 dark:bg-gray-950 min-h-screen">
     {% block body %}
 
     {% endblock %}

@@ -6,13 +6,13 @@
 {% block console_content %}
 <div class="flex justify-between items-start mb-1 gap-4">
     <div>
-        <h2 class="text-lg font-semibold text-gray-900">Occurrence review</h2>
-        <p class="text-sm text-gray-600 mt-1 max-w-2xl">An Event is a belief; only review creates memory (mark-occurred, RFC-014). Reserved to you by decision — bound agents may draft, you adjudicate. Events that did not happen simply stay unmarked and age out of the window.</p>
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Occurrence review</h2>
+        <p class="text-sm text-gray-600 dark:text-gray-400 mt-1 max-w-2xl">An Event is a belief; only review creates memory (mark-occurred, RFC-014). Reserved to you by decision — bound agents may draft, you adjudicate. Events that did not happen simply stay unmarked and age out of the window.</p>
     </div>
-    <div class="bg-white shadow rounded-lg p-3 text-xs text-gray-600 space-y-1 flex-shrink-0">
+    <div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 text-xs text-gray-600 dark:text-gray-400 space-y-1 flex-shrink-0">
         <div><b id="statPending">…</b> pending in window</div>
         <div>window: <b id="statWindow">30</b> days</div>
-        <div>keys: <span class="bg-gray-100 rounded px-1">o</span> mark occurred · <span class="bg-gray-100 rounded px-1">d</span> defer</div>
+        <div>keys: <span class="bg-gray-100 dark:bg-gray-800 rounded px-1">o</span> mark occurred · <span class="bg-gray-100 dark:bg-gray-800 rounded px-1">d</span> defer</div>
     </div>
 </div>
 
@@ -29,22 +29,22 @@ function renderQueue() {
     const items = QUEUE.filter(e => !dismissed.has(e.uuid));
     document.getElementById('statPending').textContent = String(items.length);
     if (!items.length) {
-        box.innerHTML = '<div class="bg-white shadow rounded-lg p-8 text-center text-gray-400">Nothing awaiting review in the window.</div>';
+        box.innerHTML = '<div class="bg-white dark:bg-gray-900 shadow rounded-lg p-8 text-center text-gray-400 dark:text-gray-500">Nothing awaiting review in the window.</div>';
         return;
     }
     box.innerHTML = items.map((e, idx) => `
-        <div class="bg-white shadow rounded-lg p-3 flex items-start gap-3 ${idx === 0 ? 'ring-1 ring-gray-300' : ''}" data-uuid="${esc(e.uuid)}">
+        <div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 flex items-start gap-3 ${idx === 0 ? 'ring-1 ring-gray-300 dark:ring-gray-600' : ''}" data-uuid="${esc(e.uuid)}">
             <div class="flex-1 min-w-0">
-                <div class="text-sm font-medium text-gray-900">${esc(e.title || '(untitled)')}</div>
-                <div class="text-xs text-gray-500">
+                <div class="text-sm font-medium text-gray-900 dark:text-gray-100">${esc(e.title || '(untitled)')}</div>
+                <div class="text-xs text-gray-500 dark:text-gray-400">
                     ${esc(String(e.starts_at || ''))}${e.ends_at ? ' → ' + esc(String(e.ends_at)) : ''}
                     ${e.calendar_id ? ' · ' + esc(e.calendar_id) : ''}${e.account ? ' · ' + esc(e.account) : ''}
-                    ${e.captured_after_fact ? ' · <span class="text-amber-600">seeded history (captured_after_fact)</span>' : ''}
+                    ${e.captured_after_fact ? ' · <span class="text-amber-600 dark:text-amber-400">seeded history (captured_after_fact)</span>' : ''}
                 </div>
             </div>
             <div class="flex gap-1 flex-wrap">
                 <button class="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700" onclick="markOccurred('${esc(e.uuid)}')">occurred <span class="opacity-75">OP</span></button>
-                <button class="px-3 py-1 text-xs border border-gray-300 rounded text-gray-500" onclick="defer('${esc(e.uuid)}')">defer</button>
+                <button class="px-3 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded text-gray-500 dark:text-gray-400" onclick="defer('${esc(e.uuid)}')">defer</button>
             </div>
         </div>`).join('');
 }

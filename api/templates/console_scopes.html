@@ -4,8 +4,8 @@
 {% block console_page %}scopes{% endblock %}
 
 {% block console_content %}
-<h2 class="text-lg font-semibold text-gray-900 mb-1">Scopes &amp; grants</h2>
-<p class="text-sm text-gray-600 mb-4">Authority is minted here — scopes define intentions; grants bind them to keys (SG-4, checked only at enter).</p>
+<h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-1">Scopes &amp; grants</h2>
+<p class="text-sm text-gray-600 dark:text-gray-400 mb-4">Authority is minted here — scopes define intentions; grants bind them to keys (SG-4, checked only at enter).</p>
 
 <div id="enforcementBanner" class="alert alert-info mb-4"></div>
 
@@ -13,75 +13,75 @@
     <!-- Scopes -->
     <section>
         <div class="flex justify-between items-center mb-2">
-            <h3 class="text-sm font-semibold text-gray-900">Scopes</h3>
+            <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Scopes</h3>
             <button id="mintScopeBtn" class="px-3 py-1 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">Mint scope <span class="opacity-75">OP</span></button>
         </div>
-        <div class="bg-white shadow rounded-lg table-scroll">
+        <div class="bg-white dark:bg-gray-900 shadow rounded-lg table-scroll">
             <table class="w-full text-sm">
-                <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+                <thead><tr class="text-left text-xs text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
                     <th class="px-3 py-2">Scope</th><th class="px-3 py-2">Facts</th><th class="px-3 py-2">Entities</th><th class="px-3 py-2"></th>
                 </tr></thead>
-                <tbody id="scopesBody"><tr><td class="px-3 py-4 text-gray-400" colspan="4">Loading…</td></tr></tbody>
+                <tbody id="scopesBody"><tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="4">Loading…</td></tr></tbody>
             </table>
         </div>
-        <div id="mintScopeForm" class="hidden bg-white shadow rounded-lg p-3 mt-2 space-y-2">
-            <input id="scopeLabel" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm" placeholder="Label (e.g. Finances)">
-            <input id="scopeDesc" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm" placeholder="Description (optional)">
-            <select id="scopeVisibility" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+        <div id="mintScopeForm" class="hidden bg-white dark:bg-gray-900 shadow rounded-lg p-3 mt-2 space-y-2">
+            <input id="scopeLabel" class="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm" placeholder="Label (e.g. Finances)">
+            <input id="scopeDesc" class="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm" placeholder="Description (optional)">
+            <select id="scopeVisibility" class="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm">
                 <option value="private" selected>private — reads need a grant + the scope frame</option>
                 <option value="public">public — items readable from any frame, no grant needed</option>
             </select>
             <button id="mintScopeGo" class="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm">Create</button>
-            <p class="text-xs text-gray-400">Visibility relaxes reads only (most permissive label wins); entering a public scope still needs its grant.</p>
+            <p class="text-xs text-gray-400 dark:text-gray-500">Visibility relaxes reads only (most permissive label wins); entering a public scope still needs its grant.</p>
         </div>
     </section>
 
     <!-- Grants -->
     <section>
         <div class="flex justify-between items-center mb-2">
-            <h3 class="text-sm font-semibold text-gray-900">Grants</h3>
+            <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Grants</h3>
             <button id="issueGrantBtn" class="px-3 py-1 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">Issue grant <span class="opacity-75">OP</span></button>
         </div>
-        <div class="bg-white shadow rounded-lg table-scroll">
+        <div class="bg-white dark:bg-gray-900 shadow rounded-lg table-scroll">
             <table class="w-full text-sm">
-                <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+                <thead><tr class="text-left text-xs text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
                     <th class="px-3 py-2">Principal</th><th class="px-3 py-2">Scopes</th><th class="px-3 py-2">Expiry</th><th class="px-3 py-2"></th>
                 </tr></thead>
-                <tbody id="grantsBody"><tr><td class="px-3 py-4 text-gray-400" colspan="4">Loading…</td></tr></tbody>
+                <tbody id="grantsBody"><tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="4">Loading…</td></tr></tbody>
             </table>
         </div>
-        <div id="issueGrantForm" class="hidden bg-white shadow rounded-lg p-3 mt-2 space-y-2">
-            <select id="grantPrincipal" class="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm"></select>
+        <div id="issueGrantForm" class="hidden bg-white dark:bg-gray-900 shadow rounded-lg p-3 mt-2 space-y-2">
+            <select id="grantPrincipal" class="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm"></select>
             <div class="flex gap-2">
-                <select id="grantScope" class="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-sm"></select>
-                <input id="grantExpires" type="date" class="border border-gray-300 rounded-lg px-3 py-1.5 text-sm">
+                <select id="grantScope" class="flex-1 border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm"></select>
+                <input id="grantExpires" type="date" class="border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm">
             </div>
             <button id="issueGrantGo" class="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm">Grant</button>
-            <p class="text-xs text-gray-400">Agent principals grant all bound keys; future bindings inherit.</p>
+            <p class="text-xs text-gray-400 dark:text-gray-500">Agent principals grant all bound keys; future bindings inherit.</p>
         </div>
     </section>
 </div>
 
 <!-- Provider scope policies -->
 <section class="mt-6">
-    <h3 class="text-sm font-semibold text-gray-900 mb-2">Provider scope policies <span class="text-xs text-gray-400">OP — boundary configuration</span></h3>
-    <div class="bg-white shadow rounded-lg table-scroll">
+    <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-2">Provider scope policies <span class="text-xs text-gray-400 dark:text-gray-500">OP — boundary configuration</span></h3>
+    <div class="bg-white dark:bg-gray-900 shadow rounded-lg table-scroll">
         <table class="w-full text-sm">
-            <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+            <thead><tr class="text-left text-xs text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
                 <th class="px-3 py-2">Provider</th><th class="px-3 py-2">Policy</th><th class="px-3 py-2">Set default destination</th>
             </tr></thead>
-            <tbody id="policiesBody"><tr><td class="px-3 py-4 text-gray-400" colspan="3">Loading…</td></tr></tbody>
+            <tbody id="policiesBody"><tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="3">Loading…</td></tr></tbody>
         </table>
     </div>
-    <p class="text-xs text-gray-400 mt-2">Omit default = ratified fail-closed catch-all → triage · explicit null = exempt (unscoped) · rules editing stays with the API/CLI.</p>
+    <p class="text-xs text-gray-400 dark:text-gray-500 mt-2">Omit default = ratified fail-closed catch-all → triage · explicit null = exempt (unscoped) · rules editing stays with the API/CLI.</p>
 
-    <h3 class="text-sm font-semibold text-gray-900 mt-4 mb-2">Account policy overrides <span class="text-xs text-gray-400">RFC-012 pattern — replaces the provider policy for that account's runs; edits on the Providers page</span></h3>
-    <div class="bg-white shadow rounded-lg overflow-x-auto">
+    <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mt-4 mb-2">Account policy overrides <span class="text-xs text-gray-400 dark:text-gray-500">RFC-012 pattern — replaces the provider policy for that account's runs; edits on the Providers page</span></h3>
+    <div class="bg-white dark:bg-gray-900 shadow rounded-lg overflow-x-auto">
         <table class="w-full text-sm">
-            <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+            <thead><tr class="text-left text-xs text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
                 <th class="px-3 py-2">Provider</th><th class="px-3 py-2">Account</th><th class="px-3 py-2">Effective policy</th>
             </tr></thead>
-            <tbody id="accountPoliciesBody"><tr><td class="px-3 py-4 text-gray-400" colspan="3">Loading…</td></tr></tbody>
+            <tbody id="accountPoliciesBody"><tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="3">Loading…</td></tr></tbody>
         </table>
     </div>
 </section>
@@ -97,8 +97,8 @@ function scopeLabel(s) { return (s.data ? s.data.label : s.label) || s.uuid; }
 // Visibility badge (RFC-011 visibility addendum: scope attribute public|private)
 function visBadge(isPublic) {
     return isPublic
-        ? '<span class="inline-block text-xs px-1.5 py-0.5 rounded-full border border-amber-300 bg-amber-50 text-amber-700" title="public — items readable from any frame, no grant needed">public</span>'
-        : '<span class="inline-block text-xs px-1.5 py-0.5 rounded-full border border-gray-300 bg-gray-100 text-gray-500" title="private — reads need a grant + the scope frame">private</span>';
+        ? '<span class="inline-block text-xs px-1.5 py-0.5 rounded-full border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300" title="public — items readable from any frame, no grant needed">public</span>'
+        : '<span class="inline-block text-xs px-1.5 py-0.5 rounded-full border border-gray-300 dark:border-gray-600 bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400" title="private — reads need a grant + the scope frame">private</span>';
 }
 
 function renderOverview() {
@@ -107,7 +107,7 @@ function renderOverview() {
         banner.className = 'alert alert-success mb-4';
         banner.textContent = 'Scope enforcement is ON — label gates (read / relabel / enter) are enforced.';
     } else {
-        banner.className = 'alert mb-4 bg-amber-50 text-amber-700 border border-amber-300';
+        banner.className = 'alert mb-4 bg-amber-50 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-700';
         banner.innerHTML = '<b>MEMOGARDEN_SCOPE_ENFORCEMENT=0</b> — identity, minting and grant gates are always on; ' +
             'read / relabel / enter gates are advisory until the flag flips. ' +
             'Flip: set the env var on memogarden.service + restart (operator act, not an endpoint).';
@@ -117,13 +117,13 @@ function renderOverview() {
         const builtin = BUILTIN_LABELS.includes(scopeLabel(s));
         const entityTotal = Object.values(s.entity_counts || {}).reduce((a, b) => a + b, 0);
         const isPublic = s.visibility === 'public';
-        return `<tr class="border-b border-gray-100">
-            <td class="px-3 py-2"><b>${esc(scopeLabel(s))}</b> ${builtin ? '<span class="text-xs text-gray-400">builtin</span>' : ''}
+        return `<tr class="border-b border-gray-100 dark:border-gray-800">
+            <td class="px-3 py-2"><b>${esc(scopeLabel(s))}</b> ${builtin ? '<span class="text-xs text-gray-400 dark:text-gray-500">builtin</span>' : ''}
                 ${visBadge(isPublic)}
-                <button class="ml-1 px-1.5 py-0.5 text-xs border rounded align-middle ${isPublic ? 'border-gray-300 text-gray-600 hover:bg-gray-100' : 'border-amber-300 text-amber-700 hover:bg-amber-50'}"
+                <button class="ml-1 px-1.5 py-0.5 text-xs border rounded align-middle ${isPublic ? 'border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800' : 'border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-900/40'}"
                     title="${isPublic ? 'Back to grant+frame-gated reads. Existing member items lose the public read short-circuit in one audited edit.' : 'Items labeled into it become readable from any frame without a grant (most permissive label wins; entry still needs its grant).'}"
                     data-flip-visibility="${esc(s.uuid)}" data-to="${isPublic ? 'private' : 'public'}">make ${isPublic ? 'private' : 'public'}</button>
-                <div class="text-xs text-gray-400">${shortUuid(s.uuid)}</div></td>
+                <div class="text-xs text-gray-400 dark:text-gray-500">${shortUuid(s.uuid)}</div></td>
             <td class="px-3 py-2">${s.fact_count}</td>
             <td class="px-3 py-2">${entityTotal}</td>
             <td class="px-3 py-2 text-right whitespace-nowrap">
@@ -132,7 +132,7 @@ function renderOverview() {
                 // operator gate), so the label never enters an inline JS
                 // string — the confirm dialog reads it back from the
                 // overview, attribute holds the uuid.
-                `<button class="px-2 py-1 text-xs border border-red-200 text-red-600 rounded hover:bg-red-50" data-delete-scope="${esc(s.uuid)}">delete</button>`}
+                `<button class="px-2 py-1 text-xs border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 rounded hover:bg-red-50 dark:hover:bg-red-900/40" data-delete-scope="${esc(s.uuid)}">delete</button>`}
             </td></tr>`;
     }).join('');
 
@@ -141,24 +141,24 @@ function renderOverview() {
     for (const key of OV.grants) {
         const principal = key.agent_label || key.agent_entity_id
             ? `key ${esc(key.key_label)} → agent ${esc(key.agent_label || '')}`
-            : `key ${esc(key.key_label)} <span class="text-xs text-red-500">unbound</span>`;
+            : `key ${esc(key.key_label)} <span class="text-xs text-red-500 dark:text-red-400">unbound</span>`;
         if (!(key.grants || []).length) {
-            rows.push(`<tr class="border-b border-gray-100"><td class="px-3 py-2">${principal}</td>
-                <td class="px-3 py-2 text-gray-400" colspan="3">no grants</td></tr>`);
+            rows.push(`<tr class="border-b border-gray-100 dark:border-gray-800"><td class="px-3 py-2">${principal}</td>
+                <td class="px-3 py-2 text-gray-400 dark:text-gray-500" colspan="3">no grants</td></tr>`);
             continue;
         }
         for (const g of key.grants) {
             const scope = OV.scopes.find(s => s.uuid.endsWith(g.scope_uuid) || g.scope_uuid.endsWith(s.uuid));
-            rows.push(`<tr class="border-b border-gray-100">
+            rows.push(`<tr class="border-b border-gray-100 dark:border-gray-800">
                 <td class="px-3 py-2">${principal}</td>
                 <td class="px-3 py-2">${scope ? esc(scopeLabel(scope)) : shortUuid(g.scope_uuid)}</td>
                 <td class="px-3 py-2">${g.expires_at ? fmtTime(g.expires_at) : '—'}</td>
-                <td class="px-3 py-2 text-right"><button class="px-2 py-1 text-xs border border-red-200 text-red-600 rounded hover:bg-red-50" onclick="revokeGrant('${esc(g.grant_id)}')">revoke</button></td>
+                <td class="px-3 py-2 text-right"><button class="px-2 py-1 text-xs border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 rounded hover:bg-red-50 dark:hover:bg-red-900/40" onclick="revokeGrant('${esc(g.grant_id)}')">revoke</button></td>
             </tr>`);
         }
     }
     document.getElementById('grantsBody').innerHTML = rows.length ? rows.join('') :
-        '<tr><td class="px-3 py-4 text-gray-400" colspan="4">No keys yet.</td></tr>';
+        '<tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="4">No keys yet.</td></tr>';
 
     // Issue-grant form options
     const principals = OV.grants.map(k => {
@@ -175,42 +175,42 @@ function renderOverview() {
     document.getElementById('policiesBody').innerHTML = providers.map(name => {
         const policy = OV.provider_policies[name];
         const hasDefaultKey = policy && Object.prototype.hasOwnProperty.call(policy, 'default');
-        const desc = !policy || !hasDefaultKey ? '<span class="text-amber-600">fail-closed → triage</span>'
-            : policy.default === null ? '<span class="text-gray-500">exempt (unscoped)</span>'
+        const desc = !policy || !hasDefaultKey ? '<span class="text-amber-600 dark:text-amber-400">fail-closed → triage</span>'
+            : policy.default === null ? '<span class="text-gray-500 dark:text-gray-400">exempt (unscoped)</span>'
             : `default → ${shortUuid(policy.default)}`;
         const rules = policy && policy.rules ? policy.rules.length : 0;
-        return `<tr class="border-b border-gray-100">
+        return `<tr class="border-b border-gray-100 dark:border-gray-800">
             <td class="px-3 py-2"><b>${esc(name)}</b></td>
-            <td class="px-3 py-2">${desc} <span class="text-xs text-gray-400">${rules} rule(s)</span></td>
+            <td class="px-3 py-2">${desc} <span class="text-xs text-gray-400 dark:text-gray-500">${rules} rule(s)</span></td>
             <td class="px-3 py-2">
-                <select class="border border-gray-300 rounded px-2 py-1 text-xs" onchange="setPolicy('${esc(name)}', this.value)">
+                <select class="border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-xs" onchange="setPolicy('${esc(name)}', this.value)">
                     <option value="">change…</option>
                     <option value="__catchall">triage catch-all</option>
                     <option value="__exempt">exempt (unscoped)</option>
                     ${OV.scopes.map(s => `<option value="${esc(s.uuid)}">default → ${esc(scopeLabel(s))}</option>`).join('')}
                 </select>
             </td></tr>`;
-    }).join('') || '<tr><td class="px-3 py-4 text-gray-400" colspan="3">No providers registered.</td></tr>';
+    }).join('') || '<tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="3">No providers registered.</td></tr>';
 
     // Per-account overrides (RFC-012 pattern): null = inherit provider policy.
     const accountRows = [];
     for (const name of Object.keys(OV.account_policies || {})) {
         for (const a of OV.account_policies[name]) {
             const policy = a.scope_policy;
-            const desc = !policy ? '<span class="text-gray-400">inherit</span>'
-                : policy.default === null ? '<span class="text-gray-500">exempt (unscoped)</span>'
+            const desc = !policy ? '<span class="text-gray-400 dark:text-gray-500">inherit</span>'
+                : policy.default === null ? '<span class="text-gray-500 dark:text-gray-400">exempt (unscoped)</span>'
                 : `default → ${(() => {
                     const scope = OV.scopes.find(s => s.uuid === policy.default || s.uuid.endsWith(policy.default));
                     return scope ? esc(scopeLabel(scope)) : shortUuid(policy.default);
                 })()}`;
-            accountRows.push(`<tr class="border-b border-gray-100">
+            accountRows.push(`<tr class="border-b border-gray-100 dark:border-gray-800">
                 <td class="px-3 py-2">${esc(name)}</td>
-                <td class="px-3 py-2">${esc(a.label || a.subject)} <span class="text-xs text-gray-400">${esc(a.subject)}</span></td>
+                <td class="px-3 py-2">${esc(a.label || a.subject)} <span class="text-xs text-gray-400 dark:text-gray-500">${esc(a.subject)}</span></td>
                 <td class="px-3 py-2">${desc}</td></tr>`);
         }
     }
     document.getElementById('accountPoliciesBody').innerHTML = accountRows.length ? accountRows.join('') :
-        '<tr><td class="px-3 py-4 text-gray-400" colspan="3">No account bindings.</td></tr>';
+        '<tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="3">No account bindings.</td></tr>';
 }
 
 document.getElementById('mintScopeBtn').addEventListener('click', () =>

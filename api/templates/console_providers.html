@@ -4,38 +4,38 @@
 {% block console_page %}providers{% endblock %}
 
 {% block console_content %}
-<h2 class="text-lg font-semibold text-gray-900 mb-1">Providers</h2>
-<p class="text-sm text-gray-600 mb-4">Code trust lives here: registering a module points the runtime at executable ingestion code (origin-pinned to provider roots). Run triggers are DELE — run history below is the verification instrument.</p>
+<h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-1">Providers</h2>
+<p class="text-sm text-gray-600 dark:text-gray-400 mb-4">Code trust lives here: registering a module points the runtime at executable ingestion code (origin-pinned to provider roots). Run triggers are DELE — run history below is the verification instrument.</p>
 
 <div class="flex justify-between items-center mb-2">
-    <h3 class="text-sm font-semibold text-gray-900">Registry</h3>
-    <span class="text-xs text-gray-400">register via <code>memogarden register provider</code></span>
+    <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Registry</h3>
+    <span class="text-xs text-gray-400 dark:text-gray-500">register via <code>memogarden register provider</code></span>
 </div>
-<div class="bg-white shadow rounded-lg table-scroll">
+<div class="bg-white dark:bg-gray-900 shadow rounded-lg table-scroll">
     <table class="w-full text-sm">
-        <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+        <thead><tr class="text-left text-xs text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
             <th class="px-3 py-2">Provider</th><th class="px-3 py-2">Module</th><th class="px-3 py-2">Interval</th><th class="px-3 py-2">Last run</th><th class="px-3 py-2">Actions</th>
         </tr></thead>
-        <tbody id="providersBody"><tr><td class="px-3 py-4 text-gray-400" colspan="5">Loading…</td></tr></tbody>
+        <tbody id="providersBody"><tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="5">Loading…</td></tr></tbody>
     </table>
 </div>
 
 <div class="flex justify-between items-center mt-6 mb-2">
-    <h3 class="text-sm font-semibold text-gray-900">Accounts</h3>
-    <span class="text-xs text-gray-400">re-auth (OAuth consent) is human-only — delegate everything around it</span>
+    <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Accounts</h3>
+    <span class="text-xs text-gray-400 dark:text-gray-500">re-auth (OAuth consent) is human-only — delegate everything around it</span>
 </div>
 <div id="accountsList" class="space-y-4"></div>
 
 <div class="flex justify-between items-center mt-6 mb-2">
-    <h3 class="text-sm font-semibold text-gray-900">Run history</h3>
-    <select id="runsProvider" class="border border-gray-300 rounded-lg px-3 py-1 text-sm"></select>
+    <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Run history</h3>
+    <select id="runsProvider" class="border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1 text-sm"></select>
 </div>
-<div class="bg-white shadow rounded-lg table-scroll">
+<div class="bg-white dark:bg-gray-900 shadow rounded-lg table-scroll">
     <table class="w-full text-sm">
-        <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+        <thead><tr class="text-left text-xs text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
             <th class="px-3 py-2">Run</th><th class="px-3 py-2">Account</th><th class="px-3 py-2">Started</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Detail</th>
         </tr></thead>
-        <tbody id="runsBody"><tr><td class="px-3 py-4 text-gray-400" colspan="5">Loading…</td></tr></tbody>
+        <tbody id="runsBody"><tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="5">Loading…</td></tr></tbody>
     </table>
 </div>
 {% endblock %}
@@ -48,26 +48,26 @@ let OV = null;  // scopes overview (console:overview from base chrome) — drive
 
 function statusChip(status) {
     if (status === 'success' || status === 'active' || status === 'complete' || status === 'ok')
-        return '<span class="text-green-700">' + esc(status) + '</span>';
+        return '<span class="text-green-700 dark:text-green-300">' + esc(status) + '</span>';
     if (status === 'needs_reauth' || status === 'failed')
-        return '<span class="text-red-600 font-medium">' + esc(status) + '</span>';
-    return '<span class="text-gray-500">' + esc(status || '—') + '</span>';
+        return '<span class="text-red-600 dark:text-red-400 font-medium">' + esc(status) + '</span>';
+    return '<span class="text-gray-500 dark:text-gray-400">' + esc(status || '—') + '</span>';
 }
 
 async function loadProviders() {
     const data = await api('/api/v1/providers');
     PROVIDERS = data.providers || [];
     document.getElementById('providersBody').innerHTML = PROVIDERS.map(p => `
-        <tr class="border-b border-gray-100">
+        <tr class="border-b border-gray-100 dark:border-gray-800">
             <td class="px-3 py-2"><b>${esc(p.name)}</b></td>
-            <td class="px-3 py-2 text-xs text-gray-500">${esc(p.module)}.${esc(p.class)}</td>
+            <td class="px-3 py-2 text-xs text-gray-500 dark:text-gray-400">${esc(p.module)}.${esc(p.class)}</td>
             <td class="px-3 py-2 text-xs">${p.interval}s</td>
             <td class="px-3 py-2 text-xs">${fmtTime(p.last_run_at)} ${statusChip(p.last_status)}</td>
             <td class="px-3 py-2">
-                <button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="runProvider('${esc(p.name)}')">run <span class="text-gray-400">DELE</span></button>
-                <button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="toggleProvider('${esc(p.name)}', ${p.enabled ? 'false' : 'true'})">${p.enabled ? 'disable' : 'enable'}</button>
+                <button class="px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800" onclick="runProvider('${esc(p.name)}')">run <span class="text-gray-400 dark:text-gray-500">DELE</span></button>
+                <button class="px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800" onclick="toggleProvider('${esc(p.name)}', ${p.enabled ? 'false' : 'true'})">${p.enabled ? 'disable' : 'enable'}</button>
             </td>
-        </tr>`).join('') || '<tr><td class="px-3 py-4 text-gray-400" colspan="5">No providers registered.</td></tr>';
+        </tr>`).join('') || '<tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="5">No providers registered.</td></tr>';
 
     document.getElementById('runsProvider').innerHTML = PROVIDERS.map(p =>
         `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
@@ -85,32 +85,32 @@ async function loadAccounts() {
             const accounts = data.accounts || [];
             if (!accounts.length) return '';
             const rows = accounts.map(a => `
-                <tr class="border-b border-gray-100">
+                <tr class="border-b border-gray-100 dark:border-gray-800">
                     <td class="px-3 py-2"><b>${esc(a.label || a.subject)}</b>
-                        <div class="text-xs text-gray-400">${esc(a.subject)} · ${esc(a.platform)}</div></td>
-                    <td class="px-3 py-2">${statusChip(a.status)}${a.error ? `<div class="text-xs text-red-500">${esc(a.error)}</div>` : ''}</td>
+                        <div class="text-xs text-gray-400 dark:text-gray-500">${esc(a.subject)} · ${esc(a.platform)}</div></td>
+                    <td class="px-3 py-2">${statusChip(a.status)}${a.error ? `<div class="text-xs text-red-500 dark:text-red-400">${esc(a.error)}</div>` : ''}</td>
                     <td class="px-3 py-2 text-xs">${a.interval ? a.interval + 's' : 'inherit'}${(a.config && Object.keys(a.config).length) ? ' · ' + esc(JSON.stringify(a.config)) : ''}</td>
                     <td class="px-3 py-2 text-xs">${accountPolicyCell(a)}</td>
                     <td class="px-3 py-2 text-xs">${fmtTime(a.last_run_at)} ${statusChip(a.last_status)}</td>
                     <td class="px-3 py-2 whitespace-nowrap">
-                        <button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="runAccount('${esc(p.name)}','${esc(a.id)}')">run</button>
-                        <button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="verifyAccount('${esc(p.name)}','${esc(a.id)}')">verify</button>
-                        <button class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-100" onclick="toggleAccount('${esc(p.name)}','${esc(a.id)}','${esc(a.status)}')">${a.status === 'disabled' ? 'resume' : 'pause'}</button>
+                        <button class="px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800" onclick="runAccount('${esc(p.name)}','${esc(a.id)}')">run</button>
+                        <button class="px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800" onclick="verifyAccount('${esc(p.name)}','${esc(a.id)}')">verify</button>
+                        <button class="px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800" onclick="toggleAccount('${esc(p.name)}','${esc(a.id)}','${esc(a.status)}')">${a.status === 'disabled' ? 'resume' : 'pause'}</button>
                         ${a.status === 'needs_reauth'
-                            ? `<span class="text-xs text-red-600 ml-1">re-auth: provider CLI auth-login (human OAuth consent)</span>` : ''}
+                            ? `<span class="text-xs text-red-600 dark:text-red-400 ml-1">re-auth: provider CLI auth-login (human OAuth consent)</span>` : ''}
                     </td>
                 </tr>`);
-            return `<div class="bg-white shadow rounded-lg table-scroll mb-3">
-                <div class="px-3 py-2 text-xs font-medium text-gray-500 border-b border-gray-200">${esc(p.name)}</div>
+            return `<div class="bg-white dark:bg-gray-900 shadow rounded-lg table-scroll mb-3">
+                <div class="px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">${esc(p.name)}</div>
                 <table class="w-full text-sm">
-                    <thead><tr class="text-left text-xs text-gray-500 border-b border-gray-200">
+                    <thead><tr class="text-left text-xs text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
                         <th class="px-3 py-2">Account</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Interval / config</th><th class="px-3 py-2">Scope policy</th><th class="px-3 py-2">Last run</th><th class="px-3 py-2">Actions</th>
                     </tr></thead>
                     <tbody>${rows.join('')}</tbody></table></div>`;
         } catch (error) { return ''; }
     }));
     document.getElementById('accountsList').innerHTML = sections.join('') ||
-        '<div class="bg-white shadow rounded-lg p-6 text-center text-gray-400">No account bindings.</div>';
+        '<div class="bg-white dark:bg-gray-900 shadow rounded-lg p-6 text-center text-gray-400 dark:text-gray-500">No account bindings.</div>';
 }
 
 // Per-account scope policy (RFC-011 §4.8 at account level): null = inherit
@@ -119,16 +119,16 @@ async function loadAccounts() {
 // quotes — no free text here).
 function accountPolicyLabel(a) {
     const policy = a.scope_policy;
-    if (!policy) return '<span class="text-gray-400">inherit</span>';
-    if (policy.default === null) return '<span class="text-gray-500">unscoped</span>';
+    if (!policy) return '<span class="text-gray-400 dark:text-gray-500">inherit</span>';
+    if (policy.default === null) return '<span class="text-gray-500 dark:text-gray-400">unscoped</span>';
     const scope = (OV && OV.scopes || []).find(s => s.uuid === policy.default || s.uuid.endsWith(policy.default));
     const label = scope ? (scope.data ? scope.data.label : scope.label) : shortUuid(policy.default);
     return `default → ${esc(label)}`;
 }
 function accountPolicyCell(a) {
     const summary = accountPolicyLabel(a);
-    if (!OV) return summary + ' <span class="text-gray-400 opacity-40">…</span>';
-    return `${summary}<br><select class="mt-1 border border-gray-300 rounded px-2 py-1 text-xs"
+    if (!OV) return summary + ' <span class="text-gray-400 dark:text-gray-500 opacity-40">…</span>';
+    return `${summary}<br><select class="mt-1 border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-xs"
         onchange="setAccountPolicy('${esc(a.provider_name)}','${esc(a.id)}', this.value)">
         <option value="">change…</option>
         <option value="__inherit">inherit provider</option>
@@ -155,16 +155,16 @@ async function loadRuns() {
         const data = await api(`/api/v1/providers/${encodeURIComponent(selectedProvider)}/runs?limit=50`);
         const runs = data.runs || [];
         document.getElementById('runsBody').innerHTML = runs.length ? runs.map(r => `
-            <tr class="border-b border-gray-100">
-                <td class="px-3 py-2 text-xs text-gray-500">${shortUuid(r.id)}</td>
+            <tr class="border-b border-gray-100 dark:border-gray-800">
+                <td class="px-3 py-2 text-xs text-gray-500 dark:text-gray-400">${shortUuid(r.id)}</td>
                 <td class="px-3 py-2 text-xs">${r.account_id ? esc(r.account_id.slice(0, 13)) + '…' : 'provider-level'}</td>
                 <td class="px-3 py-2 text-xs">${fmtTime(r.started_at)}${r.finished_at ? ' → ' + fmtTime(r.finished_at) : ''}</td>
-                <td class="px-3 py-2">${statusChip(r.status)} <span class="text-xs text-gray-400">${esc(r.triggered_by || '')}</span></td>
-                <td class="px-3 py-2 text-xs text-gray-500">${esc(r.detail ? JSON.stringify(r.detail).slice(0, 120) : '—')}</td>
-            </tr>`).join('') : '<tr><td class="px-3 py-4 text-gray-400" colspan="5">No runs recorded.</td></tr>';
+                <td class="px-3 py-2">${statusChip(r.status)} <span class="text-xs text-gray-400 dark:text-gray-500">${esc(r.triggered_by || '')}</span></td>
+                <td class="px-3 py-2 text-xs text-gray-500 dark:text-gray-400">${esc(r.detail ? JSON.stringify(r.detail).slice(0, 120) : '—')}</td>
+            </tr>`).join('') : '<tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="5">No runs recorded.</td></tr>';
     } catch (error) {
         document.getElementById('runsBody').innerHTML =
-            `<tr><td class="px-3 py-4 text-gray-400" colspan="5">${esc(error.message)}</td></tr>`;
+            `<tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="5">${esc(error.message)}</td></tr>`;
     }
 }
 
