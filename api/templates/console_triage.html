@@ -111,7 +111,7 @@ function renderTriage() {
                 <input type="checkbox" data-uuid="${esc(f.uuid)}" data-kind="fact" class="mt-1 rounded triage-cb" onchange="updateCount()">
                 <div class="flex-1 min-w-0">
                     <div class="text-sm font-medium text-gray-900 truncate">${esc(title)}</div>
-                    <div class="text-xs text-gray-500">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.realized_at)} · ${shortUuid(f.uuid)}</div>
+                    <div class="text-xs text-gray-500">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.canonical_at || f.realized_at)} · ${shortUuid(f.uuid)}</div>
                     ${orphanCaption(f.uuid)}
                     ${familyBlock(kids)}
                 </div>
@@ -140,7 +140,7 @@ function renderTriage() {
             <div class="bg-white shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2">
                 <div class="flex-1 min-w-0">
                     <div class="text-sm font-medium text-gray-900 truncate">${esc(title)}</div>
-                    <div class="text-xs text-gray-500">${esc(e.type)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(e.updated_at)} · ${shortUuid(e.uuid)}</div>
+                    <div class="text-xs text-gray-500">${esc(e.type)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(e.canonical_at || e.updated_at)} · ${shortUuid(e.uuid)}</div>
                     ${orphanCaption(e.uuid)}
                     ${familyBlock(kids)}
                 </div>

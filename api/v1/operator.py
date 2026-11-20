@@ -119,12 +119,15 @@ def triage_queue():
         fact_params.append(account)
 
     # Private-connection access mirrors the RFC-014 mark-occurred probe.
+    # Canonical ordering: import batches land with near-identical realized_at
+    # (the 2026-11 gmail/gcal backfills), which made the queue meaningless —
+    # order by when the thing actually happened, falling back to import time.
     with get_soil() as soil:
         conn = soil._get_connection()
         facts = conn.execute(
             f"""SELECT uuid, _type, realized_at, canonical_at, data, metadata
                 FROM item WHERE {fact_where}
-                ORDER BY realized_at DESC LIMIT ? OFFSET ?""",
+                ORDER BY COALESCE(canonical_at, realized_at) DESC LIMIT ? OFFSET ?""",
             (*fact_params, limit, offset),
         ).fetchall()
         total_facts = conn.execute(
@@ -139,11 +142,17 @@ def triage_queue():
         entity_where += " AND json_extract(data, '$.account') = ?"
         entity_params.append(account)
 
+    # Entity canonical time lives in type-specific data fields (gcal Events:
+    # starts_at; tada Tasks/Recurrences: start_at) — COALESCE down to
+    # updated_at so untyped entities still sort by import recency.
     core = get_core()
     entities = core._conn.execute(
         f"""SELECT uuid, type, created_at, updated_at, data
             FROM entity WHERE {entity_where}
-            ORDER BY updated_at DESC LIMIT ? OFFSET ?""",
+            ORDER BY COALESCE(
+                json_extract(data, '$.starts_at'),
+                json_extract(data, '$.start_at'),
+                updated_at) DESC LIMIT ? OFFSET ?""",
         (*entity_params, limit, offset),
     ).fetchall()
     total_entities = core._conn.execute(
@@ -258,6 +267,11 @@ def triage_queue():
         if erow:
             parent_stubs[child] = _stub_from_entity(erow)
 
+    def _entity_canonical_at(row) -> str:
+        data = _loads(row["data"]) or {}
+        return (data.get("starts_at") or data.get("start_at")
+                or row["updated_at"] or "")
+
     return jsonify({
         "scope": {
             "uuid": uid.add_core_prefix(scope_uuid),
@@ -269,6 +283,7 @@ def triage_queue():
                 "uuid": uid.add_soil_prefix(r["uuid"]),
                 "type": r["_type"],
                 "realized_at": r["realized_at"],
+                "canonical_at": r["canonical_at"],
                 "data": _loads(r["data"]),
                 "metadata": _loads(r["metadata"]) or {},
             }
@@ -279,6 +294,7 @@ def triage_queue():
                 "uuid": uid.add_core_prefix(r["uuid"]),
                 "type": r["type"],
                 "updated_at": r["updated_at"],
+                "canonical_at": _entity_canonical_at(r),
                 "data": _loads(r["data"]),
             }
             for r in entities

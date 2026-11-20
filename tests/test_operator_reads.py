@@ -132,6 +132,38 @@ def test_triage_entities_labeled(client, auth_headers, core):
     assert data["entities"][0]["data"]["title"] == "unmarked"
 
 
+def test_triage_entities_canonical_ordering(client, auth_headers, core):
+    """Canonical ordering (RFC-015 §3.3): entities sort+expose when the
+    thing happened (starts_at/start_at), not when the import batch landed —
+    a 21k gcal backfill shares one updated_at minute, which made the
+    queue meaningless. Facts expose canonical_at alongside realized_at.
+    """
+    triage = _make_scope(core, "Triage / Untrusted")
+    core.entity.create(entity_type="Event",
+                       data={"title": "old occurrence", "starts_at": "2025-01-31T08:30:00+00:00",
+                             "status": "confirmed", "scopes": [triage],
+                             "active_participants": [], "artifact_uuids": []})
+    core.entity.create(entity_type="Task",
+                       data={"title": "recent task", "start_at": "2026-11-20T00:00:00+00:00",
+                             "status": "confirmed", "scopes": [triage],
+                             "active_participants": [], "artifact_uuids": []})
+    core._conn.commit()
+
+    response = client.get("/api/v1/triage", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.get_json()
+    entities = data["entities"]
+    assert [e["data"]["title"] for e in entities] == ["recent task", "old occurrence"]
+    assert entities[1]["canonical_at"] == "2025-01-31T08:30:00+00:00"
+
+    # Facts carry canonical_at too (gmail backfills: realized == import,
+    # canonical == when the message was actually received).
+    _labeled_fact("canonical fact", [triage])
+    response = client.get("/api/v1/triage", headers=auth_headers)
+    fact = response.get_json()["facts"][0]
+    assert "canonical_at" in fact and fact["canonical_at"]
+
+
 def test_triage_reports_containment(client, auth_headers, core):
     """Families: tada-style children (metadata.task_source_id -> parent
     data.source_id) map to their in-window parent; unlinked items are
