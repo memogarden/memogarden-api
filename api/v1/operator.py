@@ -11,7 +11,9 @@ configuration out of API-key hands even in read form.
 
 import json
 import logging
+import os
 import time
+from pathlib import Path
 
 from flask import Blueprint, jsonify, request
 
@@ -26,6 +28,55 @@ from ..middleware.scope_access import enforcement_enabled
 logger = logging.getLogger(__name__)
 
 operator_bp = Blueprint("operator", __name__)
+
+# Decision-model recommendations (RFC-015 §3.3 extension, 2026-11-22): the
+# triage-model batch (~/memogarden/triage-model) precomputes per-item
+# recommendations into a JSON sidecar next to the stores. The console
+# renders them as read-only badges with a one-tap "apply suggestion", and
+# GET /triage/eval scores them against operator decisions already recorded
+# in the Action log — no new write path. Absence of a recommendation means
+# escalate (the operator decides unaided); the sidecar is operator-owned
+# data, never a store of record.
+_RECS_CACHE: dict = {"path": None, "mtime": None, "doc": {}}
+
+
+def _recs_path() -> Path:
+    env = os.environ.get("MEMOGARDEN_TRIAGE_RECS")
+    if env:
+        return Path(env)
+    if _RECS_CACHE["path"] is not None:
+        return _RECS_CACHE["path"]
+    with get_soil() as soil:
+        path = soil.db_path.parent / "triage-model" / "recommendations.json"
+    _RECS_CACHE["path"] = path
+    return path
+
+
+def _load_recs() -> dict:
+    """mtime-cached load of the recommendations sidecar.
+
+    Shape: {model, generated_at, tau, recs: {uuid: {pred, confidence,
+    runner}}}. Only non-escalated items are present; a missing/absent entry
+    means escalate.
+    """
+    path = _recs_path()
+    try:
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        return {}
+    if _RECS_CACHE["mtime"] == mtime:
+        return _RECS_CACHE["doc"]
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, ValueError):
+        logger.warning("unreadable triage recommendations sidecar at %s", path)
+        return {}
+    if not isinstance(doc, dict) or not isinstance(doc.get("recs"), dict):
+        logger.warning("malformed triage recommendations sidecar at %s", path)
+        return {}
+    _RECS_CACHE["mtime"] = mtime
+    _RECS_CACHE["doc"] = doc
+    return doc
 
 # Scope labels live on facts in metadata.scopes and on entities in
 # data.scopes (RFC-014 §10) — both as plain uuids (DB convention).
@@ -437,7 +488,16 @@ def triage_queue():
                    len(entities_payload))
         entities_payload.insert(idx, payload)
 
-    return jsonify({
+    # Attach decision-model recommendations (badge + one-tap apply in the
+    # console). Pulled-in parents are included — they are decisions too.
+    recs_doc = _load_recs()
+    recs_by_uuid = recs_doc.get("recs", {})
+    for f in facts_payload:
+        rec = recs_by_uuid.get(f["uuid"])
+        if rec:
+            f["rec"] = rec
+
+    response = {
         "scope": {
             "uuid": uid.add_core_prefix(scope_uuid),
             "data": _loads(scope["data"]),
@@ -451,6 +511,118 @@ def triage_queue():
             "child_parent": child_parent,
             "parent_stubs": parent_stubs,
         },
+    }
+    if recs_doc:
+        response["decision_model"] = {
+            "model": recs_doc.get("model"),
+            "generated_at": recs_doc.get("generated_at"),
+            "tau": recs_doc.get("tau"),
+        }
+    return jsonify(response)
+
+
+@operator_bp.get("/triage/eval")
+def triage_eval():
+    """Decision-model agreement tracker (console eval strip).
+
+    The operator's decisions are already recorded as operator amend Actions;
+    this endpoint joins the most recent decision per item (after the
+    recommendations sidecar was generated) with the stored recommendation.
+    Escalated items (no recommendation) are excluded by construction; the
+    eval set is the first `n` (default 100) such decisions.
+    """
+    _authenticate_jwt()
+
+    try:
+        n = max(1, min(int(request.args.get("n", "100")), 500))
+    except ValueError:
+        raise ValidationError(
+            "n must be an integer", {"n": request.args.get("n")}
+        ) from None
+
+    doc = _load_recs()
+    recs_by_uuid = doc.get("recs", {})
+    since = doc.get("generated_at")
+    if not recs_by_uuid or not since:
+        return jsonify({
+            "state": "no recommendations file",
+            "n": 0, "target": n,
+        })
+
+    def _loads(value):
+        if isinstance(value, str):
+            return json.loads(value)
+        return value
+
+    with get_soil() as soil:
+        rows = soil._get_connection().execute(
+            """SELECT realized_at, data FROM item
+               WHERE _type = 'Action' AND superseded_by IS NULL
+                 AND json_extract(data, '$.actor_type') = 'operator'
+                 AND json_extract(data, '$.operation') = 'amend'
+                 AND realized_at >= ?
+               ORDER BY realized_at ASC""",
+            (since,),
+        ).fetchall()
+
+    # Scope uuid -> label, for mapping a decision's resulting scopes.
+    with get_core() as core_conn:
+        scope_rows = core_conn._conn.execute(
+            "SELECT uuid, data FROM entity WHERE type = 'Scope' "
+            "AND superseded_by IS NULL"
+        ).fetchall()
+    scope_labels = {}
+    for r in scope_rows:
+        label = (_loads(r["data"]) or {}).get("label")
+        if label:
+            scope_labels[r["uuid"]] = label
+            scope_labels[uid.add_core_prefix(r["uuid"])] = label
+
+    # Latest decision per target (actions arrive in realized_at order).
+    decisions: dict = {}
+    for row in rows:
+        d = _loads(row["data"]) or {}
+        params = d.get("params") or {}
+        target = params.get("target")
+        if not target:
+            continue
+        scopes = (params.get("metadata") or {}).get("scopes")
+        if scopes is None:
+            continue
+        if scopes:
+            decided = scope_labels.get(scopes[0], scopes[0])
+        else:
+            decided = "unclassified"  # cleared = explicit unscoped decision
+        decisions[target] = {"decided": decided, "at": row["realized_at"]}
+
+    # Eval set: first n decisions with a stored recommendation (non-escalated).
+    entries = []
+    for target, dec in decisions.items():
+        rec = recs_by_uuid.get(target)
+        if rec is None:
+            continue  # escalated or not yet recommended
+        rec_pred = rec.get("pred")
+        entries.append({
+            "uuid": target,
+            "at": dec["at"],
+            "rec": rec_pred,
+            "confidence": rec.get("confidence"),
+            "runner": rec.get("runner"),
+            "decided": dec["decided"],
+            "agree": rec_pred == dec["decided"],
+        })
+        if len(entries) >= n:
+            break
+
+    correct = sum(1 for e in entries if e["agree"])
+    return jsonify({
+        "model": doc.get("model"),
+        "generated_at": since,
+        "target": n,
+        "n": len(entries),
+        "correct": correct,
+        "agreement": round(correct / len(entries), 3) if entries else None,
+        "decisions": entries,
     })
 
 
