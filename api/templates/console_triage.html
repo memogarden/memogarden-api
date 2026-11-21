@@ -441,6 +441,18 @@ document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', f
 // Keys rendered in the body pane rather than the attribute table.
 const BODY_KEYS = ['description', 'summary'];
 
+// Conservative raw-HTML detector for bodies mislabeled as text/plain: a
+// sender's broken plain part (substack-style). Needs enough tags AND enough
+// distinct tag names that genuine plain prose, ASCII tables, or code with a
+// stray <div> is not mistaken for markup; everything still renders behind
+// the sandboxed iframe, and the Raw data pane keeps the literal text.
+function looksLikeHtml(text) {
+    if (!text || text.length < 200) return false;
+    const tags = text.match(/<\/?(?:div|span|p|br|table|tr|td|th|tbody|thead|a|img|b|i|em|strong|font|u|ol|ul|li|h[1-6]|html|body|head|meta|style|center)\b/gi);
+    if (!tags || tags.length < 6) return false;
+    return new Set(tags.map(t => t.toLowerCase().replace('</', '<'))).size >= 3;
+}
+
 function openItemModal(uuid) {
     const item = findItem(uuid);
     if (!item) return;  // stale reference (row already filed + re-rendered)
@@ -476,11 +488,17 @@ function openItemModal(uuid) {
 
     // Body pane: text bodies as pre-wrapped text; HTML bodies via sandboxed
     // iframe (srcdoc assigned as a property post-insert, so no attr escaping).
+    // Declared text/html is rendered directly; a body LABELED text/plain that
+    // is actually markup (sender-broken plain part — 237 live emails, 2026-11-21
+    // corpus survey) is detected by tag density and rendered too, preferring
+    // metadata.html_body (the importer's stored HTML alternative) when present.
     let htmlBody = null;
     const bodyVal = d.description || d.summary || '';
     if (bodyVal) {
-        const html = (d.content_type === 'text/html');
-        if (html) htmlBody = bodyVal;
+        const declared = (d.content_type === 'text/html');
+        const detected = !declared && looksLikeHtml(bodyVal);
+        const html = declared || detected;
+        if (html) htmlBody = (detected && meta.html_body) ? meta.html_body : bodyVal;
         sections.push(`<div><div class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500 mb-1">${html ? 'Content (HTML, sandboxed)' : 'Content'}</div>
             ${html
                 ? `<iframe id="imFrame" sandbox="" class="w-full h-[24rem] rounded border border-gray-200 dark:border-gray-700 bg-white" title="Item content"></iframe>`
