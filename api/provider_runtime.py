@@ -352,6 +352,14 @@ def _execute_run(
                     soil.commit()
                     continue
                 fact = _to_fact(yielded)
+                # RFC-012 §4.9 addendum (2026-11-21 operator decision): a
+                # fact yielded with a parent reference (metadata.email_uuid
+                # — gmail attachments) inherits the parent's CURRENT scopes
+                # when the parent has any, so a late-extracted attachment of
+                # an already-filed email lands filed instead of stranding in
+                # triage as an orphan. Undecided/unscoped parents fall
+                # through to the policy unchanged (fail-closed triage).
+                _inherit_parent_scopes(fact, soil)
                 # RFC-011 §4.8 (item 4): providers label at creation per the
                 # operator's policy — the framework applies it, providers
                 # cannot forget (SG-7: providers are never scope-gated).
@@ -712,6 +720,47 @@ def _make_scope_resolver():
         return uuid_val
 
     return resolve
+
+
+def _inherit_parent_scopes(fact: Fact, soil) -> None:
+    """RFC-012 §4.9 addendum (2026-11-21 operator decision): a yielded fact
+    carrying a parent reference (metadata.email_uuid — gmail attachments)
+    inherits the parent email's CURRENT scopes at extraction when the parent
+    has any. Late-extracted attachments of already-filed emails then land
+    filed instead of stranding in triage as orphan rows.
+
+    Order of precedence: provider-set scopes win (unchanged), then parent
+    inheritance, then the scope policy. Parents with NO scopes (unscoped)
+    or still sitting in triage fall through to the policy unchanged —
+    fail-closed defaults are never weakened by inheritance, and an
+    undecided (triage-labeled) parent keeps routing children to triage,
+    where the in-window family grouping cascades the operator's decision.
+
+    A missing/superseded parent row is a no-op: the next hourly coverage
+    scan re-derives coverage from message ids, not from this stamp.
+    """
+    metadata = fact.metadata or {}
+    if metadata.get("scopes"):
+        return  # provider labeled it — provider wins
+    parent_ref = metadata.get("email_uuid")
+    if not parent_ref:
+        return
+    conn = soil._get_connection()
+    canonical = uid.add_soil_prefix(uid.strip_prefix(parent_ref))
+    row = conn.execute(
+        "SELECT metadata FROM item WHERE uuid IN (?, ?) "
+        "AND superseded_by IS NULL LIMIT 1",
+        (parent_ref, canonical),
+    ).fetchone()
+    if row is None:
+        return
+    parent_meta = row["metadata"]
+    if isinstance(parent_meta, str):
+        parent_meta = json.loads(parent_meta) if parent_meta else {}
+    scopes = (parent_meta or {}).get("scopes") or []
+    if scopes:
+        metadata["scopes"] = list(scopes)
+        fact.metadata = metadata
 
 
 def _apply_scope_policy(fact: Fact, policy: dict | None, resolve_scope) -> None:

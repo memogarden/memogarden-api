@@ -300,6 +300,115 @@ def test_triage_orphan_stub_follows_supersedes(client, auth_headers, core):
     assert stub["scopes"] == []
 
 
+def test_triage_pulls_in_undecided_parent(client, auth_headers, core):
+    """2026-11-21 decision: a child whose live parent is STILL TRIAGE-LABELED
+    but outside the rendered window gets the parent PULLED IN — the family
+    renders and cascades together instead of the child stranding as a
+    captioned orphan. (Decided parents — filed/unscoped — stay stubs; see
+    test_triage_orphan_stub_soil_relation.)"""
+    triage = _make_scope(core, "Triage / Untrusted")
+    older = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    now = isodatetime.now()
+
+    def _dated_fact(_type, data, metadata, canonical_at):
+        with get_soil() as soil:
+            return soil.create_fact(Fact(
+                uuid=generate_soil_uuid(), _type=_type,
+                realized_at=now, canonical_at=canonical_at,
+                data=data, metadata=metadata, integrity_hash=None, fidelity="full",
+            ))
+
+    parent = _dated_fact("Email", {"title": "older triage email"},
+                         {"scopes": [triage], "account": "gmail"}, older)
+    child = _dated_fact("Attachment", {"filename": "invoice.pdf"},
+                        {"scopes": [triage], "email_uuid": parent}, now)
+    _soil_relation(child, parent)
+
+    response = client.get("/api/v1/triage?limit=1", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["total_facts"] == 2  # the pulled parent is already counted
+    # Parent spliced in directly before its child: the family renders together.
+    assert [f["uuid"] for f in data["facts"]] == [parent, child]
+    assert data["facts"][0]["pulled_in"] is True
+    assert data["containment"]["child_parent"] == {child: parent}
+    assert data["containment"]["parent_stubs"] == {}
+
+
+def test_triage_pulled_parent_groups_sibling_litter(client, auth_headers, core):
+    """Two attachments of the same out-of-window triage parent both link to
+    the ONE pulled-in parent — the console renders a single family card and
+    one filing decision covers the litter."""
+    triage = _make_scope(core, "Triage / Untrusted")
+    older = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    now = isodatetime.now()
+
+    def _dated_fact(filename, canonical_at):
+        with get_soil() as soil:
+            return soil.create_fact(Fact(
+                uuid=generate_soil_uuid(), _type="Attachment",
+                realized_at=now, canonical_at=canonical_at,
+                data={"filename": filename},
+                metadata={"scopes": [triage]}, integrity_hash=None, fidelity="full",
+            ))
+
+    with get_soil() as soil:
+        parent = soil.create_fact(Fact(
+            uuid=generate_soil_uuid(), _type="Email",
+            realized_at=now, canonical_at=older,
+            data={"title": "older triage email"},
+            metadata={"scopes": [triage], "account": "gmail"},
+            integrity_hash=None, fidelity="full",
+        ))
+    child1 = _dated_fact("a.pdf", now)
+    child2 = _dated_fact("b.pdf", now)
+    _soil_relation(child1, parent)
+    _soil_relation(child2, parent)
+
+    # limit=2: the window holds both children (both newer than the parent),
+    # the parent itself is out and gets pulled in.
+    response = client.get("/api/v1/triage?limit=2", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.get_json()
+    assert {f["uuid"] for f in data["facts"]} == {parent, child1, child2}
+    pulled = [f for f in data["facts"] if f.get("pulled_in")]
+    assert len(pulled) == 1 and pulled[0]["uuid"] == parent
+    assert data["containment"]["child_parent"] == {child1: parent, child2: parent}
+    assert data["containment"]["parent_stubs"] == {}
+
+
+def test_triage_pulls_in_undecided_entity_parent(client, auth_headers, core):
+    """Entity parents resolve through core user_relation: a triage-labeled
+    entity outside the entities window is pulled in like soil parents."""
+    triage = _make_scope(core, "Triage / Untrusted")
+    parent_uuid = core.entity.create(entity_type="Artifact", data={
+        "title": "older triage entity", "scopes": [triage],
+        "active_participants": [], "artifact_uuids": []})
+    # A newer starts_at pushes the parent out of the limit=1 entities window.
+    core.entity.create(entity_type="Artifact", data={
+        "title": "newer entity", "scopes": [triage], "starts_at": "2099-01-01T00:00:00+00:00",
+        "active_participants": [], "artifact_uuids": []})
+    core._conn.commit()
+    parent_prefixed = "core_" + parent_uuid
+
+    child = _fact("Attachment", {"filename": "x.bin"}, {"scopes": [triage]})
+    core._conn.execute(
+        "INSERT INTO user_relation (uuid, kind, source, source_type, target, "
+        "target_type, time_horizon, last_access_at, created_at) "
+        "VALUES (?, 'contained_by', ?, 'item', ?, 'entity', 0, 0, 0)",
+        ("core_test_userrel_1", child, parent_uuid),
+    )
+    core._conn.commit()
+
+    response = client.get("/api/v1/triage?limit=1", headers=auth_headers)
+    assert response.status_code == 200
+    data = response.get_json()
+    pulled = [e for e in data["entities"] if e.get("pulled_in")]
+    assert len(pulled) == 1 and pulled[0]["uuid"] == parent_prefixed
+    assert data["containment"]["child_parent"] == {child: parent_prefixed}
+    assert data["containment"]["parent_stubs"] == {}
+
+
 def test_triage_unknown_scope_400(client, auth_headers):
     response = client.get("/api/v1/triage?scope=nonexistent-scope", headers=auth_headers)
     assert response.status_code == 400

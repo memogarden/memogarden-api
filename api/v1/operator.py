@@ -256,14 +256,29 @@ def triage_queue():
         if child and parent and child != parent:
             child_parent[child] = parent
 
-    # Orphan stubs: for window children with no in-window parent, resolve the
-    # parent's LIVE version (supersede chain collapsed) anywhere in the
-    # corpus — triage-labeled on an older page, filed elsewhere, or unscoped —
-    # so the console captions the orphan instead of showing a mystery row.
-    # v1 keeps actions on the child itself: the parent already had its filing
-    # decision, and cascading to an out-of-window parent would hide where the
-    # decision actually landed.
+    # Out-of-window parents split two ways (2026-11-21 operator decision,
+    # refining the v1 orphan-stub semantics where actions always stayed on
+    # the child):
+    #   - Parent still TRIAGE-LABELED (undecided, just on an older page):
+    #     PULL it into the window and link the family, so the operator makes
+    #     one cascading decision for parent + children — grouping and
+    #     cascade are the whole point of families.
+    #   - Parent already FILED or UNSCOPED (decision made): keep a caption
+    #     STUB only, and never rewrite the parent — the console offers
+    #     "→ with parent" on the sibling card instead, moving the CHILDREN
+    #     to the parent's destination. Re-opening decided items would
+    #     re-litigate choices already made and churn the queue.
     parent_stubs: dict = {}
+    # prefixed parent uuid -> payload dict (facts/entities), populated when a
+    # triage-labeled out-of-window parent is pulled into the window.
+    pulled_facts: dict = {}
+    pulled_entities: dict = {}
+
+    def _row_scopes(row, *, entity: bool) -> list:
+        """Live scopes of a parent row (facts: metadata.scopes, entities:
+        data.scopes — both bare uuids per DB convention)."""
+        source = _loads(row["data"]) or {} if entity else (_loads(row["metadata"]) or {})
+        return source.get("scopes") or []
 
     def _stub_from_item(row) -> dict:
         data = _loads(row["data"]) or {}
@@ -286,7 +301,42 @@ def triage_queue():
             "scopes": data.get("scopes") or [],
         }
 
-    # tada-style children: resolve the live parent by source_id.
+    def _pull_item_parent(row, child: str) -> None:
+        """Admit a triage-labeled out-of-window soil item into the window."""
+        prefixed = uid.add_soil_prefix(row["uuid"])
+        if prefixed not in pulled_facts:
+            pulled_facts[prefixed] = {
+                "uuid": prefixed,
+                "type": row["_type"],
+                "realized_at": row["realized_at"],
+                "canonical_at": row["canonical_at"],
+                "data": _loads(row["data"]),
+                "metadata": _loads(row["metadata"]) or {},
+                "pulled_in": True,
+            }
+        child_parent[child] = prefixed
+
+    def _pull_entity_parent(row, child: str) -> None:
+        """Admit a triage-labeled out-of-window core entity into the window."""
+        prefixed = uid.add_core_prefix(row["uuid"])
+        if prefixed not in pulled_entities:
+            payload = {
+                "uuid": prefixed,
+                "type": row["type"],
+                "updated_at": row["updated_at"],
+                "canonical_at": (
+                    (_loads(row["data"]) or {}).get("starts_at")
+                    or (_loads(row["data"]) or {}).get("start_at")
+                    or row["updated_at"] or ""
+                ),
+                "data": _loads(row["data"]),
+                "pulled_in": True,
+            }
+            pulled_entities[prefixed] = payload
+        child_parent[child] = prefixed
+
+    # tada-style children: resolve the live parent by source_id. Triage-
+    # labeled parents get pulled in; decided parents become caption stubs.
     for r in facts:
         task_source_id = (_loads(r["metadata"]) or {}).get("task_source_id")
         child_uuid = uid.add_soil_prefix(r["uuid"])
@@ -294,12 +344,16 @@ def triage_queue():
             continue
         with get_soil() as soil2:
             prow = soil2._get_connection().execute(
-                "SELECT uuid, _type, data, metadata FROM item "
+                "SELECT uuid, _type, realized_at, canonical_at, data, metadata FROM item "
                 "WHERE json_extract(data, '$.source_id') = ? "
                 "AND superseded_by IS NULL LIMIT 1",
                 (task_source_id,),
             ).fetchone()
-        if prow:
+        if prow is None:
+            continue
+        if scope_uuid in _row_scopes(prow, entity=False):
+            _pull_item_parent(prow, child_uuid)
+        else:
             parent_stubs[child_uuid] = _stub_from_item(prow)
 
     # contained_by children without in-window parents: resolve the target's
@@ -315,23 +369,73 @@ def triage_queue():
         bare_target = live_target.removeprefix("soil_").removeprefix("core_")
         with get_soil() as soil2:
             prow = soil2._get_connection().execute(
-                "SELECT uuid, _type, data, metadata FROM item "
+                "SELECT uuid, _type, realized_at, canonical_at, data, metadata FROM item "
                 "WHERE uuid = ? AND superseded_by IS NULL LIMIT 1", (live_target,)
             ).fetchone()
-        if prow:
-            parent_stubs[child] = _stub_from_item(prow)
+        if prow is not None:
+            if scope_uuid in _row_scopes(prow, entity=False):
+                _pull_item_parent(prow, child)
+            else:
+                parent_stubs[child] = _stub_from_item(prow)
             continue
         erow = core._conn.execute(
-            "SELECT uuid, type, data FROM entity "
+            "SELECT uuid, type, updated_at, data FROM entity "
             "WHERE uuid = ? AND superseded_by IS NULL LIMIT 1", (bare_target,)
         ).fetchone()
-        if erow:
-            parent_stubs[child] = _stub_from_entity(erow)
+        if erow is not None:
+            if scope_uuid in _row_scopes(erow, entity=True):
+                _pull_entity_parent(erow, child)
+            else:
+                parent_stubs[child] = _stub_from_entity(erow)
+
+    # A child processed BEFORE its parent was pulled (relation order) may
+    # carry a stub for a parent that has since been admitted — consolidate:
+    # the edge replaces the stub, captions go away for that family.
+    for child in [c for c, stub in parent_stubs.items() if stub["uuid"] in pulled_facts
+                  or stub["uuid"] in pulled_entities]:
+        child_parent[child] = parent_stubs[child]["uuid"]
+        del parent_stubs[child]
 
     def _entity_canonical_at(row) -> str:
         data = _loads(row["data"]) or {}
         return (data.get("starts_at") or data.get("start_at")
                 or row["updated_at"] or "")
+
+    facts_payload = [
+        {
+            "uuid": uid.add_soil_prefix(r["uuid"]),
+            "type": r["_type"],
+            "realized_at": r["realized_at"],
+            "canonical_at": r["canonical_at"],
+            "data": _loads(r["data"]),
+            "metadata": _loads(r["metadata"]) or {},
+        }
+        for r in facts
+    ]
+    entities_payload = [
+        {
+            "uuid": uid.add_core_prefix(r["uuid"]),
+            "type": r["type"],
+            "updated_at": r["updated_at"],
+            "canonical_at": _entity_canonical_at(r),
+            "data": _loads(r["data"]),
+        }
+        for r in entities
+    ]
+
+    # Splice each pulled parent in right before its first child's slot, so
+    # the family renders together instead of the parent landing at the
+    # array tail (out-of-window parents sort older than the whole window).
+    for prefixed, payload in list(pulled_facts.items()):
+        child = next((c for c, p in child_parent.items() if p == prefixed), None)
+        idx = next((i for i, f in enumerate(facts_payload) if f["uuid"] == child),
+                   len(facts_payload))
+        facts_payload.insert(idx, payload)
+    for prefixed, payload in list(pulled_entities.items()):
+        child = next((c for c, p in child_parent.items() if p == prefixed), None)
+        idx = next((i for i, e in enumerate(entities_payload) if e["uuid"] == child),
+                   len(entities_payload))
+        entities_payload.insert(idx, payload)
 
     return jsonify({
         "scope": {
@@ -339,27 +443,8 @@ def triage_queue():
             "data": _loads(scope["data"]),
             "created_at": scope["created_at"],
         },
-        "facts": [
-            {
-                "uuid": uid.add_soil_prefix(r["uuid"]),
-                "type": r["_type"],
-                "realized_at": r["realized_at"],
-                "canonical_at": r["canonical_at"],
-                "data": _loads(r["data"]),
-                "metadata": _loads(r["metadata"]) or {},
-            }
-            for r in facts
-        ],
-        "entities": [
-            {
-                "uuid": uid.add_core_prefix(r["uuid"]),
-                "type": r["type"],
-                "updated_at": r["updated_at"],
-                "canonical_at": _entity_canonical_at(r),
-                "data": _loads(r["data"]),
-            }
-            for r in entities
-        ],
+        "facts": facts_payload,
+        "entities": entities_payload,
         "total_facts": total_facts,
         "total_entities": total_entities,
         "containment": {

@@ -601,3 +601,57 @@ class TestScopePolicy:
         _apply_scope_policy(f, policy, lambda ref: {"finances-uuid": "finances-uuid",
                                                     "triage": "triage-uuid"}[ref])
         assert f.metadata["scopes"] == ["finances-uuid"]
+
+    def test_unit_inherit_parent_scopes(self, client):
+        # `client` boots the app so the fixture data dir has initialized
+        # soil/core tables — this unit test reads them directly.
+        """RFC-012 §4.9 addendum (2026-11-21 operator decision): yielded
+        facts carrying metadata.email_uuid inherit the parent email's live
+        scopes at extraction — a late-extracted attachment of an
+        already-filed email lands filed instead of stranding in triage as
+        an orphan. Undecided/unscoped parents fall through to the scope
+        policy (fail-closed unchanged); provider labels still win."""
+        from api.provider_runtime import _inherit_parent_scopes
+        from system.soil import Fact, generate_soil_uuid, get_soil
+
+        def attachment(metadata):
+            return Fact(uuid="u", _type="Attachment", realized_at="t", canonical_at="t",
+                        data={"filename": "x.pdf"}, metadata=dict(metadata), fidelity="full")
+
+        with get_soil() as soil:
+            conn = soil._get_connection()
+            parent = soil.create_fact(Fact(
+                uuid=generate_soil_uuid(), _type="Email", realized_at="t", canonical_at="t",
+                data={"title": "filed email"}, metadata={"scopes": ["finances-uuid"]},
+                fidelity="full"))
+            conn.commit()
+
+            # Parent's scopes inherited (prefixed email_uuid ref)
+            f = attachment({"email_uuid": parent})
+            _inherit_parent_scopes(f, soil)
+            assert f.metadata["scopes"] == ["finances-uuid"]
+
+            # Bare parent ref resolves too (uuid form defense, RFC-010 gotcha)
+            f = attachment({"email_uuid": parent.removeprefix("soil_")})
+            _inherit_parent_scopes(f, soil)
+            assert f.metadata["scopes"] == ["finances-uuid"]
+
+            # Provider-set label wins over inheritance
+            f = attachment({"email_uuid": parent, "scopes": ["preset"]})
+            _inherit_parent_scopes(f, soil)
+            assert f.metadata["scopes"] == ["preset"]
+
+            # Parent without scopes -> untouched; the policy applies next
+            unscoped = soil.create_fact(Fact(
+                uuid=generate_soil_uuid(), _type="Email", realized_at="t", canonical_at="t",
+                data={"title": "unscoped email"}, metadata={"scopes": []},
+                fidelity="full"))
+            conn.commit()
+            f = attachment({"email_uuid": unscoped})
+            _inherit_parent_scopes(f, soil)
+            assert "scopes" not in f.metadata
+
+            # Missing parent row -> no-op
+            f = attachment({"email_uuid": "soil_does_not_exist"})
+            _inherit_parent_scopes(f, soil)
+            assert "scopes" not in f.metadata

@@ -68,6 +68,12 @@ let dismissed = new Set();
 let activeTab = 'facts';
 let CHILD_PARENT = {};
 let CHILDREN_BY_PARENT = {};
+// Out-of-triage parent stubs (2026-11-21): children whose live parent is
+// already FILED or UNSCOPED render as ONE sibling card captioned by the
+// stub — one decision covers the litter. The stub parent itself is never
+// rewritten; "→ with parent" moves the children to its destination.
+let STUB_GROUPS = [];
+let SIBLING_GROUP_OF = {};
 
 document.getElementById('selAll').addEventListener('change', function() {
     document.querySelectorAll('#factsList input[type="checkbox"]').forEach(cb => {
@@ -103,13 +109,15 @@ function renderTriage() {
     document.getElementById('cntEntities').textContent = String(TRIAGE.entities.length);
 
     // Families (RFC-015 §3.3): containment.child_parent maps child uuid ->
-    // in-window parent uuid. Children render as members under their parent;
-    // filings on the parent cascade to the family.
+    // in-window parent uuid (endpoint pulls in triage-labeled parents from
+    // older pages, so "in-window" means "still undecided"). Children render
+    // as members under their parent; filings on the parent cascade.
     CHILD_PARENT = (TRIAGE.containment && TRIAGE.containment.child_parent) || {};
     CHILDREN_BY_PARENT = {};
     for (const [child, parent] of Object.entries(CHILD_PARENT)) {
         (CHILDREN_BY_PARENT[parent] = CHILDREN_BY_PARENT[parent] || []).push(child);
     }
+    computeStubGroups();
 
     const facts = document.getElementById('factsList');
     const topFacts = TRIAGE.facts.filter(f => !CHILD_PARENT[f.uuid]);
@@ -117,6 +125,8 @@ function renderTriage() {
         facts.innerHTML = '<div class="bg-white dark:bg-gray-900 shadow rounded-lg p-8 text-center text-gray-400 dark:text-gray-500">Nothing left in this window — reload for the next slice.</div>';
     } else {
         facts.innerHTML = topFacts.map(f => {
+            const g = SIBLING_GROUP_OF[f.uuid];
+            if (g) return g.rendered ? '' : stubGroupCard(g);
             const d = f.data || {};
             const title = d.subject || d.title || d.filename || d.description || d.summary || f.uuid;
             const account = (f.metadata || {}).account || d.account || '';
@@ -128,8 +138,7 @@ function renderTriage() {
                 <input type="checkbox" data-uuid="${esc(f.uuid)}" data-kind="fact" class="mt-1 rounded triage-cb" onchange="updateCount()">
                 <div class="flex-1 min-w-0 group cursor-pointer" onclick="openItemModal('${esc(f.uuid)}')" title="Tap to view full item">
                     <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate group-hover:underline">${esc(title)}</div>
-                    <div class="text-xs text-gray-500 dark:text-gray-400">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.canonical_at || f.realized_at)} · ${shortUuid(f.uuid)}</div>
-                    ${orphanCaption(f.uuid)}
+                    <div class="text-xs text-gray-500 dark:text-gray-400">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.canonical_at || f.realized_at)} · ${shortUuid(f.uuid)}${f.pulled_in ? ' · <span title="parent still in triage — pulled in from an older page so the family decides together">↩ pulled in</span>' : ''}</div>
                     ${familyBlock(kids)}
                 </div>
                 <div class="flex gap-1 flex-wrap w-full sm:w-auto">
@@ -149,6 +158,8 @@ function renderTriage() {
         ents.innerHTML = '<div class="bg-white dark:bg-gray-900 shadow rounded-lg p-8 text-center text-gray-400 dark:text-gray-500">No scoped entities.</div>';
     } else {
         ents.innerHTML = topEntities.map(e => {
+            const g = SIBLING_GROUP_OF[e.uuid];
+            if (g) return g.rendered ? '' : stubGroupCard(g);
             const d = e.data || {};
             const title = d.title || d.label || e.uuid;
             const account = d.account || '';
@@ -157,8 +168,7 @@ function renderTriage() {
             <div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2">
                 <div class="flex-1 min-w-0 group cursor-pointer" onclick="openItemModal('${esc(e.uuid)}')" title="Tap to view full item">
                     <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate group-hover:underline">${esc(title)}</div>
-                    <div class="text-xs text-gray-500 dark:text-gray-400">${esc(e.type)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(e.canonical_at || e.updated_at)} · ${shortUuid(e.uuid)}</div>
-                    ${orphanCaption(e.uuid)}
+                    <div class="text-xs text-gray-500 dark:text-gray-400">${esc(e.type)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(e.canonical_at || e.updated_at)} · ${shortUuid(e.uuid)}${e.pulled_in ? ' · <span title="parent still in triage — pulled in from an older page so the family decides together">↩ pulled in</span>' : ''}</div>
                     ${familyBlock(kids)}
                 </div>
                 <div class="flex gap-1 flex-wrap w-full sm:w-auto">
@@ -181,34 +191,87 @@ function itemKind(uuid) {
     return TRIAGE.facts.some(x => x.uuid === uuid) ? 'fact' : 'entity';
 }
 
-// Member list rendered under a parent card (read-only; filings cascade).
-// Each member line is tappable too — members are items with full content of
-// their own (e.g. a tada Note under its Task).
-function familyBlock(kids) {
-    if (!kids.length) return '';
-    return `<div class="mt-1 ml-1 pl-2 border-l border-gray-200 dark:border-gray-700 space-y-0.5">
-        ${kids.map(k => {
-            const kd = k.data || {};
-            const ktitle = kd.description || kd.subject || kd.title || kd.label || kd.filename || k.uuid;
-            return `<div class="text-xs text-gray-500 dark:text-gray-400 truncate cursor-pointer hover:text-gray-700 dark:hover:text-gray-300 hover:underline" title="${esc(k.uuid)} — tap to view" onclick="event.stopPropagation(); openItemModal('${esc(k.uuid)}')">↳ ${esc(k.type || k._type || 'item')} · ${esc(ktitle)}</div>`;
-        }).join('')}
-    </div>`;
+// Group children whose live parent is out of triage entirely (filed or
+// unscoped — the endpoint pulls still-in-triage parents in, so any stub
+// left here is a DECIDED parent). Siblings of one parent share a card;
+// filings cascade across the litter via familyOf, and "→ with parent"
+// moves the children to the parent's destination without touching it.
+function computeStubGroups() {
+    STUB_GROUPS = [];
+    SIBLING_GROUP_OF = {};
+    const byStub = {};
+    for (const item of [...TRIAGE.facts, ...TRIAGE.entities]) {
+        const stub = TRIAGE.containment && TRIAGE.containment.parent_stubs
+            ? TRIAGE.containment.parent_stubs[item.uuid] : null;
+        if (!stub || CHILD_PARENT[item.uuid]) continue;
+        (byStub[stub.uuid] = byStub[stub.uuid] || { stub, members: [] }).members.push(item);
+    }
+    for (const group of Object.values(byStub)) {
+        group.rendered = false;
+        STUB_GROUPS.push(group);
+        for (const m of group.members) SIBLING_GROUP_OF[m.uuid] = group;
+    }
 }
 
-// Orphan caption: the child's parent is OUTSIDE the window — the endpoint
-// resolved the parent's live version so the row says what it belongs to
-// (in triage on an older page / filed to some scope / unscoped) instead of
-// reading as a mystery bare row. Actions stay on the child.
-function orphanCaption(uuid) {
-    const stub = TRIAGE.containment && TRIAGE.containment.parent_stubs
-        ? TRIAGE.containment.parent_stubs[uuid] : null;
-    if (!stub) return '';
+// Member line rendered under a parent card or inside a sibling group —
+// tappable: members are items with full content of their own.
+function memberLine(item) {
+    const d = item.data || {};
+    const title = d.subject || d.title || d.filename || d.description || d.summary || item.uuid;
+    return `<div class="text-xs text-gray-500 dark:text-gray-400 truncate cursor-pointer hover:text-gray-700 dark:hover:text-gray-300 hover:underline" title="${esc(item.uuid)} — tap to view" onclick="event.stopPropagation(); openItemModal('${esc(item.uuid)}')">↳ ${esc(item.type || 'item')} · ${esc(title)} · ${fmtTime(item.canonical_at || item.realized_at || item.updated_at)}</div>`;
+}
+
+function familyBlock(kids) {
+    if (!kids.length) return '';
+    return `<div class="mt-1 ml-1 pl-2 border-l border-gray-200 dark:border-gray-700 space-y-0.5">${kids.map(memberLine).join('')}</div>`;
+}
+
+// uuids -> labels via the scopes overview (prefix-stripped compare, since
+// facts/entities store bare uuids while the overview carries prefixes).
+function scopeLabels(uuids) {
+    return (uuids || []).map(u => {
+        const bare = String(u).replace(/^(soil_|core_)/, '');
+        const s = (OVERVIEW ? OVERVIEW.scopes : []).find(s =>
+            (s.uuid || '').replace(/^(soil_|core_)/, '') === bare);
+        return s ? ((s.data ? s.data.label : s.label) || shortUuid(u)) : shortUuid(u);
+    }).join(', ');
+}
+
+function stubStatus(stub) {
+    if (!stub.scopes || !stub.scopes.length) return 'unscoped (→ Public matches it)';
     const bare = u => String(u || '').replace(/^(soil_|core_)/, '');
     const triageBare = bare(TRIAGE.scope && TRIAGE.scope.uuid);
-    const status = !stub.scopes || !stub.scopes.length ? 'unscoped'
-        : stub.scopes.some(s => bare(s) === triageBare) ? 'still in triage — older page'
-        : 'filed';
-    return `<div class="mt-1 text-xs text-gray-500 dark:text-gray-400 truncate">↳ part of ${esc(stub.type)} · ${esc(stub.title || stub.uuid)} · ${status}</div>`;
+    if (stub.scopes.some(s => bare(s) === triageBare)) return 'still in triage — older page';
+    return 'filed → ' + scopeLabels(stub.scopes);
+}
+
+// One card per decided-parent stub: caption + tappable member lines +
+// the full filing action set, cascading across the litter.
+function stubGroupCard(group) {
+    group.rendered = true;
+    const stub = group.stub;
+    const members = group.members;
+    const first = members[0];
+    const kind = itemKind(first.uuid);
+    const kept = members.every(m => dismissed.has(m.uuid));
+    const n = members.length;
+    return `
+    <div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2 ${kept ? 'opacity-40' : ''}">
+        <input type="checkbox" data-uuid="${esc(first.uuid)}" data-kind="${esc(kind)}" class="mt-1 rounded triage-cb" onchange="updateCount()">
+        <div class="flex-1 min-w-0">
+            <div class="text-sm font-medium text-gray-700 dark:text-gray-300 truncate" title="these items live inside an item that already left triage — file them to match it, or anywhere else">↳ part of ${esc(stub.type)} · ${esc(stub.title || stub.uuid)}</div>
+            <div class="text-xs text-gray-500 dark:text-gray-400">${n} member${n === 1 ? '' : 's'} in triage · parent ${esc(stubStatus(stub))}</div>
+            <div class="mt-1 ml-1 pl-2 border-l border-gray-200 dark:border-gray-700 space-y-0.5">${members.map(memberLine).join('')}</div>
+        </div>
+        <div class="flex gap-1 flex-wrap w-full sm:w-auto">
+            ${OVERVIEW.scopes.filter(s => (s.data ? s.data.label : s.label) !== 'Triage / Untrusted').map(s =>
+                `<button class="px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800" onclick="relabel('${esc(first.uuid)}','${esc(kind)}',['${esc(s.uuid)}'])">→ ${esc(s.label)}</button>`
+            ).join('')}
+            <button class="px-2 py-1 text-xs border border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-300 rounded hover:bg-amber-50 dark:hover:bg-amber-900/40" title="remove all scopes from these members — they become unscoped (globally visible to any principal)" onclick="makePublic('${esc(first.uuid)}','${esc(kind)}')">→ Public</button>
+            ${(stub.scopes || []).length ? `<button class="px-2 py-1 text-xs border border-green-300 dark:border-green-700 text-green-700 dark:text-green-300 rounded hover:bg-green-50 dark:hover:bg-green-900/40" title="file these members to where their parent already went — the parent itself is not touched" onclick="relabel('${esc(first.uuid)}','${esc(kind)}',[${stub.scopes.map(s => `'${esc(s)}'`).join(',')}])">→ with parent (${esc(scopeLabels(stub.scopes))})</button>` : ''}
+            <button class="px-2 py-1 text-xs border border-gray-200 dark:border-gray-700 rounded text-gray-400 dark:text-gray-500" title="defer visually — the members stay in triage and return on reload" onclick="dismissRow('${esc(first.uuid)}')">keep</button>
+        </div>
+    </div>`;
 }
 
 // In-place state update after a successful filing: the family has LEFT the
@@ -216,7 +279,11 @@ function orphanCaption(uuid) {
 // members actually present), re-render — never a page reload (that reset the
 // tab, scroll, and kept rows).
 function familyOf(uuid) {
-    return [uuid].concat(CHILDREN_BY_PARENT[uuid] || []);
+    if (CHILDREN_BY_PARENT[uuid]) return [uuid].concat(CHILDREN_BY_PARENT[uuid]);
+    // Sibling litter of a decided parent: the STUB parent is never rewritten
+    // (its decision already landed) — only the children move together.
+    if (SIBLING_GROUP_OF[uuid]) return SIBLING_GROUP_OF[uuid].members.map(m => m.uuid);
+    return [uuid];
 }
 
 function removeFromQueue(targetUuid) {
