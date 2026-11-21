@@ -41,6 +41,23 @@
     <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-2">Recent relabels <span class="text-xs text-gray-400 dark:text-gray-500">DELE</span></h3>
     <div id="relabelLog" class="bg-white dark:bg-gray-900 shadow rounded-lg divide-y divide-gray-100 dark:divide-gray-800 text-sm"></div>
 </div>
+
+<!-- Item detail modal (RFC-015 §3.3 triage): tap a row (or a family member
+     line) to read the full item — the triage payload already carries each
+     item's complete data + metadata, so this is pure client-side rendering
+     with no extra fetch. Read-only: filing decisions stay on the row. -->
+<div id="itemModal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center px-4" role="dialog" aria-modal="true">
+    <div class="bg-white dark:bg-gray-900 rounded-lg shadow-xl w-full max-w-3xl flex flex-col max-h-[85vh]">
+        <div class="flex justify-between items-start gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+            <div class="min-w-0">
+                <div id="imTitle" class="text-base font-semibold text-gray-900 dark:text-gray-100 break-words"></div>
+                <div id="imSub" class="text-xs text-gray-500 dark:text-gray-400 mt-0.5"></div>
+            </div>
+            <button id="imClose" class="p-1.5 rounded-lg text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-600 dark:hover:text-gray-300 flex-shrink-0" aria-label="Close">✕</button>
+        </div>
+        <div id="imBody" class="p-4 overflow-y-auto flex-1 min-h-0 space-y-4"></div>
+    </div>
+</div>
 {% endblock %}
 
 {% block console_scripts %}
@@ -109,8 +126,8 @@ function renderTriage() {
             return `
             <div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2 ${kept ? 'opacity-40' : ''}">
                 <input type="checkbox" data-uuid="${esc(f.uuid)}" data-kind="fact" class="mt-1 rounded triage-cb" onchange="updateCount()">
-                <div class="flex-1 min-w-0">
-                    <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">${esc(title)}</div>
+                <div class="flex-1 min-w-0 group cursor-pointer" onclick="openItemModal('${esc(f.uuid)}')" title="Tap to view full item">
+                    <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate group-hover:underline">${esc(title)}</div>
                     <div class="text-xs text-gray-500 dark:text-gray-400">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.canonical_at || f.realized_at)} · ${shortUuid(f.uuid)}</div>
                     ${orphanCaption(f.uuid)}
                     ${familyBlock(kids)}
@@ -138,8 +155,8 @@ function renderTriage() {
             const kids = (CHILDREN_BY_PARENT[e.uuid] || []).map(findItem).filter(Boolean);
             return `
             <div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2">
-                <div class="flex-1 min-w-0">
-                    <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">${esc(title)}</div>
+                <div class="flex-1 min-w-0 group cursor-pointer" onclick="openItemModal('${esc(e.uuid)}')" title="Tap to view full item">
+                    <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate group-hover:underline">${esc(title)}</div>
                     <div class="text-xs text-gray-500 dark:text-gray-400">${esc(e.type)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(e.canonical_at || e.updated_at)} · ${shortUuid(e.uuid)}</div>
                     ${orphanCaption(e.uuid)}
                     ${familyBlock(kids)}
@@ -165,13 +182,15 @@ function itemKind(uuid) {
 }
 
 // Member list rendered under a parent card (read-only; filings cascade).
+// Each member line is tappable too — members are items with full content of
+// their own (e.g. a tada Note under its Task).
 function familyBlock(kids) {
     if (!kids.length) return '';
     return `<div class="mt-1 ml-1 pl-2 border-l border-gray-200 dark:border-gray-700 space-y-0.5">
         ${kids.map(k => {
             const kd = k.data || {};
             const ktitle = kd.description || kd.subject || kd.title || kd.label || kd.filename || k.uuid;
-            return `<div class="text-xs text-gray-500 dark:text-gray-400 truncate" title="${esc(k.uuid)}">↳ ${esc(k.type || k._type || 'item')} · ${esc(ktitle)}</div>`;
+            return `<div class="text-xs text-gray-500 dark:text-gray-400 truncate cursor-pointer hover:text-gray-700 dark:hover:text-gray-300 hover:underline" title="${esc(k.uuid)} — tap to view" onclick="event.stopPropagation(); openItemModal('${esc(k.uuid)}')">↳ ${esc(k.type || k._type || 'item')} · ${esc(ktitle)}</div>`;
         }).join('')}
     </div>`;
 }
@@ -343,6 +362,132 @@ document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', f
     document.getElementById('factsList').classList.toggle('hidden', activeTab !== 'facts');
     document.getElementById('entitiesList').classList.toggle('hidden', activeTab !== 'entities');
 }));
+
+// ---- Item detail modal ----
+// The triage endpoint already returns each item's full data + metadata, so
+// openItemModal renders purely from the in-memory window — read-only, no
+// extra fetch. HTML-valued bodies (content_type text/html — email and RSS
+// bodies) render inside a fully-sandboxed iframe (no allow-scripts, no
+// allow-same-origin): untrusted email HTML can neither run script nor touch
+// this page; esc() everywhere else keeps the console XSS-safe.
+
+// Keys rendered in the body pane rather than the attribute table.
+const BODY_KEYS = ['description', 'summary'];
+
+function openItemModal(uuid) {
+    const item = findItem(uuid);
+    if (!item) return;  // stale reference (row already filed + re-rendered)
+    const kind = itemKind(uuid);
+    const d = item.data || {};
+    const meta = item.metadata || {};
+    const title = d.subject || d.title || d.filename || d.description || d.summary || item.uuid;
+
+    document.getElementById('imTitle').textContent = title;
+    document.getElementById('imSub').textContent =
+        `${kind} · ${item.type || ''} · ${fmtTime(item.canonical_at || item.realized_at || item.updated_at)}`;
+
+    const sections = [];
+
+    // Current labels: facts carry scope uuids in metadata.scopes, entities
+    // in data.scopes (both bare per DB convention) — resolve to chips.
+    const scopeUuids = meta.scopes || d.scopes || [];
+    if (scopeUuids.length) {
+        sections.push(`<div><div class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500 mb-1">Scopes</div>
+            <div>${scopeUuids.map(scopeChip).join(' ')}</div></div>`);
+    }
+
+    // Attributes: every scalar data field except the body keys (nulls and
+    // empties skipped to keep the table about signal, not schema).
+    const attrRows = Object.keys(d)
+        .filter(k => !BODY_KEYS.includes(k) && k !== 'scopes' && d[k] !== null && d[k] !== undefined && d[k] !== ''
+            && !(Array.isArray(d[k]) && !d[k].length))
+        .map(k => kvRow(k, esc(fmtAttr(d[k]))));
+    if (attrRows.length) {
+        sections.push(`<div><div class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500 mb-1">Attributes</div>
+            <div class="space-y-0.5">${attrRows.join('')}</div></div>`);
+    }
+
+    // Body pane: text bodies as pre-wrapped text; HTML bodies via sandboxed
+    // iframe (srcdoc assigned as a property post-insert, so no attr escaping).
+    let htmlBody = null;
+    const bodyVal = d.description || d.summary || '';
+    if (bodyVal) {
+        const html = (d.content_type === 'text/html');
+        if (html) htmlBody = bodyVal;
+        sections.push(`<div><div class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500 mb-1">${html ? 'Content (HTML, sandboxed)' : 'Content'}</div>
+            ${html
+                ? `<iframe id="imFrame" sandbox="" class="w-full h-[24rem] rounded border border-gray-200 dark:border-gray-700 bg-white" title="Item content"></iframe>`
+                : `<div class="whitespace-pre-wrap break-words text-gray-800 dark:text-gray-200 bg-gray-50 dark:bg-gray-950 rounded p-3 max-h-[24rem] overflow-y-auto">${esc(bodyVal)}</div>`}
+        </div>`);
+    }
+
+    // Metadata (facts only — triage entities carry no metadata): provenance
+    // keys, with scopes already rendered as chips above.
+    if (Object.keys(meta).length) {
+        const metaRows = Object.keys(meta)
+            .filter(k => k !== 'scopes' && meta[k] !== null && meta[k] !== undefined)
+            .map(k => kvRow(k, esc(fmtAttr(meta[k]))));
+        sections.push(`<div><div class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500 mb-1">Metadata</div>
+            <div class="space-y-0.5">${metaRows.join('')}</div></div>`);
+    }
+
+    // Full transparency fallback: raw JSON of data (+ metadata when present).
+    sections.push(`<details class="text-xs">
+        <summary class="cursor-pointer text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 select-none">Raw data (JSON)</summary>
+        <pre class="mt-1 whitespace-pre-wrap break-words bg-gray-50 dark:bg-gray-950 rounded p-2 overflow-x-auto text-gray-600 dark:text-gray-300">${esc(JSON.stringify(d, null, 2))}</pre>
+    </details>
+    ${Object.keys(meta).length ? `<details class="text-xs">
+        <summary class="cursor-pointer text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 select-none">Raw metadata (JSON)</summary>
+        <pre class="mt-1 whitespace-pre-wrap break-words bg-gray-50 dark:bg-gray-950 rounded p-2 overflow-x-auto text-gray-600 dark:text-gray-300">${esc(JSON.stringify(meta, null, 2))}</pre>
+    </details>` : ''}`);
+
+    document.getElementById('imBody').innerHTML = sections.join('');
+    if (htmlBody) document.getElementById('imFrame').srcdoc = htmlBody;
+    document.getElementById('itemModal').classList.remove('hidden');
+}
+
+function closeItemModal() {
+    document.getElementById('itemModal').classList.add('hidden');
+    document.getElementById('imBody').innerHTML = '';  // drop the sandboxed iframe with the pane
+    document.getElementById('imTitle').textContent = '';
+    document.getElementById('imSub').textContent = '';
+}
+
+// One key/value line in the attribute/metadata tables.
+function kvRow(label, valueHtml) {
+    return `<div class="flex gap-2 py-0.5 text-xs">
+        <div class="w-36 flex-shrink-0 text-gray-500 dark:text-gray-400 truncate" title="${esc(label)}">${esc(label)}</div>
+        <div class="flex-1 min-w-0 break-words text-gray-800 dark:text-gray-200 font-mono">${valueHtml}</div>
+    </div>`;
+}
+
+// Arrays join with ', ' (addresses, filenames); objects inline as JSON.
+function fmtAttr(value) {
+    if (Array.isArray(value)) {
+        return value.map(v => (v && typeof v === 'object') ? JSON.stringify(v) : String(v)).join(', ');
+    }
+    if (value && typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+}
+
+// Scope uuids are stored bare (DB convention) while OVERVIEW carries
+// prefixed uuids — compare prefix-stripped, degrade to a short uuid chip.
+function scopeChip(scopeUuid) {
+    const s = (OVERVIEW.scopes || []).find(s => {
+        const su = (s.uuid || '').replace(/^(soil_|core_)/, '');
+        return su === String(scopeUuid).replace(/^(soil_|core_)/, '');
+    });
+    const label = s ? ((s.data ? s.data.label : s.label) || scopeUuid) : shortUuid(scopeUuid);
+    return `<span class="inline-block px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 text-xs">${esc(label)}</span>`;
+}
+
+document.getElementById('imClose').addEventListener('click', closeItemModal);
+document.getElementById('itemModal').addEventListener('click', function(event) {
+    if (event.target === this) closeItemModal();  // backdrop click, not the panel
+});
+document.addEventListener('keydown', function(event) {
+    if (event.key === 'Escape' && !document.getElementById('itemModal').classList.contains('hidden')) closeItemModal();
+});
 
 async function loadRelabelLog() {
     try {
