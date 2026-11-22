@@ -398,6 +398,45 @@ class TestEnforcement:
         assert response.status_code == 403
 
 
+
+    def test_out_of_scope_amend_of_superseded_item_is_403_not_400(
+        self, client, auth_headers, agent_key, scope_uuid, enforcement
+    ):
+        """system#14: the superseded guard fires AFTER scope enforcement —
+        an unauthorized caller must learn nothing about supersession state
+        (403 scope_write_denied before any 400-superseded)."""
+        assert client.post(
+            "/mg", json={"op": "enter", "scope": scope_uuid}, headers=auth_headers
+        ).status_code == 200
+        add = client.post(
+            "/mg",
+            json={"op": "add", "type": "Note",
+                  "data": {"title": "secret", "description": "secret"}},
+            headers=auth_headers,
+        )
+        note_uuid = add.get_json()["result"]["uuid"]
+        # operator amends it once: the original uuid is now superseded
+        assert client.post(
+            "/mg",
+            json={"op": "amend", "target": note_uuid,
+                  "data": {"title": "secret", "description": "amended"}},
+            headers=auth_headers,
+        ).status_code == 200
+
+        # out-of-scope agent amends the historical uuid: scope denial wins —
+        # the response must not leak details.superseded_by
+        response = client.post(
+            "/mg",
+            json={"op": "amend", "target": note_uuid,
+                  "data": {"title": "secret", "description": "sneak"}},
+            headers=agent_key["headers"],
+        )
+        assert response.status_code == 403, response.get_json()
+        body = response.get_json()
+        assert body["error"]["details"].get("code") == "scope_write_denied"
+        assert "superseded_by" not in (body["error"]["details"] or {})
+
+
 class TestScopeMinting:
     """RFC-011 v1.2 (D1): scope creation is operator-gated (unconditional —
     issuance governance, not an enforcement-flag activity)."""
@@ -587,3 +626,4 @@ class TestRelabelGovernance:
             headers=two_sorters["keys"]["sorter-b"],
         )
         assert response.status_code == 403
+
