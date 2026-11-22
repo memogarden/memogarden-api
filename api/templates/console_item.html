@@ -41,7 +41,13 @@ document.getElementById('itemUuid').textContent = uuid || '';
 let ITEM = null;
 
 const LAB_CACHE = {};
+let TRIAGE_SCOPE = null;
 document.addEventListener('console:overview', (evt) => {
+    for (const s of (evt.detail.scopes || [])) {
+        if ((s.data ? s.data.label : s.label) === 'Triage / Untrusted') {
+            TRIAGE_SCOPE = s.uuid.replace(/^(soil_|core_)/, '');
+        }
+    }
     const sel = document.getElementById('scopeSelect');
     sel.innerHTML = '<option value="">— pick scope —</option>' + (evt.detail.scopes || [])
         .filter(s => (s.data ? s.data.label : s.label) !== 'Triage / Untrusted')
@@ -89,14 +95,49 @@ function attachBodyFrame(d) {
     if (frame) frame.srcdoc = d.description || '';
 }
 
-// amend from the inspector: scope changes only (data passes through
-// unchanged). The live uuid moves forward; /item/<old-uuid> still resolves.
+// amend from the inspector: scope changes cascade to the item FAMILY
+// (attached children) like the triage page does — but only to UNDECIDED
+// children (in triage, or never labeled). Children already decided
+// (cleared, or scoped elsewhere) and parents are never rewritten; the
+// status line reports what was skipped. Data passes through unchanged;
+// the live uuid moves forward and /item/<old-uuid> still resolves.
+let ATTACHMENTS = [];
+
+function memberState(m) {
+    const sc = (m.metadata || {}).scopes;
+    if (!Array.isArray(sc)) return 'never';
+    if (sc.length === 0) return 'cleared';
+    if (sc.length === 1 && TRIAGE_SCOPE && sc[0].replace(/^(soil_|core_)/, '') === TRIAGE_SCOPE) {
+        return 'triage';
+    }
+    return 'decided';
+}
+
+async function amendOne(uuid2, data, metadata, scopes) {
+    await mg({ op: 'amend', target: uuid2, data,
+               metadata: { ...metadata, scopes } });
+}
+
 async function amendScopes(scopes) {
     const msg = document.getElementById('scopeMsg');
-    msg.textContent = 'amending…';
+    if (!ITEM) return;
+    const members = [ITEM];
+    const skipped = [];
+    for (const a of ATTACHMENTS) {
+        const st = memberState(a);
+        if (st === 'triage' || st === 'never') members.push(a);
+        else skipped.push(`${(a.data || {}).filename || a.uuid.slice(0, 13)} (${st})`);
+    }
+    if (members.length > 1 &&
+        !confirm(`File ${members.length} items (item + undecided family members) to the selected scope?` +
+                 (skipped.length ? `\nSkipped (already decided): ${skipped.join(', ')}` : ''))) {
+        return;
+    }
+    msg.textContent = `amending ${members.length} item(s)…`;
     try {
-        await mg({ op: 'amend', target: ITEM.uuid, data: ITEM.data,
-                   metadata: { ...ITEM.metadata, scopes } });
+        for (const m of members) {
+            await amendOne(m.uuid, m.data, m.metadata, scopes);
+        }
         msg.textContent = 'done — reloading live version';
         setTimeout(() => location.reload(), 600);
     } catch (err) {
@@ -143,7 +184,8 @@ document.getElementById('makePublicBtn').addEventListener('click', () => {
             </div>`).join('')
             : '<div class="text-xs text-gray-400 dark:text-gray-500">No parents or references.</div>';
 
-        const atts = r.attachments || [];
+        ATTACHMENTS = r.attachments || [];
+        const atts = ATTACHMENTS;
         document.getElementById('attList').innerHTML = atts.length
             ? atts.map(a => {
                 const ad = a.data || {};
