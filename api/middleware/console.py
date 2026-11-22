@@ -19,6 +19,10 @@ Screens (RFC-015 §4.1 + consolidation addendum):
 - /console/settings    Operator profile + change-password (absorbed
                        the read-only /settings page; the change-password
                        endpoint finally has a UI)
+- /console/items       Item browse + keyword/semantic search (2026-11-22)
+- /item/<uuid>         Item inspector — unique per-item URL; /console/item
+                       (query-string form) redirects here. Scope edits from
+                       the inspector cascade to undecided family members.
 
 Retired legacy page URLs redirect here (§4.1 addendum): /api-keys,
 /api-keys/new and /agents/ → /console/identity; /settings →
