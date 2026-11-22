@@ -1,0 +1,119 @@
+{% extends "console_base.html" %}
+
+{% block console_title %}Items{% endblock %}
+{% block console_page %}items{% endblock %}
+
+{% block console_content %}
+<div class="flex justify-between items-center mb-2">
+    <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Items</h2>
+    <span class="text-xs text-gray-500 dark:text-gray-400">browse · keyword · ✨ semantic</span>
+</div>
+<p class="text-sm text-gray-600 dark:text-gray-400 mb-3">
+    Recent items by default. A text query searches semantically (✨ bge
+    embeddings); when the embedding daemon is unavailable it falls back to
+    keyword matching. Click a row's id to open its inspector.
+</p>
+
+<div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 mb-4 flex flex-wrap gap-2 items-center">
+    <input id="q" type="search" placeholder="Search items…"
+           class="flex-1 min-w-[12rem] border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm bg-transparent">
+    <select id="scopeFilter" class="border border-gray-300 dark:border-gray-600 rounded-lg px-2 py-1.5 text-sm bg-transparent">
+        <option value="">any scope</option>
+    </select>
+    <select id="typeFilter" class="border border-gray-300 dark:border-gray-600 rounded-lg px-2 py-1.5 text-sm bg-transparent">
+        <option value="">any type</option>
+        <option>Email</option><option>Attachment</option><option>Note</option>
+        <option>Entry</option><option>Event</option>
+    </select>
+    <button id="searchBtn" class="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">Search</button>
+    <span id="modeInfo" class="text-xs text-gray-400 dark:text-gray-500"></span>
+</div>
+
+<div id="results" class="space-y-2"></div>
+<div class="mt-3 text-center">
+    <button id="moreBtn" class="hidden px-3 py-1.5 text-xs border border-gray-300 dark:border-gray-600 rounded-lg text-gray-600 dark:text-gray-400">Load more</button>
+</div>
+{% endblock %}
+
+{% block console_scripts %}
+<script>
+const TYPES = ['Email', 'Attachment', 'Note', 'Entry', 'Event'];
+let SCOPE_BY_UUID = {};
+let offset = 0, lastQuery = {q: '', scope: '', type: ''}, reachedEnd = false;
+
+document.addEventListener('console:overview', (evt) => {
+    for (const s of (evt.detail.scopes || [])) {
+        SCOPE_BY_UUID[s.uuid.replace(/^(soil_|core_)/, '')] = (s.data ? s.data.label : s.label) || s.uuid;
+    }
+    const sel = document.getElementById('scopeFilter');
+    sel.innerHTML = '<option value="">any scope</option>' + (evt.detail.scopes || [])
+        .map(s => `<option value="${esc(s.uuid)}">${esc((s.data ? s.data.label : s.label) || s.uuid)}</option>`)
+        .join('');
+}, { once: true });
+
+function esc(value) {
+    const div = document.createElement('div');
+    div.textContent = value === null || value === undefined ? '' : String(value);
+    return div.innerHTML.replace(/"/g, '&quot;');
+}
+function fmtTime(t) { return (t || '').replace('T', ' ').slice(0, 16); }
+
+function scopeChips(scopes) {
+    return (scopes || []).map(s => {
+        const label = SCOPE_BY_UUID[s.replace(/^(soil_|core_)/, '')] || s.slice(0, 8);
+        return `<span class="inline-block px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 text-xs">${esc(label)}</span>`;
+    }).join(' ');
+}
+
+function renderResults(items, append) {
+    const el = document.getElementById('results');
+    const rows = items.map(it => `
+        <div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3">
+            <div class="flex justify-between items-start gap-2">
+                <a href="/item/${esc(it.uuid)}" target="_blank" rel="noopener" class="text-sm font-medium text-gray-900 dark:text-gray-100 hover:underline break-words">${esc(it.title || it.uuid)}</a>
+                ${typeof it.score === 'number' ? `<span class="text-xs text-indigo-500 flex-shrink-0" title="semantic similarity">✨ ${Math.round(100 * it.score)}%</span>` : ''}
+            </div>
+            <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">${esc(it.type)} · ${fmtTime(it.canonical_at)} ${scopeChips(it.scopes) ? '· ' + scopeChips(it.scopes) : ''} · <a href="/item/${esc(it.uuid)}" target="_blank" rel="noopener" class="underline decoration-dotted">${esc(it.uuid.slice(0, 13))}…</a></div>
+        </div>`);
+    el.innerHTML = append ? el.innerHTML + rows.join('') : (rows.join('') ||
+        '<div class="bg-white dark:bg-gray-900 shadow rounded-lg p-6 text-center text-gray-400 dark:text-gray-500 text-sm">Nothing found.</div>');
+}
+
+async function runSearch(reset) {
+    const q = document.getElementById('q').value.trim();
+    const scope = document.getElementById('scopeFilter').value;
+    const type = document.getElementById('typeFilter').value;
+    if (reset) { offset = 0; reachedEnd = false; }
+    lastQuery = { q, scope, type };
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (scope) params.set('scope', scope);
+    if (type) params.set('type', type);
+    params.set('limit', '50');
+    params.set('offset', String(offset));
+    const el = document.getElementById('results');
+    try {
+        const r = await api('/api/v1/items/search?' + params.toString());
+        document.getElementById('modeInfo').textContent =
+            r.mode === 'semantic' ? '✨ semantic' :
+            r.mode === 'keyword_fallback' ? 'keyword (daemon unavailable)' : 'recent';
+        renderResults(r.results, !reset);
+        reachedEnd = r.results.length < r.limit;
+        document.getElementById('moreBtn').classList.toggle('hidden', reachedEnd);
+        offset += r.results.length;
+    } catch (err) {
+        el.innerHTML = `<div class="text-red-600 dark:text-red-400 text-sm p-3">Search failed: ${esc(err.message)}</div>`;
+        document.getElementById('moreBtn').classList.add('hidden');
+    }
+}
+
+document.getElementById('searchBtn').addEventListener('click', () => runSearch(true));
+document.getElementById('q').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(true); });
+document.getElementById('scopeFilter').addEventListener('change', () => runSearch(true));
+document.getElementById('typeFilter').addEventListener('change', () => runSearch(true));
+document.getElementById('moreBtn').addEventListener('click', () => runSearch(false));
+(async function init() {
+    await runSearch(true);
+})();
+</script>
+{% endblock %}

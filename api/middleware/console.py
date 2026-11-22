@@ -69,14 +69,27 @@ def console_scopes():
     return render_template("console_scopes.html")
 
 
-@console_bp.route("/console/item", methods=["GET"])
-def console_item():
-    """Single-item inspector — unique per-item URL (2026-11-22).
+@console_bp.route("/item/<uuid>", methods=["GET"])
+def console_item(uuid: str):
+    """Canonical unique-item URL (2026-11-22): /item/<uuid>.
 
-    Shell only: ?uuid=soil_… is resolved client-side via the JWT-gated
+    Shell only: the uuid is resolved client-side via the JWT-gated
     GET /api/v1/items/<uuid>. Facts; entities pending.
     """
-    return render_template("console_item.html")
+    return render_template("console_item.html", item_uuid=uuid)
+
+
+@console_bp.route("/console/item", methods=["GET"])
+def console_item_legacy():
+    """Legacy query-string form → canonical /item/<uuid> path."""
+    from flask import request as _req
+    return redirect(f"/item/{_req.args.get('uuid', '')}")
+
+
+@console_bp.route("/console/items", methods=["GET"])
+def console_items():
+    """Item browse + keyword/semantic search screen (2026-11-22)."""
+    return render_template("console_items.html")
 
 
 @console_bp.route("/console/identity", methods=["GET"])

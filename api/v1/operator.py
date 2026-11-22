@@ -742,6 +742,189 @@ def item_inspector(uuid: str):
     })
 
 
+# Semantic item search (2026-11-22): the query embedding runs in the model
+# layer's LAZY daemon (~/memogarden/triage-model/embed_daemon.py — unix
+# socket, spawned on first use, idle self-exit). The serving process never
+# loads torch (architecture decision, sysinfo incident 2026-11-22); if the
+# daemon cannot start, /items/search degrades to keyword mode.
+_EMBED_SOCK = Path.home() / ".local/share/memogarden/triage-model/embed.sock"
+_TRIAGE_MODEL = Path(os.environ.get(
+    "MEMOGARDEN_TRIAGE_MODEL_DIR",
+    str(Path.home() / "memogarden/triage-model")))
+_INDEXED_TYPES = ("Email", "Attachment", "Note", "Entry", "Event")
+
+
+def _daemon_search(q: str, scope_uuids, types, k: int):
+    """Ask the embed daemon; spawn it if the socket isn't listening.
+
+    Returns results or None (daemon unavailable → caller falls back to
+    keyword mode).
+    """
+    import socket
+    import subprocess
+
+    payload = json.dumps({"op": "search", "q": q, "scopes": scope_uuids,
+                          "types": types, "k": k}).encode()
+    spawned = False
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(15)
+            s.connect(str(_EMBED_SOCK))
+            s.sendall(payload)
+            buf = b""
+            while True:
+                chunk = s.recv(1 << 20)
+                if not chunk:
+                    break
+                buf += chunk
+            s.close()
+            out = json.loads(buf)
+            return out.get("results") if "results" in out else None
+        except (ConnectionRefusedError, FileNotFoundError, socket.timeout,
+                json.JSONDecodeError):
+            if not spawned:
+                log = open(_TRIAGE_MODEL / "embed-daemon.log", "ab")
+                subprocess.Popen(
+                    [str(_TRIAGE_MODEL / ".venv/bin/python"),
+                     str(_TRIAGE_MODEL / "embed_daemon.py")],
+                    cwd=str(_TRIAGE_MODEL), stdout=log, stderr=log,
+                    start_new_session=True)
+                spawned = True
+            time.sleep(0.5)
+    return None
+
+
+@operator_bp.get("/items/search")
+def items_search():
+    """Browse + keyword/semantic item search for the console Items tab.
+
+    ?q= text query (semantic when the embed daemon is reachable, keyword
+    LIKE fallback otherwise); ?scope= label or uuid filter; ?type= comma
+    list of fact types; ?limit / ?offset for browse and keyword modes.
+    Semantic mode ignores offset (top-k by cosine).
+    """
+    _authenticate_jwt()
+
+    def _loads(value):
+        if isinstance(value, str):
+            return json.loads(value)
+        return value
+
+    q = (request.args.get("q") or "").strip()
+    scope_ref = (request.args.get("scope") or "").strip()
+    types = [t.strip() for t in (request.args.get("type") or "").split(",")
+             if t.strip()]
+    try:
+        limit = max(1, min(int(request.args.get("limit", "50")), 200))
+        offset = max(0, int(request.args.get("offset", "0")))
+    except ValueError:
+        raise ValidationError(
+            "limit/offset must be integers",
+            {"limit": request.args.get("limit"),
+             "offset": request.args.get("offset")},
+        ) from None
+
+    # resolve scope filter (label, alias, or uuid) to a scope uuid set
+    scope_uuids = None
+    if scope_ref:
+        with get_core() as core_conn:
+            scope_rows = core_conn._conn.execute(
+                "SELECT uuid, data FROM entity WHERE type = 'Scope' "
+                "AND superseded_by IS NULL").fetchall()
+        wanted = scope_ref.removeprefix("core_")
+        scope_uuids = []
+        for r in scope_rows:
+            label = (_loads(r["data"]) or {}).get("label") or ""
+            if wanted in (r["uuid"], label):
+                scope_uuids.append(r["uuid"])
+        if not scope_uuids:
+            raise ValidationError("unknown scope", {"scope": scope_ref})
+
+    filtered_types = [t for t in types if t in _INDEXED_TYPES] or list(
+        _INDEXED_TYPES)
+
+    mode = "recent"
+    scored = []
+    if q:
+        daemon = _daemon_search(q, scope_uuids, filtered_types, limit)
+        if daemon is not None:
+            mode = "semantic"
+            scored = daemon
+        else:
+            mode = "keyword_fallback"
+
+    with get_soil() as soil:
+        conn = soil._get_connection()
+        where = ["superseded_by IS NULL", f"_type IN ({','.join('?' * len(filtered_types))})"]
+        params: list = list(filtered_types)
+        if scope_uuids:
+            where.append("""EXISTS (SELECT 1 FROM json_each(metadata, '$.scopes') je
+                            WHERE je.value IN (%s))""" %
+                         ",".join("?" * len(scope_uuids)))
+            params.extend(scope_uuids)
+        results = []
+        if mode in ("semantic",):
+            hits = scored[offset:offset + limit] if offset else scored[:limit]
+            uuids = [u for u, _ in hits]
+            scores = {u: s for u, s in hits}
+            if uuids:
+                rows = conn.execute(
+                    f"""SELECT uuid, _type, canonical_at, data, metadata
+                        FROM item WHERE superseded_by IS NULL
+                          AND uuid IN ({",".join("?" * len(uuids))})""",
+                    uuids,
+                ).fetchall()
+                by_uuid = {r["uuid"]: r for r in rows}
+                for u in uuids:
+                    r = by_uuid.get(u)
+                    if r is None:
+                        continue
+                    d = _loads(r["data"])
+                    results.append({
+                        "uuid": uid.add_soil_prefix(r["uuid"]),
+                        "type": r["_type"],
+                        "title": (d.get("title") or d.get("subject")
+                                  or d.get("filename") or "")[:160],
+                        "canonical_at": r["canonical_at"],
+                        "scopes": (_loads(r["metadata"]) or {}).get("scopes", []),
+                        "score": scores.get(u),
+                    })
+            return jsonify({"mode": mode, "q": q, "results": results,
+                            "offset": offset, "limit": limit})
+
+        # recent / keyword_fallback: SQL-ordered
+        if q:
+            mode = "keyword_fallback"
+            like = f"%{q}%"
+            where.append(
+                """(json_extract(data, '$.title') LIKE ? COLLATE NOCASE
+                    OR json_extract(data, '$.subject') LIKE ? COLLATE NOCASE
+                    OR json_extract(data, '$.filename') LIKE ? COLLATE NOCASE
+                    OR json_extract(data, '$.description') LIKE ? COLLATE NOCASE)""")
+            params.extend([like] * 4)
+        rows = conn.execute(
+            f"""SELECT uuid, _type, canonical_at, data, metadata FROM item
+                WHERE {' AND '.join(where)}
+                ORDER BY COALESCE(canonical_at, realized_at) DESC
+                LIMIT ? OFFSET ?""",
+            (*params, limit, offset),
+        ).fetchall()
+        for r in rows:
+            d = _loads(r["data"])
+            results.append({
+                "uuid": uid.add_soil_prefix(r["uuid"]),
+                "type": r["_type"],
+                "title": (d.get("title") or d.get("subject")
+                          or d.get("filename") or "")[:160],
+                "canonical_at": r["canonical_at"],
+                "scopes": (_loads(r["metadata"]) or {}).get("scopes", []),
+            })
+    return jsonify({"mode": mode, "q": q, "results": results,
+                    "offset": offset, "limit": limit})
+
+
 @operator_bp.get("/scopes/overview")
 def scopes_overview():
     """Authority-state overview: scopes, item counts, grants, policies (RFC-015 §3.3).

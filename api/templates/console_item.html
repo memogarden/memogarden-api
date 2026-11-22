@@ -1,7 +1,8 @@
 {% extends "console_base.html" %}
 
 {% block console_title %}Item{% endblock %}
-{% block console_page %}item{% endblock %}
+{% block console_page %}items{% endblock %}
+{% set uuid = item_uuid | default(request.args.get('uuid', '')) %}
 
 {% block console_content %}
 <div class="flex justify-between items-center mb-2">
@@ -22,7 +23,7 @@
 <script>
 // Unique-item inspector (2026-11-22): /console/item?uuid=soil_…
 // Shell pattern — all data via the JWT-gated GET /api/v1/items/<uuid>.
-const uuid = new URLSearchParams(location.search).get('uuid');
+const uuid = {{ uuid | tojson }} || new URLSearchParams(location.search).get('uuid');
 document.getElementById('itemUuid').textContent = uuid || '';
 
 const LAB_CACHE = {};

@@ -145,7 +145,7 @@ function renderTriage() {
                 const pct = typeof rec.confidence === 'number'
                     ? ` ${Math.round(100 * rec.confidence)}%` : '';
                 return {
-                    sym: rec.soft ? '☆' : '★',
+                    sym: '✨',
                     soft: !!rec.soft,
                     tip: `${rec.soft ? 'low-confidence lean' : 'decision-model recommendation'}: ${rec.pred}${pct}${rec.runner ? ' · ' + rec.runner : ''}`,
                 };
@@ -158,7 +158,7 @@ function renderTriage() {
                 <input type="checkbox" data-uuid="${esc(f.uuid)}" data-kind="fact" class="mt-1 rounded triage-cb" onchange="updateCount()">
                 <div class="flex-1 min-w-0 group cursor-pointer" onclick="openItemModal('${esc(f.uuid)}')" title="Tap to view full item">
                     <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate group-hover:underline">${esc(title)}</div>
-                    <div class="text-xs text-gray-500 dark:text-gray-400">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.canonical_at || f.realized_at)} · <a href="/console/item?uuid=${esc(f.uuid)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="underline decoration-dotted hover:text-gray-700 dark:hover:text-gray-300" title="open item inspector in new tab">${shortUuid(f.uuid)}</a>${f.pulled_in ? ' · <span title="parent still in triage — pulled in from an older page so the family decides together">↩ pulled in</span>' : ''}</div>
+                    <div class="text-xs text-gray-500 dark:text-gray-400">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.canonical_at || f.realized_at)} · <a href="/item/${esc(f.uuid)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="underline decoration-dotted hover:text-gray-700 dark:hover:text-gray-300" title="open item inspector in new tab">${shortUuid(f.uuid)}</a>${f.pulled_in ? ' · <span title="parent still in triage — pulled in from an older page so the family decides together">↩ pulled in</span>' : ''}</div>
                     ${familyBlock(kids)}
                 </div>
                 <div class="flex gap-1 flex-wrap w-full sm:w-auto">
@@ -232,7 +232,7 @@ async function loadEvalStrip() {
         }
         const pct = (100 * e.agreement).toFixed(0);
         const tone = e.agreement >= 0.8 ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400';
-        el.innerHTML = `✦ decision-model eval — <b>${e.n}</b>/${e.target} decisions · agreement <b class="${tone}">${pct}%</b> (correct ${e.correct} · wrong ${e.n - e.correct}) · model: ${esc(e.model || '?')}`;
+        el.innerHTML = `✨ decision-model eval — <b>${e.n}</b>/${e.target} decisions · agreement <b class="${tone}">${pct}%</b> (correct ${e.correct} · wrong ${e.n - e.correct}) · model: ${esc(e.model || '?')}`;
         el.classList.remove('hidden');
     } catch (err) {
         el.classList.add('hidden');

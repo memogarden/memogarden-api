@@ -201,3 +201,62 @@ def test_item_inspector(client, auth_headers, core):
 def test_item_inspector_requires_jwt(client, core):
     resp = client.get("/api/v1/items/soil_0012d580-90f5-4436-9453-1be1543ffe0c")
     assert resp.status_code == 401
+
+
+def _make_scope_entity(core, label):
+    from api.v1 import operator as om  # noqa: F401 — same module pattern
+    uuid = core.entity.create(entity_type="Scope",
+        data={"label": label, "active_participants": [], "artifact_uuids": []})
+    core._conn.commit()
+    return uuid
+
+
+def test_items_search_recent_and_filters(client, auth_headers, core):
+    """GET /items/search — recent browse mode, type + scope filters (no q)."""
+    hh = _make_scope(core, "Household")
+    triage = _make_scope(core, "Triage / Untrusted")
+    with get_soil() as soil:
+        soil.create_fact(Fact(uuid=generate_soil_uuid(), _type="Email",
+            realized_at="2026-11-22T09:00:00+00:00",
+            canonical_at="2026-11-22T09:00:00+00:00",
+            data={"title": "alpha email", "description": None, "summary": None},
+            metadata={"scopes": [triage]}, integrity_hash=None, fidelity="full"))
+        soil.create_fact(Fact(uuid=generate_soil_uuid(), _type="Attachment",
+            realized_at="2026-11-22T08:00:00+00:00",
+            canonical_at="2026-11-22T08:00:00+00:00",
+            data={"filename": "beta file"}, metadata={"scopes": [hh]},
+            integrity_hash=None, fidelity="full"))
+    resp = client.get("/api/v1/items/search", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["mode"] == "recent"
+    assert [r["title"] for r in body["results"]][:2] == ["alpha email", "beta file"]
+    resp = client.get("/api/v1/items/search?type=Attachment", headers=auth_headers)
+    assert all(r["type"] == "Attachment" for r in resp.get_json()["results"])
+    resp = client.get(f"/api/v1/items/search?scope={hh}", headers=auth_headers)
+    assert all("beta" in r["title"] for r in resp.get_json()["results"])
+    resp = client.get("/api/v1/items/search?scope=Household", headers=auth_headers)
+    assert all("beta" in r["title"] for r in resp.get_json()["results"])
+
+
+def test_items_search_keyword_fallback_when_daemon_absent(client, auth_headers, core, monkeypatch, tmp_path):
+    """Semantic mode degrades to keyword matching if the daemon socket is dead."""
+    triage = _make_scope(core, "Triage / Untrusted")
+    with get_soil() as soil:
+        soil.create_fact(Fact(uuid=generate_soil_uuid(), _type="Email",
+            realized_at="2026-11-22T09:00:00+00:00",
+            canonical_at="2026-11-22T09:00:00+00:00",
+            data={"title": "xylophone receipt", "description": None, "summary": None},
+            metadata={"scopes": [triage]}, integrity_hash=None, fidelity="full"))
+    monkeypatch.setattr("api.v1.operator._EMBED_SOCK",
+                        tmp_path / "missing.sock")
+    resp = client.get("/api/v1/items/search?q=xylophone", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["mode"] == "keyword_fallback"
+    assert body["results"] and body["results"][0]["title"] == "xylophone receipt"
+
+
+def test_items_search_requires_jwt(client):
+    resp = client.get("/api/v1/items/search")
+    assert resp.status_code == 401
