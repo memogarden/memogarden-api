@@ -134,28 +134,43 @@ function renderTriage() {
             const src = (f.metadata || {}).source || (f.metadata || {}).provider || '';
             const kept = dismissed.has(f.uuid);
             const kids = (CHILDREN_BY_PARENT[f.uuid] || []).map(findItem).filter(Boolean);
-            // Decision-model recommendation (2026-11-22): read-only badge +
-            // one-tap apply. pred=unclassified highlights → Public instead.
+            // Decision-model recommendation (2026-11-22): no badge — the
+            // recommended OPTION carries the indicator instead. ★ indigo =
+            // hard rec (pass → → Public, scope → that scope's button, which
+            // stays the normal apply button); ☆ muted = soft lean
+            // (display-only hint). Confidence + rule live in the tooltip.
             const rec = f.rec;
-            // soft = low-confidence lean: display-only, never a recommendation
-            const recBadge = rec ? ` <span class="inline-block px-1.5 py-0.5 rounded ${rec.soft ? 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400' : 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300'} text-xs" title="${rec.soft ? 'low-confidence lean — display only' : 'decision-model recommendation'}${rec.runner ? ' · ' + esc(rec.runner) : ''}">✦${rec.soft ? '?' : ''} ${esc(rec.pred)}${typeof rec.confidence === 'number' ? ' ' + (100 * rec.confidence).toFixed(0) + '%' : ''}</span>` : '';
-            const sugUuid = rec && !rec.soft ? recScopeUuid(rec.pred) : null;
-            const sugBtn = sugUuid ? `<button class="px-2 py-1 text-xs border border-indigo-300 dark:border-indigo-700 text-indigo-700 dark:text-indigo-300 rounded hover:bg-indigo-50 dark:hover:bg-indigo-900/40" title="apply the decision-model recommendation" onclick="relabel('${esc(f.uuid)}','fact',['${esc(sugUuid)}'])">✦ → ${esc(rec.pred)}</button>` : '';
-            const pubHi = rec && !rec.soft && rec.pred === 'unclassified' ? ' ring-2 ring-indigo-400' : '';
+            const mark = (() => {
+                if (!rec) return null;
+                const pct = typeof rec.confidence === 'number'
+                    ? ` ${Math.round(100 * rec.confidence)}%` : '';
+                return {
+                    sym: rec.soft ? '☆' : '★',
+                    soft: !!rec.soft,
+                    tip: `${rec.soft ? 'low-confidence lean' : 'decision-model recommendation'}: ${rec.pred}${pct}${rec.runner ? ' · ' + rec.runner : ''}`,
+                };
+            })();
+            // which scope button gets the mark (null → → Public gets it)
+            const markScopeUuid = rec && rec.pred !== 'unclassified'
+                ? recScopeUuid(rec.pred) : null;
             return `
             <div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2 ${kept ? 'opacity-40' : ''}">
                 <input type="checkbox" data-uuid="${esc(f.uuid)}" data-kind="fact" class="mt-1 rounded triage-cb" onchange="updateCount()">
                 <div class="flex-1 min-w-0 group cursor-pointer" onclick="openItemModal('${esc(f.uuid)}')" title="Tap to view full item">
                     <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate group-hover:underline">${esc(title)}</div>
-                    <div class="text-xs text-gray-500 dark:text-gray-400">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.canonical_at || f.realized_at)} · ${shortUuid(f.uuid)}${f.pulled_in ? ' · <span title="parent still in triage — pulled in from an older page so the family decides together">↩ pulled in</span>' : ''}${recBadge}</div>
+                    <div class="text-xs text-gray-500 dark:text-gray-400">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.canonical_at || f.realized_at)} · ${shortUuid(f.uuid)}${f.pulled_in ? ' · <span title="parent still in triage — pulled in from an older page so the family decides together">↩ pulled in</span>' : ''}</div>
                     ${familyBlock(kids)}
                 </div>
                 <div class="flex gap-1 flex-wrap w-full sm:w-auto">
-                    ${sugBtn}
-                    ${OVERVIEW.scopes.filter(s => (s.data ? s.data.label : s.label) !== 'Triage / Untrusted').map(s =>
-                        `<button class="px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800" onclick="relabel('${esc(f.uuid)}','fact',['${esc(s.uuid)}'])">→ ${esc(s.label)}</button>`
-                    ).join('')}
-                    <button class="px-2 py-1 text-xs border border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-300 rounded hover:bg-amber-50 dark:hover:bg-amber-900/40${pubHi}" title="remove all scopes from this item AND its members — they become unscoped (globally visible to any principal)" onclick="makePublic('${esc(f.uuid)}','fact')">→ Public</button>
+                    ${OVERVIEW.scopes.filter(s => (s.data ? s.data.label : s.label) !== 'Triage / Untrusted').map(s => {
+                        const isMark = mark && markScopeUuid === s.uuid;
+                        if (!isMark) return `<button class="px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800" onclick="relabel('${esc(f.uuid)}','fact',['${esc(s.uuid)}'])">→ ${esc(s.label)}</button>`;
+                        const cls = mark.soft
+                            ? 'px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+                            : 'px-2 py-1 text-xs border border-indigo-400 dark:border-indigo-600 rounded font-medium text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/40';
+                        return `<button class="${cls}" title="${esc(mark.tip)}" onclick="relabel('${esc(f.uuid)}','fact',['${esc(s.uuid)}'])">${mark.sym} → ${esc(s.label)}</button>`;
+                    }).join('')}
+                    <button class="px-2 py-1 text-xs border rounded ${mark && rec.pred === 'unclassified' ? (mark.soft ? 'border-amber-300 dark:border-amber-700 text-amber-700/60 dark:text-amber-300/60 rounded hover:bg-amber-50 dark:hover:bg-amber-900/40' : 'border-indigo-400 dark:border-indigo-600 font-medium text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/40') : 'border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-900/40'}" title="${mark && rec.pred === 'unclassified' ? esc(mark.tip) + ' — ' : ''}remove all scopes from this item AND its members — they become unscoped (globally visible to any principal)" onclick="makePublic('${esc(f.uuid)}','fact')">${mark && rec.pred === 'unclassified' ? mark.sym + ' ' : ''}→ Public</button>
                     <button class="px-2 py-1 text-xs border border-gray-200 dark:border-gray-700 rounded text-gray-400 dark:text-gray-500" title="defer visually — the item stays in triage and returns on reload" onclick="dismissRow('${esc(f.uuid)}')">keep</button>
                 </div>
             </div>`;
