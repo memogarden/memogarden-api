@@ -685,16 +685,37 @@ def item_inspector(uuid: str):
         ).fetchone()
         if row is None:
             return jsonify({"error": "item not found", "uuid": live}), 404
-        att_rows = conn.execute(
-            """SELECT a.uuid, a._type, a.canonical_at, a.data, a.metadata
-               FROM system_relation rel
-               JOIN item a ON a.uuid = rel.source
-               WHERE rel.kind = 'contained_by'
-                 AND rel.target IN (%s)
-                 AND a.superseded_by IS NULL
-               ORDER BY a.canonical_at ASC""" %
-            ",".join("?" * len(chain)), chain,
+        # Family = contained_by children of ANY chain version, collapsed to
+        # their live versions (relations pin to capture-time versions —
+        # system#11 — so filtering live-only children before collapsing
+        # drops every amended attachment; 2026-11-22 inspector bug).
+        child_rows = conn.execute(
+            f"""SELECT DISTINCT rel.source FROM system_relation rel
+                WHERE rel.kind = 'contained_by'
+                  AND rel.target IN ({",".join("?" * len(chain))})""",
+            chain,
         ).fetchall()
+        sup_map = _load_sup_map()
+        live_children = []
+        seen_children = set()
+        for (child,) in child_rows:
+            c = child
+            cseen = {c}
+            while c in sup_map and sup_map[c] not in cseen:
+                c = sup_map[c]
+                cseen.add(c)
+            if c not in seen_children:
+                seen_children.add(c)
+                live_children.append(c)
+        att_rows = []
+        if live_children:
+            att_rows = conn.execute(
+                f"""SELECT uuid, _type, canonical_at, data, metadata
+                    FROM item WHERE superseded_by IS NULL
+                      AND uuid IN ({",".join("?" * len(live_children))})
+                    ORDER BY canonical_at ASC""",
+                live_children,
+            ).fetchall()
 
     item = {
         "uuid": uid.add_soil_prefix(row["uuid"]),
