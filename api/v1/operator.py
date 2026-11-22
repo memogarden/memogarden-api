@@ -596,11 +596,13 @@ def triage_eval():
         decisions[target] = {"decided": decided, "at": row["realized_at"]}
 
     # Eval set: first n decisions with a stored recommendation (non-escalated).
+    # Soft entries (low-confidence display-only leans) are not recommendations
+    # and never count toward the eval.
     entries = []
     for target, dec in decisions.items():
         rec = recs_by_uuid.get(target)
-        if rec is None:
-            continue  # escalated or not yet recommended
+        if rec is None or rec.get("soft"):
+            continue  # escalated, soft lean, or not yet recommended
         rec_pred = rec.get("pred")
         entries.append({
             "uuid": target,

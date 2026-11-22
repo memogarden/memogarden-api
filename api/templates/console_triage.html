@@ -137,10 +137,11 @@ function renderTriage() {
             // Decision-model recommendation (2026-11-22): read-only badge +
             // one-tap apply. pred=unclassified highlights → Public instead.
             const rec = f.rec;
-            const recBadge = rec ? ` <span class="inline-block px-1.5 py-0.5 rounded bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 text-xs" title="decision-model recommendation${rec.runner ? ' · ' + esc(rec.runner) : ''}">✦ ${esc(rec.pred)}${typeof rec.confidence === 'number' ? ' ' + (100 * rec.confidence).toFixed(0) + '%' : ''}</span>` : '';
-            const sugUuid = rec ? recScopeUuid(rec.pred) : null;
+            // soft = low-confidence lean: display-only, never a recommendation
+            const recBadge = rec ? ` <span class="inline-block px-1.5 py-0.5 rounded ${rec.soft ? 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400' : 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300'} text-xs" title="${rec.soft ? 'low-confidence lean — display only' : 'decision-model recommendation'}${rec.runner ? ' · ' + esc(rec.runner) : ''}">✦${rec.soft ? '?' : ''} ${esc(rec.pred)}${typeof rec.confidence === 'number' ? ' ' + (100 * rec.confidence).toFixed(0) + '%' : ''}</span>` : '';
+            const sugUuid = rec && !rec.soft ? recScopeUuid(rec.pred) : null;
             const sugBtn = sugUuid ? `<button class="px-2 py-1 text-xs border border-indigo-300 dark:border-indigo-700 text-indigo-700 dark:text-indigo-300 rounded hover:bg-indigo-50 dark:hover:bg-indigo-900/40" title="apply the decision-model recommendation" onclick="relabel('${esc(f.uuid)}','fact',['${esc(sugUuid)}'])">✦ → ${esc(rec.pred)}</button>` : '';
-            const pubHi = rec && rec.pred === 'unclassified' ? ' ring-2 ring-indigo-400' : '';
+            const pubHi = rec && !rec.soft && rec.pred === 'unclassified' ? ' ring-2 ring-indigo-400' : '';
             return `
             <div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2 ${kept ? 'opacity-40' : ''}">
                 <input type="checkbox" data-uuid="${esc(f.uuid)}" data-kind="fact" class="mt-1 rounded triage-cb" onchange="updateCount()">

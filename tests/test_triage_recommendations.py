@@ -107,14 +107,24 @@ def test_triage_eval_scores_operator_decisions(client, auth_headers, core, recs_
         # f_escalated deliberately absent
     })
 
+    f_soft = _prefixed(_labeled_fact("soft case", [triage]))
+    recs_env({
+        f_agree: {"pred": "Household", "confidence": 0.9, "runner": "t"},
+        f_wrong: {"pred": "NS", "confidence": 0.8, "runner": "t"},
+        f_soft: {"pred": "Household", "confidence": 0.45, "runner": "t",
+                 "soft": True},
+        # f_escalated deliberately absent
+    })
+
     _operator_amend(f_agree, [f"core_{hh}"])   # agree
     _operator_amend(f_wrong, [f"core_{hh}"])   # override to Household -> disagree
+    _operator_amend(f_soft, [f"core_{hh}"])    # decided despite soft lean
     _operator_amend(f_escalated, [])           # cleared, no rec -> excluded
 
     resp = client.get("/api/v1/triage/eval?n=100", headers=auth_headers)
     assert resp.status_code == 200
     body = resp.get_json()
-    assert body["n"] == 2            # escalated item excluded
+    assert body["n"] == 2            # escalated + soft-lean items excluded
     assert body["correct"] == 1
     assert body["agreement"] == 0.5
     entries = {e["uuid"]: e for e in body["decisions"]}
