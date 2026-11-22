@@ -707,6 +707,52 @@ def item_inspector(uuid: str):
             if c not in seen_children:
                 seen_children.add(c)
                 live_children.append(c)
+        # parents / references: contained_by (the container) and replies_to
+        # (thread parent) — collapsed to live versions so "browse up" always
+        # lands on the current item.
+        parent_links = []
+        parent_uuids = []
+        for kind in ("contained_by", "replies_to"):
+            prows = conn.execute(
+                f"""SELECT DISTINCT rel.target FROM system_relation rel
+                    WHERE rel.kind = '{kind}'
+                      AND rel.source IN ({",".join("?" * len(chain))})""",
+                chain,
+            ).fetchall()
+            for (target,) in prows:
+                t = target
+                tseen = {t}
+                while t in sup_map and sup_map[t] not in tseen:
+                    t = sup_map[t]
+                    tseen.add(t)
+                if t not in parent_uuids:
+                    parent_uuids.append(t)
+                    parent_links.append({"uuid": t, "kind": kind})
+        parents = []
+        if parent_uuids:
+            prows = conn.execute(
+                f"""SELECT uuid, _type, canonical_at, data, metadata FROM item
+                    WHERE superseded_by IS NULL
+                      AND uuid IN ({",".join("?" * len(parent_uuids))})""",
+                parent_uuids,
+            ).fetchall()
+        else:
+            prows = []
+        by_uuid = {r["uuid"]: r for r in prows}
+        for link in parent_links:
+            r = by_uuid.get(link["uuid"])
+            if r is None:
+                continue
+            d = _loads(r["data"])
+            parents.append({
+                "uuid": uid.add_soil_prefix(r["uuid"]),
+                "kind": link["kind"],
+                "type": r["_type"],
+                "title": (d.get("title") or d.get("subject")
+                          or d.get("filename") or r["uuid"])[:160],
+                "scopes": (_loads(r["metadata"]) or {}).get("scopes", []),
+            })
+
         att_rows = []
         if live_children:
             att_rows = conn.execute(
@@ -739,6 +785,7 @@ def item_inspector(uuid: str):
         "item": item,
         "chain": [uid.add_soil_prefix(c) for c in chain],
         "attachments": attachments,
+        "parents": parents,
     })
 
 
