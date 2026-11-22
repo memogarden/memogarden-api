@@ -832,12 +832,14 @@ def _daemon_search(q: str, scope_uuids, types, k: int):
         except (ConnectionRefusedError, FileNotFoundError, socket.timeout,
                 json.JSONDecodeError):
             if not spawned:
-                log = open(_TRIAGE_MODEL / "embed-daemon.log", "ab")
-                subprocess.Popen(
-                    [str(_TRIAGE_MODEL / ".venv/bin/python"),
-                     str(_TRIAGE_MODEL / "embed_daemon.py")],
-                    cwd=str(_TRIAGE_MODEL), stdout=log, stderr=log,
-                    start_new_session=True)
+                # Popen dups the fds onto the child — close the parent's
+                # copies immediately or the handle leaks per spawn
+                with open(_TRIAGE_MODEL / "embed-daemon.log", "ab") as log:
+                    subprocess.Popen(
+                        [str(_TRIAGE_MODEL / ".venv/bin/python"),
+                         str(_TRIAGE_MODEL / "embed_daemon.py")],
+                        cwd=str(_TRIAGE_MODEL), stdout=log, stderr=log,
+                        start_new_session=True)
                 spawned = True
             time.sleep(0.5)
     return None
