@@ -113,7 +113,6 @@ def test_triage_eval_scores_operator_decisions(client, auth_headers, core, recs_
         f_wrong: {"pred": "NS", "confidence": 0.8, "runner": "t"},
         f_soft: {"pred": "Household", "confidence": 0.45, "runner": "t",
                  "soft": True},
-        # f_escalated deliberately absent
     })
 
     _operator_amend(f_agree, [f"core_{hh}"])   # agree
@@ -165,3 +164,10 @@ def test_triage_without_sidecar_has_no_rec_key(client, auth_headers, core, monke
     body = resp.get_json()
     assert all("rec" not in f for f in body["facts"])
     assert "decision_model" not in body
+
+
+def test_triage_eval_requires_jwt(client, core, recs_env):
+    """The eval endpoint renders decision-model state — JWT-only like /triage."""
+    recs_env({"soil_x": {"pred": "Household", "confidence": 0.9, "runner": "t"}})
+    resp = client.get("/api/v1/triage/eval")
+    assert resp.status_code == 401

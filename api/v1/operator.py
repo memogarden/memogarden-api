@@ -67,7 +67,7 @@ def _load_recs() -> dict:
     if _RECS_CACHE["mtime"] == mtime:
         return _RECS_CACHE["doc"]
     try:
-        doc = json.loads(path.read_text())
+        doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         logger.warning("unreadable triage recommendations sidecar at %s", path)
         return {}
@@ -528,8 +528,11 @@ def triage_eval():
     The operator's decisions are already recorded as operator amend Actions;
     this endpoint joins the most recent decision per item (after the
     recommendations sidecar was generated) with the stored recommendation.
-    Escalated items (no recommendation) are excluded by construction; the
-    eval set is the first `n` (default 100) such decisions.
+    Escalated items (no recommendation) and soft leans are excluded by
+    construction; the eval set is the first `n` (default 100) distinct
+    targets, ordered by their first post-generation decision, each scored
+    against its latest decision. The window resets on every sidecar
+    regeneration.
     """
     _authenticate_jwt()
 
@@ -545,7 +548,8 @@ def triage_eval():
     since = doc.get("generated_at")
     if not recs_by_uuid or not since:
         return jsonify({
-            "state": "no recommendations file",
+            "state": "no eval window" if recs_by_uuid
+                     else "no recommendations file",
             "n": 0, "target": n,
         })
 
@@ -555,8 +559,15 @@ def triage_eval():
         return value
 
     with get_soil() as soil:
+        # INDEXED BY idx_item_realized: the time predicate does the real
+        # filtering (since = fresh sidecar generated_at); without the hint
+        # sqlite picks idx_item_type and json_extract-scans all 50k+ live
+        # Actions per console load (review finding, 2026-11-22). Rows come
+        # back pre-ordered, so the temp sort disappears too. String compare
+        # relies on generated_at being UTC isoformat (recommend.py contract).
         rows = soil._get_connection().execute(
             """SELECT realized_at, data FROM item
+               INDEXED BY idx_item_realized
                WHERE _type = 'Action' AND superseded_by IS NULL
                  AND json_extract(data, '$.actor_type') = 'operator'
                  AND json_extract(data, '$.operation') = 'amend'
