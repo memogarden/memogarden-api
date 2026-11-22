@@ -19,7 +19,7 @@ from flask import Blueprint, jsonify, request
 
 from system.core import get_core
 from system.exceptions import ValidationError
-from system.soil import get_soil
+from system.soil import get_soil, resolve_chain, resolve_live
 from utils import uid
 
 from ..middleware.decorators import _authenticate_jwt
@@ -285,16 +285,13 @@ def triage_queue():
     sup_map = _load_sup_map()
 
     def _live_target(prefixed: str) -> str:
-        seen: set = set()
-        u = prefixed
-        while u in sup_map and u not in seen:
-            seen.add(u)
-            u = sup_map[u]
-        if u in sup_map:
-            # A supersedes cycle is data corruption; degrade to dropping the
-            # pair rather than hanging, but say so.
+        # system#14: the walk itself lives in system.soil.coherence; this
+        # wrapper keeps the queue's degrade-on-cycle contract (drop the
+        # pair loudly rather than hang or 500).
+        live, _chain, cycle = resolve_chain(prefixed, sup_map)
+        if cycle:
             logger.warning("supersedes cycle detected at %s; containment pair dropped", prefixed)
-        return u
+        return live
 
     user_rel_rows = core._conn.execute(
         "SELECT source, target FROM user_relation WHERE kind = 'contained_by'"
@@ -660,23 +657,12 @@ def item_inspector(uuid: str):
                          "facts only"}), 404
     bare = uuid.removeprefix("soil_")
 
-    # Follow the supersedes chain forward (relation: source=new, target=old)
-    # until the live version, collecting every member for family lookup.
+    # Resolve any historical uuid to its live version and collect the full
+    # chain for family lookup (system#14: the walk lives in
+    # system.soil.coherence — previously re-probed here via relation rows).
     with get_soil() as soil:
         conn = soil._get_connection()
-        live = f"soil_{bare}"
-        chain = [live]
-        seen = {live}
-        while True:
-            nxt = conn.execute(
-                "SELECT source FROM system_relation "
-                "WHERE kind = 'supersedes' AND target = ?", (live,)
-            ).fetchone()
-            if nxt is None or nxt["source"] in seen:
-                break
-            live = nxt["source"]
-            seen.add(live)
-            chain.append(live)
+        live, chain = resolve_live(soil, bare)
         row = conn.execute(
             """SELECT uuid, _type, realized_at, canonical_at, data, metadata,
                       superseded_by
@@ -699,11 +685,7 @@ def item_inspector(uuid: str):
         live_children = []
         seen_children = set()
         for (child,) in child_rows:
-            c = child
-            cseen = {c}
-            while c in sup_map and sup_map[c] not in cseen:
-                c = sup_map[c]
-                cseen.add(c)
+            c, _cchain, _ccycle = resolve_chain(child, sup_map)
             if c not in seen_children:
                 seen_children.add(c)
                 live_children.append(c)
@@ -720,11 +702,7 @@ def item_inspector(uuid: str):
                 chain,
             ).fetchall()
             for (target,) in prows:
-                t = target
-                tseen = {t}
-                while t in sup_map and sup_map[t] not in tseen:
-                    t = sup_map[t]
-                    tseen.add(t)
+                t, _tchain, _tcycle = resolve_chain(target, sup_map)
                 if t not in parent_uuids:
                     parent_uuids.append(t)
                     parent_links.append({"uuid": t, "kind": kind})

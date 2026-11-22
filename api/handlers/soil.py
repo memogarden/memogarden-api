@@ -18,7 +18,7 @@ import logging
 import re
 
 from system.exceptions import PermissionDenied, ValidationError
-from system.soil import Fact, current_day, generate_soil_uuid, get_soil
+from system.soil import Fact, amend_fact, generate_soil_uuid, get_soil
 from utils import isodatetime, uid
 
 from ..schemas.semantic import (
@@ -260,16 +260,13 @@ def handle_amend(request: AmendRequest, actor: str) -> dict:
                 details={"target": request.target}
             )
 
-        # Check if already superseded
-        if original.superseded_by is not None:
-            from system.exceptions import ValidationError as MGValidationError
-            raise MGValidationError(
-                message="Cannot amend fact that is already superseded",
-                details={
-                    "fact_uuid": uid.add_soil_prefix(target_id),
-                    "superseded_by": uid.add_soil_prefix(original.superseded_by),
-                }
-            )
+        # The superseded guard intentionally fires LATE (system#14): scope
+        # enforcement below runs first, so an unauthorized caller learns
+        # nothing about supersession state (403 before 400). The guard
+        # itself lives in system.soil.coherence.amend_fact with the
+        # machine-actionable resolve-and-retry contract
+        # (details.superseded_by → retarget and retry; the SDK's
+        # amend_metadata/amend_scopes sugar does it automatically).
 
         # RFC-011 §4.5: writes require the requester's active scope to be
         # one of the item's labels (operator JWT bypasses — SG-11). The
@@ -307,55 +304,20 @@ def handle_amend(request: AmendRequest, actor: str) -> dict:
             for changed in old_labels.symmetric_difference(new_labels):
                 require_scope_grant(changed)
 
-        # Get current time for realized_at
-        now = isodatetime.now()
-
-        # Use provided canonical_at or default to original's canonical_at
-        canonical_at = request.canonical_at
-        if canonical_at is None:
-            canonical_at = original.canonical_at
-
-        # Create new Fact with amended data
-        amended_item = Fact(
-            uuid=generate_soil_uuid(),
-            _type=original._type,
-            realized_at=now,
-            canonical_at=canonical_at,
+        # Mechanical amend (new Fact + superseded marker + supersedes
+        # relation) lives in system.soil.coherence — system#14's single
+        # canonical implementation. amend_fact also re-checks the superseded
+        # guard (a concurrent amend may have landed mid-handler) and stores
+        # uuids normalized-prefixed, fixing the bare-target supersedes
+        # relations bare-uuid callers used to produce.
+        amended = amend_fact(
+            soil,
+            request.target,
             data=request.data,
             metadata=new_metadata if new_metadata else None,
-            integrity_hash=None,  # Will be computed by create_item
-            fidelity="full",
+            canonical_at=request.canonical_at,
+            evidence={"source": "user_stated", "method": "semantic_api_amend"},
         )
-
-        # Create amended item
-        amended_uuid = soil.create_fact(amended_item)
-
-        # Update original to mark as superseded
-        soil.mark_superseded(
-            original_uuid=request.target,
-            superseded_by_uuid=amended_uuid,
-            superseded_at=now
-        )
-
-        # Create supersedes relation
-        from system.soil import SystemRelation
-        relation = SystemRelation(
-            uuid=generate_soil_uuid(),  # Uses module-level import from system.soil.fact
-            kind="supersedes",
-            source=amended_uuid,
-            source_type="item",
-            target=request.target,  # Use request.target which has the prefix
-            target_type="item",
-            created_at=current_day(),  # Uses module-level import from system.soil.item
-            evidence={
-                "source": "user_stated",
-                "method": "semantic_api_amend",
-            },
-        )
-        soil.create_relation(relation)
-
-        # Fetch amended item
-        amended = soil.get_fact(amended_uuid)
 
         return _fact_to_response(amended)
 

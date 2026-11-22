@@ -856,6 +856,35 @@ class TestAmendVerb:
         assert data["ok"] is False
         assert "superseded" in data["error"]["message"].lower()
 
+    def test_amend_superseded_error_is_actionable(self, client, auth_headers):
+        """The superseded 400 carries details.superseded_by — system#14's
+        resolve-and-retry contract: retarget to the live uuid and retry
+        (the mg_client amend sugar does this automatically)."""
+        add_response = client.post(
+            "/mg",
+            json={"op": "add", "type": "Note", "data": {"description": "Original"}},
+            headers=auth_headers
+        )
+        fact_uuid = add_response.get_json()["result"]["uuid"]
+        amend_response = client.post(
+            "/mg",
+            json={"op": "amend", "target": fact_uuid,
+                  "data": {"description": "First amendment"}},
+            headers=auth_headers
+        )
+        live_uuid = amend_response.get_json()["result"]["uuid"]
+
+        response = client.post(
+            "/mg",
+            json={"op": "amend", "target": fact_uuid,
+                  "data": {"description": "Second amendment"}},
+            headers=auth_headers
+        )
+        assert response.status_code == 400
+        details = response.get_json()["error"]["details"]
+        assert details["superseded_by"] == live_uuid
+        assert details["fact_uuid"] == fact_uuid
+
 
 class TestGetFactVerb:
     """Tests for get verb with facts (Soil bundle)."""
