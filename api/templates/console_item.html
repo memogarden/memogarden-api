@@ -1,0 +1,112 @@
+{% extends "console_base.html" %}
+
+{% block console_title %}Item{% endblock %}
+{% block console_page %}item{% endblock %}
+
+{% block console_content %}
+<div class="flex justify-between items-center mb-2">
+    <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Item inspector</h2>
+    <span id="itemUuid" class="text-xs text-gray-500 dark:text-gray-400"></span>
+</div>
+<div id="itemBody" class="bg-white dark:bg-gray-900 shadow rounded-lg p-4 space-y-4 text-sm text-gray-900 dark:text-gray-100">
+    <div class="text-gray-400 dark:text-gray-500">Loading…</div>
+</div>
+
+<div class="mt-6">
+    <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-2">Attachments <span class="text-xs text-gray-400 dark:text-gray-500">(contained family)</span></h3>
+    <div id="attList" class="space-y-2"></div>
+</div>
+{% endblock %}
+
+{% block console_scripts %}
+<script>
+// Unique-item inspector (2026-11-22): /console/item?uuid=soil_…
+// Shell pattern — all data via the JWT-gated GET /api/v1/items/<uuid>.
+const uuid = new URLSearchParams(location.search).get('uuid');
+document.getElementById('itemUuid').textContent = uuid || '';
+
+const LAB_CACHE = {};
+document.addEventListener('console:overview', (evt) => {
+    for (const s of (evt.detail.scopes || [])) {
+        LAB_CACHE[s.uuid.replace(/^(soil_|core_)/, '')] = (s.data ? s.data.label : s.label) || s.uuid;
+    }
+    if (window.__ITEM__) renderScopes(window.__ITEM__);
+}, { once: false });
+
+function scopeLabels(scopes) {
+    return (scopes || []).map(s => LAB_CACHE[s.replace(/^(soil_|core_)/, '')] || s.slice(0, 8));
+}
+
+function esc(value) {
+    const div = document.createElement('div');
+    div.textContent = value === null || value === undefined ? '' : String(value);
+    return div.innerHTML.replace(/"/g, '&quot;');
+}
+
+function fmtTime(t) { return (t || '').replace('T', ' ').slice(0, 16); }
+
+function renderScopes(item) {
+    const el = document.getElementById('scopeChips');
+    if (!el) return;
+    el.innerHTML = scopeLabels(item.metadata && item.metadata.scopes).map(l =>
+        `<span class="inline-block px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 text-xs">${esc(l)}</span>`
+    ).join(' ') || '<span class="text-xs text-gray-400 dark:text-gray-500">no scopes</span>';
+}
+
+function renderBody(d) {
+    const desc = d.description || '';
+    const html = (d.content_type === 'text/html') ||
+        (desc && desc.includes('<') && desc.includes('>') && !d.content_type);
+    if (html) {
+        // mislabeled HTML-in-plain bodies render sandboxed (no scripts),
+        // mirroring the triage modal's approach
+        return `<div><div class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500 mb-1">Content (HTML, sandboxed)</div>
+            <iframe id="bodyFrame" sandbox="" class="w-full h-[28rem] rounded border border-gray-200 dark:border-gray-700 bg-white" title="Item content"></iframe></div>`;
+    }
+    return `<div><div class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500 mb-1">Content</div>
+        <pre class="whitespace-pre-wrap break-words text-xs bg-gray-50 dark:bg-gray-800 rounded p-3">${esc(desc || '(empty)')}</pre></div>`;
+}
+
+function attachBodyFrame(d) {
+    const frame = document.getElementById('bodyFrame');
+    if (frame) frame.srcdoc = d.description || '';
+}
+
+(async function init() {
+    if (!uuid) {
+        document.getElementById('itemBody').innerHTML =
+            '<div class="text-gray-400 dark:text-gray-500">Add ?uuid=soil_… to the URL.</div>';
+        return;
+    }
+    const body = document.getElementById('itemBody');
+    try {
+        const r = await api('/api/v1/items/' + encodeURIComponent(uuid));
+        window.__ITEM__ = r.item;
+        const d = r.item.data || {};
+        const meta = r.item.metadata || {};
+        body.innerHTML = `
+            <div class="flex justify-between items-start gap-3">
+                <div class="text-base font-semibold break-words">${esc(d.title || d.subject || d.filename || r.item.uuid)}</div>
+                <div id="scopeChips" class="flex gap-1 flex-wrap flex-shrink-0"></div>
+            </div>
+            <div class="text-xs text-gray-500 dark:text-gray-400">${esc(r.item.type)} · ${esc(meta.account || meta.source || meta.provider || '')} · ${fmtTime(r.item.canonical_at || r.item.realized_at)} · from: ${esc(d.from_address || '—')}</div>
+            ${r.chain && r.chain.length > 1 ? `<div class="text-xs text-amber-600 dark:text-amber-400">supersedes chain — ${r.chain.length - 1} earlier version(s); this URL resolves to the live one</div>` : ''}
+            ${renderBody(d)}`;
+        renderScopes(r.item);
+        attachBodyFrame(d);
+        document.title = 'Item — ' + (d.title || d.subject || d.filename || 'inspector');
+        const atts = r.attachments || [];
+        document.getElementById('attList').innerHTML = atts.length ? atts.map(a => {
+            const ad = a.data || {};
+            const ascopes = scopeLabels(a.metadata && a.metadata.scopes);
+            return `<div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3">
+                <div class="text-sm font-medium">${esc(ad.filename || ad.title || a.uuid)}</div>
+                <div class="text-xs text-gray-500 dark:text-gray-400">${esc(a.type)} · ${esc(ad.mime_type || '')} · ${fmtTime(a.canonical_at)} · scopes: ${ascopes.length ? esc(ascopes.join(', ')) : 'none'}</div>
+            </div>`;
+        }).join('') : '<div class="text-xs text-gray-400 dark:text-gray-500">No attachments.</div>';
+    } catch (err) {
+        body.innerHTML = `<div class="text-red-600 dark:text-red-400">Failed to load: ${esc(err.message)}</div>`;
+    }
+})();
+</script>
+{% endblock %}

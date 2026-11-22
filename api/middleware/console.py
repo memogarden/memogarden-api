@@ -69,6 +69,16 @@ def console_scopes():
     return render_template("console_scopes.html")
 
 
+@console_bp.route("/console/item", methods=["GET"])
+def console_item():
+    """Single-item inspector — unique per-item URL (2026-11-22).
+
+    Shell only: ?uuid=soil_… is resolved client-side via the JWT-gated
+    GET /api/v1/items/<uuid>. Facts; entities pending.
+    """
+    return render_template("console_item.html")
+
+
 @console_bp.route("/console/identity", methods=["GET"])
 def console_identity():
     """Keys & agents management screen (RFC-015 §4.1 + consolidation addendum)."""

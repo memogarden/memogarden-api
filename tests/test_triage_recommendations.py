@@ -171,3 +171,33 @@ def test_triage_eval_requires_jwt(client, core, recs_env):
     recs_env({"soil_x": {"pred": "Household", "confidence": 0.9, "runner": "t"}})
     resp = client.get("/api/v1/triage/eval")
     assert resp.status_code == 401
+
+
+def test_item_inspector(client, auth_headers, core):
+    """GET /api/v1/items/<uuid> — live fact + attachment family (facts only)."""
+    from system.soil.relation import SystemRelation
+    parent = _prefixed(_labeled_fact("inspector parent", []))
+    att = _prefixed(_labeled_fact("inspector att", []))
+    with get_soil() as soil:
+        soil._get_connection().execute(
+            "INSERT INTO system_relation (uuid, kind, source, source_type, "
+            "target, target_type, created_at) "
+            "VALUES (?, 'contained_by', ?, 'item', ?, 'item', 0)",
+            (generate_soil_uuid(), att, parent))
+        soil._get_connection().commit()
+    resp = client.get(f"/api/v1/items/{parent}", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["item"]["uuid"] == parent
+    assert [a["uuid"] for a in body["attachments"]] == [att]
+
+    resp = client.get("/api/v1/items/core_deadbeef-0000-0000-0000-000000000000",
+                      headers=auth_headers)
+    assert resp.status_code == 404
+    resp = client.get("/api/v1/items/soil_does-not-exist", headers=auth_headers)
+    assert resp.status_code == 404
+
+
+def test_item_inspector_requires_jwt(client, core):
+    resp = client.get("/api/v1/items/soil_0012d580-90f5-4436-9453-1be1543ffe0c")
+    assert resp.status_code == 401

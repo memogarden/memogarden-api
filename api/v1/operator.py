@@ -639,6 +639,88 @@ def triage_eval():
     })
 
 
+@operator_bp.get("/items/<uuid>")
+def item_inspector(uuid: str):
+    """Single-fact inspector behind the console's unique item URLs.
+
+    /console/item?uuid=soil_… fetches this: the live fact (any historical
+    uuid resolves forward through the supersedes chain), its scopes, and its
+    attachment family (contained_by children across the whole chain).
+    Facts only for now — entity inspection is future work.
+    """
+    _authenticate_jwt()
+
+    def _loads(value):
+        if isinstance(value, str):
+            return json.loads(value)
+        return value
+
+    if uuid.startswith("core_"):
+        return jsonify({"error": "entity inspection is not supported yet; "
+                         "facts only"}), 404
+    bare = uuid.removeprefix("soil_")
+
+    # Follow the supersedes chain forward (relation: source=new, target=old)
+    # until the live version, collecting every member for family lookup.
+    with get_soil() as soil:
+        conn = soil._get_connection()
+        live = f"soil_{bare}"
+        chain = [live]
+        seen = {live}
+        while True:
+            nxt = conn.execute(
+                "SELECT source FROM system_relation "
+                "WHERE kind = 'supersedes' AND target = ?", (live,)
+            ).fetchone()
+            if nxt is None or nxt["source"] in seen:
+                break
+            live = nxt["source"]
+            seen.add(live)
+            chain.append(live)
+        row = conn.execute(
+            """SELECT uuid, _type, realized_at, canonical_at, data, metadata,
+                      superseded_by
+               FROM item WHERE uuid = ? AND superseded_by IS NULL""",
+            (live,),
+        ).fetchone()
+        if row is None:
+            return jsonify({"error": "item not found", "uuid": live}), 404
+        att_rows = conn.execute(
+            """SELECT a.uuid, a._type, a.canonical_at, a.data, a.metadata
+               FROM system_relation rel
+               JOIN item a ON a.uuid = rel.source
+               WHERE rel.kind = 'contained_by'
+                 AND rel.target IN (%s)
+                 AND a.superseded_by IS NULL
+               ORDER BY a.canonical_at ASC""" %
+            ",".join("?" * len(chain)), chain,
+        ).fetchall()
+
+    item = {
+        "uuid": uid.add_soil_prefix(row["uuid"]),
+        "type": row["_type"],
+        "realized_at": row["realized_at"],
+        "canonical_at": row["canonical_at"],
+        "data": _loads(row["data"]),
+        "metadata": _loads(row["metadata"]) or {},
+    }
+    attachments = [
+        {
+            "uuid": uid.add_soil_prefix(a["uuid"]),
+            "type": a["_type"],
+            "canonical_at": a["canonical_at"],
+            "data": _loads(a["data"]),
+            "metadata": _loads(a["metadata"]) or {},
+        }
+        for a in att_rows
+    ]
+    return jsonify({
+        "item": item,
+        "chain": [uid.add_soil_prefix(c) for c in chain],
+        "attachments": attachments,
+    })
+
+
 @operator_bp.get("/scopes/overview")
 def scopes_overview():
     """Authority-state overview: scopes, item counts, grants, policies (RFC-015 §3.3).
