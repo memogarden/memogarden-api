@@ -75,6 +75,12 @@ let CHILDREN_BY_PARENT = {};
 // rewritten; "→ with parent" moves the children to its destination.
 let STUB_GROUPS = [];
 let SIBLING_GROUP_OF = {};
+// api#94: recurring-series blast radius. Scope edits on a series member
+// cascade server-side to ALL instances; SERIES (from the triage response)
+// surfaces {key: {count, first, last}} and SERIES_KEY_BY_UUID maps each
+// in-window entity to its series so cards badge and filings sweep together.
+let SERIES = {};
+let SERIES_KEY_BY_UUID = {};
 
 document.getElementById('selAll').addEventListener('change', function() {
     document.querySelectorAll('#factsList input[type="checkbox"]').forEach(cb => {
@@ -117,6 +123,12 @@ function renderTriage() {
     CHILDREN_BY_PARENT = {};
     for (const [child, parent] of Object.entries(CHILD_PARENT)) {
         (CHILDREN_BY_PARENT[parent] = CHILDREN_BY_PARENT[parent] || []).push(child);
+    }
+    SERIES = TRIAGE.series || {};
+    SERIES_KEY_BY_UUID = {};
+    for (const e of TRIAGE.entities) {
+        const k = (e.data || {}).recurring_event_id || (e.data || {}).ical_uid;
+        if (k && SERIES[k]) SERIES_KEY_BY_UUID[e.uuid] = k;
     }
     computeStubGroups();
 
@@ -189,11 +201,16 @@ function renderTriage() {
             const title = d.title || d.label || e.uuid;
             const account = d.account || '';
             const kids = (CHILDREN_BY_PARENT[e.uuid] || []).map(findItem).filter(Boolean);
+            const sk = SERIES_KEY_BY_UUID[e.uuid];
+            const sinfo = sk ? SERIES[sk] : null;
+            const seriesBadge = sinfo
+                ? ` · <span class="text-indigo-600 dark:text-indigo-300 font-medium" title="recurring series — a scope decision on this card sweeps all ${sinfo.count} instances (${(sinfo.first || '').slice(0, 7)} → ${(sinfo.last || '').slice(0, 7)}); new occurrences inherit it at ingestion">series ×${sinfo.count}</span>`
+                : '';
             return `
             <div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2">
                 <div class="flex-1 min-w-0 group cursor-pointer" onclick="openItemModal('${esc(e.uuid)}')" title="Tap to view full item">
                     <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate group-hover:underline">${esc(title)}</div>
-                    <div class="text-xs text-gray-500 dark:text-gray-400">${esc(e.type)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(e.canonical_at || e.updated_at)} · ${shortUuid(e.uuid)}${e.pulled_in ? ' · <span title="parent still in triage — pulled in from an older page so the family decides together">↩ pulled in</span>' : ''}</div>
+                    <div class="text-xs text-gray-500 dark:text-gray-400">${esc(e.type)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(e.canonical_at || e.updated_at)} · ${shortUuid(e.uuid)}${seriesBadge}${e.pulled_in ? ' · <span title="parent still in triage — pulled in from an older page so the family decides together">↩ pulled in</span>' : ''}</div>
                     ${familyBlock(kids)}
                 </div>
                 <div class="flex gap-1 flex-wrap w-full sm:w-auto">
@@ -335,6 +352,16 @@ function familyOf(uuid) {
     // Sibling litter of a decided parent: the STUB parent is never rewritten
     // (its decision already landed) — only the children move together.
     if (SIBLING_GROUP_OF[uuid]) return SIBLING_GROUP_OF[uuid].members.map(m => m.uuid);
+    // api#94: series members file together (the server cascades the edit to
+    // the whole series) — in-window siblings join the sweep so the queue
+    // cleans up and confirm counts match the blast radius.
+    const sk = SERIES_KEY_BY_UUID[uuid];
+    if (sk) {
+        const sibs = TRIAGE.entities
+            .filter(e => e.uuid !== uuid && SERIES_KEY_BY_UUID[e.uuid] === sk)
+            .map(e => e.uuid);
+        return [uuid].concat(sibs);
+    }
     return [uuid];
 }
 
@@ -403,6 +430,11 @@ async function applyPublicOne(uuid) {
 async function makePublic(targetUuid, kind) {
     clearError();
     const family = familyOf(targetUuid);
+    // api#94: a series member's decision sweeps the whole series server-
+    // side — surface the blast radius before committing.
+    const sk = SERIES_KEY_BY_UUID[targetUuid];
+    const total = sk && SERIES[sk] ? SERIES[sk].count : family.length;
+    if (total > 1 && !confirm(`Make public — recurring series: this sweeps ${total} instances (${family.length} in this window), and future occurrences inherit it. Continue?`)) return;
     try {
         for (const u of family) await applyPublicOne(u);
         removeFromQueue(targetUuid);
@@ -447,6 +479,11 @@ async function applyRelabelOne(uuid, scopeUuids) {
 async function relabel(targetUuid, kind, scopeUuids) {
     clearError();
     const family = familyOf(targetUuid);
+    // api#94: a series member's decision sweeps the whole series server-
+    // side — surface the blast radius before committing.
+    const sk = SERIES_KEY_BY_UUID[targetUuid];
+    const total = sk && SERIES[sk] ? SERIES[sk].count : family.length;
+    if (total > 1 && !confirm(`File to scope — recurring series: this sweeps ${total} instances (${family.length} in this window), and future occurrences inherit it. Continue?`)) return;
     try {
         for (const u of family) await applyRelabelOne(u, scopeUuids);
         removeFromQueue(targetUuid);

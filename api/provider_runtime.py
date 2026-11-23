@@ -36,6 +36,7 @@ from system.soil import Fact, generate_soil_uuid, get_soil
 from utils import isodatetime, uid
 
 from . import provider_registry
+from .series import series_key, series_members
 from .provider_registry import (
     accepts_account_cls,
     claim_run,
@@ -544,12 +545,14 @@ def _upsert_entity(
         ):
             return "noop"
 
-    # Scope label (RFC-014 §10): provider-set wins; otherwise the live
-    # policy applies. Labels ride `data.scopes` — the entity analogue of
-    # fact metadata.scopes (entities have no metadata column; the future
-    # entity read-path enforcement reads this).
+    # Scope label (RFC-014 §10): provider-set wins; otherwise the series
+    # decision (api#94 inheritance), otherwise the live policy. Labels ride
+    # `data.scopes` — the entity analogue of fact metadata.scopes (entities
+    # have no metadata column; the future entity read-path enforcement
+    # reads this).
     if stored is None:
-        _apply_entity_scopes(incoming, scope_policy, resolve_scope)
+        if not _inherit_series_scopes(incoming, core, entity_type):
+            _apply_entity_scopes(incoming, scope_policy, resolve_scope)
         core.entity.create(entity_type=entity_type, data=incoming)
         return "created"
 
@@ -559,12 +562,15 @@ def _upsert_entity(
     # absent keys keep stored values — Google resources arrive complete
     # on change, and tombstones are stamp-only payloads that must not
     # clobber stored belief fields. Stored runtime labels don't survive
-    # the merge; the live policy re-labels the merged result (identical
-    # labels therefore produce no delta noise — the changed-field diff
-    # below compares against what was stored).
+    # the merge; api#94 series inheritance then restores the series'
+    # decision on top (without it every etag bump would silently re-label
+    # decided instances to the policy default — the drift #94 kills), and
+    # only an undecided series falls through to the live policy.
     merged = {k: v for k, v in stored_data.items() if k != "scopes"}
     merged.update(incoming)
-    _apply_entity_scopes(merged, scope_policy, resolve_scope)
+    if not _inherit_series_scopes(merged, core, entity_type):
+        _apply_entity_scopes(merged, scope_policy, resolve_scope)
+    _inherit_series_scopes(merged, core, entity_type)
     changed = {
         field: {"from": stored_data.get(field), "to": value}
         for field, value in merged.items()
@@ -761,6 +767,56 @@ def _inherit_parent_scopes(fact: Fact, soil) -> None:
     if scopes:
         metadata["scopes"] = list(scopes)
         fact.metadata = metadata
+
+
+def _inherit_series_scopes(target: dict, core, entity_type: str) -> bool:
+    """api#94: an occurrence of an already-decided series inherits the
+    series' scopes at ingestion.
+
+    Series scope is DERIVED (no new entity type — api#94 operator decision):
+    the most recent live sibling that carries a scopes KEY at all is the
+    series' current decision, and its list is copied verbatim. A present-
+    but-empty [] is a real decision (cleared / → Public) and inherits like
+    any label — otherwise every etag bump would re-label Public series back
+    to the policy default. Siblings never decided (no scopes key) are
+    ignored, so a never-triaged series still follows the policy.
+
+    Precedence: provider-set scopes win (truthy `scopes` on the target →
+    no-op, and the policy early-returns on them too), then series
+    inheritance, then the scope policy — hence this runs BEFORE
+    _apply_entity_scopes at both upsert paths, returning whether it fired
+    so the caller can skip the policy when a series decision landed
+    (including the empty-list one the policy would otherwise overwrite).
+
+    A per-instance override (edit with cascade_series=false) reverts if
+    Google later changes that occurrence: the sync treats the changed event
+    as a fresh belief and re-inherits the series decision. That is the
+    documented default — instances do not drift out of the series' scope.
+
+    Args:
+        target: the entity data dict (merged upsert payload), mutated in
+            place when a series decision applies — same shape
+            _apply_entity_scopes receives (scopes ride data.scopes).
+        core: open Core context (the run loop holds one).
+        entity_type: the entity type being stored.
+
+    Returns:
+        True when a series decision was applied (scopes key now set,
+        possibly []); False when the caller should fall through to policy.
+    """
+    if target.get("scopes"):
+        return False  # provider labeled it — provider wins
+    key = series_key(target)
+    if key is None:
+        return False
+    for sibling in series_members(core, entity_type, key):
+        s_data = sibling["data"]
+        if isinstance(s_data, str):
+            s_data = json.loads(s_data)
+        if "scopes" in (s_data or {}):
+            target["scopes"] = list(s_data["scopes"] or [])
+            return True
+    return False
 
 
 def _apply_scope_policy(fact: Fact, policy: dict | None, resolve_scope) -> None:

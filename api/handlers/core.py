@@ -34,6 +34,7 @@ from ..middleware.scope_access import (
     require_scope_grant,
     requester_has_all_scopes,
 )
+from ..series import series_key, series_members
 
 from ..schemas.semantic import (
     CreateRequest,
@@ -377,6 +378,37 @@ def handle_edit(request: EditRequest, actor: str) -> dict:
 
         # Fetch updated entity
         row = core.entity.get_by_id(entity_id)
+
+        # api#94: recurring-series scope cascade — a scope decision on one
+        # instance of a series is a decision about the series (contact
+        # birthdays ingest as 70–90 identical occurrences; per-instance
+        # triage is untenable). Applies when the edit touched scopes and the
+        # target carries a series key (recurring_event_id / ical_uid);
+        # cascade_series: false opts out for an instance-only override.
+        # Same transaction as the primary edit — get_core rolls back on
+        # exception, so a mid-sweep failure leaves nothing changed.
+        scopes_touched = (
+            (request.set is not None and "scopes" in request.set)
+            or (request.unset is not None and "scopes" in request.unset)
+        )
+        if request.cascade_series and scopes_touched:
+            key = series_key(row.get("data") or {})
+            if key is not None:
+                new_scopes = list((row.get("data") or {}).get("scopes") or [])
+                for sibling in series_members(core, row["type"], key,
+                                              exclude_uuid=row["uuid"]):
+                    s_data = sibling["data"]
+                    if isinstance(s_data, str):
+                        s_data = json.loads(s_data)
+                    old_labels = set(s_data.get("scopes") or [])
+                    if enforcement_enabled() and not requester_has_all_scopes():
+                        # Same symmetric label gate as the primary edit
+                        # (RFC-011 D2): the sweep relabels instances too, so
+                        # each changed label needs the caller's grant.
+                        for changed in old_labels.symmetric_difference(set(new_scopes)):
+                            require_scope_grant(changed)
+                    s_data["scopes"] = new_scopes
+                    core.entity.update_data(sibling["uuid"], s_data)
 
         # Session 20B: Publish SSE event for Scope modification
         if row.get("type") == "Scope":

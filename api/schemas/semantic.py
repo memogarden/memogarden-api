@@ -85,6 +85,14 @@ class EditRequest(SemanticRequest):
     target: str = Field(..., description="Entity or relation UUID")
     set: dict[str, Any] | None = Field(default=None, description="Fields to add or update")
     unset: list[str] | None = Field(default=None, description="Field names to remove")
+    # api#94: scope edits on a recurring-series member cascade to the whole
+    # series by default (a birthday is 70–90 identical occurrences); false
+    # scopes the single instance only. Consumed by handle_edit — never
+    # stored on the entity.
+    cascade_series: bool = Field(
+        default=True,
+        description="Scope edits cascade to all instances of the target's recurring series (default true)",
+    )
 
     @field_validator('unset')
     @classmethod
