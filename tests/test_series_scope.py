@@ -423,3 +423,30 @@ class TestTriageSeriesMap:
                               headers=auth_headers)
         assert response.status_code == 200
         assert response.get_json()["series"] == {}
+
+
+class TestUnsetCascade:
+    def test_unset_scopes_cascades_as_cleared(self, client, auth_headers, core):
+        target = _make_event(core, "u-1", series_key="series-unset",
+                             scopes_key_absent=False)
+        sib = _make_event(core, "u-2", series_key="series-unset",
+                          scopes_key_absent=False)
+        # label both first, then unset the target's scopes
+        assert client.post(
+            "/mg",
+            json={"op": "edit", "target": target,
+                  "set": {"scopes": ["scope-household"]}},
+            headers=auth_headers,
+        ).status_code == 200
+        assert _scopes_of(core, sib) == ["scope-household"]  # cascade labeled
+
+        response = client.post(
+            "/mg",
+            json={"op": "edit", "target": target, "unset": ["scopes"]},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.get_json()
+        # unset lands as the cleared decision across the series (the
+        # post-edit row lacks the key → new_scopes = [])
+        assert _scopes_of(core, target) is None
+        assert _scopes_of(core, sib) == []

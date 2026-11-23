@@ -161,7 +161,7 @@ def _load_sup_map() -> dict:
     return _sup_map_cache["map"]
 
 
-def _triage_series_map(entity_rows) -> dict:
+def _triage_series_map(core, entity_rows) -> dict:
     """api#94: blast-radius stats for the recurring series represented in
     the returned entity window — {key: {count, first, last}}. Display-only
     (scope edits cascade server-side in handle_edit); lets the console say
@@ -177,7 +177,7 @@ def _triage_series_map(entity_rows) -> dict:
             keys.append(k)
     if not keys:
         return {}
-    return series_stats(get_core(), "Event", keys)
+    return series_stats(core, "Event", keys)
 
 
 @operator_bp.get("/triage")
@@ -534,7 +534,7 @@ def triage_queue():
         # decision on one card will sweep (a birthday is 70–90 identical
         # occurrences; the largest series is 1,452). Scope edits on series
         # members cascade server-side (handle_edit); this is display-only.
-        "series": _triage_series_map(entities),
+        "series": _triage_series_map(core, entities),
     }
     if recs_doc:
         response["decision_model"] = {

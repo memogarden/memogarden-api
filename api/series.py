@@ -12,8 +12,6 @@ instances — re-derived at apply time (cascade) and at ingestion
 
 from __future__ import annotations
 
-import json
-
 from utils import uid
 
 # Fields that identify a recurring series on an entity payload, in priority
@@ -22,9 +20,6 @@ from utils import uid
 # RFC-5545 UID.
 SERIES_KEY_FIELDS = ("recurring_event_id", "ical_uid")
 
-# Scope field lives in entity data (entities have no metadata column —
-# RFC-014 §10).
-_SCOPES_FIELD = "scopes"
 
 
 def series_key(data: dict) -> str | None:

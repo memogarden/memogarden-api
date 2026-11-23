@@ -204,7 +204,7 @@ function renderTriage() {
             const sk = SERIES_KEY_BY_UUID[e.uuid];
             const sinfo = sk ? SERIES[sk] : null;
             const seriesBadge = sinfo
-                ? ` · <span class="text-indigo-600 dark:text-indigo-300 font-medium" title="recurring series — a scope decision on this card sweeps all ${sinfo.count} instances (${(sinfo.first || '').slice(0, 7)} → ${(sinfo.last || '').slice(0, 7)}); new occurrences inherit it at ingestion">series ×${sinfo.count}</span>`
+                ? ` · <span class="text-indigo-600 dark:text-indigo-300 font-medium" title="recurring series — a scope decision on this card sweeps all ${sinfo.count} instances (${esc((sinfo.first || '').slice(0, 7))} → ${esc((sinfo.last || '').slice(0, 7))}); new occurrences inherit it at ingestion">series ×${sinfo.count}</span>`
                 : '';
             return `
             <div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 flex flex-wrap items-start gap-x-3 gap-y-2">
@@ -365,6 +365,19 @@ function familyOf(uuid) {
     return [uuid];
 }
 
+// api#94: series members are swept SERVER-side by the single edit — the
+// client loop must not re-edit each window sibling (each redundant edit
+// re-triggers the full cascade and hash-bumps every instance). Falls back
+// to the client family loop only when the member also has containment
+// children (Events don't, but stay safe for future types).
+function sweepTargets(targetUuid) {
+    const family = familyOf(targetUuid);
+    if (SERIES_KEY_BY_UUID[targetUuid] && !CHILDREN_BY_PARENT[targetUuid]) {
+        return { targets: [targetUuid], swept: family };
+    }
+    return { targets: family, swept: family };
+}
+
 function removeFromQueue(targetUuid) {
     for (const u of familyOf(targetUuid)) {
         const kind = itemKind(u);
@@ -435,9 +448,10 @@ async function makePublic(targetUuid, kind) {
     const sk = SERIES_KEY_BY_UUID[targetUuid];
     const total = sk && SERIES[sk] ? SERIES[sk].count : family.length;
     if (total > 1 && !confirm(`Make public — recurring series: this sweeps ${total} instances (${family.length} in this window), and future occurrences inherit it. Continue?`)) return;
+    const { targets, swept } = sweepTargets(targetUuid);
     try {
-        for (const u of family) await applyPublicOne(u);
-        removeFromQueue(targetUuid);
+        for (const u of targets) await applyPublicOne(u);
+        removeFromQueue(swept[0]);
     } catch (error) {
         showError('Make public failed: ' + error.message);
     }
@@ -484,9 +498,10 @@ async function relabel(targetUuid, kind, scopeUuids) {
     const sk = SERIES_KEY_BY_UUID[targetUuid];
     const total = sk && SERIES[sk] ? SERIES[sk].count : family.length;
     if (total > 1 && !confirm(`File to scope — recurring series: this sweeps ${total} instances (${family.length} in this window), and future occurrences inherit it. Continue?`)) return;
+    const { targets, swept } = sweepTargets(targetUuid);
     try {
-        for (const u of family) await applyRelabelOne(u, scopeUuids);
-        removeFromQueue(targetUuid);
+        for (const u of targets) await applyRelabelOne(u, scopeUuids);
+        removeFromQueue(swept[0]);
     } catch (error) {
         showError('Relabel failed: ' + error.message);
     }

@@ -570,7 +570,6 @@ def _upsert_entity(
     merged.update(incoming)
     if not _inherit_series_scopes(merged, core, entity_type):
         _apply_entity_scopes(merged, scope_policy, resolve_scope)
-    _inherit_series_scopes(merged, core, entity_type)
     changed = {
         field: {"from": stored_data.get(field), "to": value}
         for field, value in merged.items()
