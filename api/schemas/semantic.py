@@ -414,6 +414,8 @@ class SearchRequest(SemanticRequest):
     Strategy:
     - fuzzy: Text matching with typo tolerance (SQLite LIKE)
     - auto: System chooses based on query characteristics
+    - lexical: FTS5 full-text over fact data, BM25-ranked (api#95 Phase 1);
+      entity matches still use LIKE. `semantic` remains reserved (RFC-005).
 
     Continuation tokens enable pagination for large result sets.
     """
@@ -443,9 +445,13 @@ class SearchRequest(SemanticRequest):
         default="standard",
         description="Search effort mode"
     )
-    strategy: Literal["fuzzy", "auto"] = Field(
+    strategy: Literal["fuzzy", "auto", "lexical"] = Field(
         default="auto",
-        description="Search strategy"
+        description=(
+            "Search strategy. 'fuzzy'/'auto': SQLite LIKE matching. "
+            "'lexical': FTS5 full-text with BM25 ranking over fact data "
+            "(api#95 Phase 1); entities still match by LIKE."
+        ),
     )
     continuation_token: str | None = Field(
         default=None,

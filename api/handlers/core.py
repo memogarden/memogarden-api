@@ -1298,6 +1298,8 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
     Strategy:
     - fuzzy: Text matching with typo tolerance (SQLite LIKE)
     - auto: System chooses based on query characteristics
+    - lexical: FTS5 full-text with BM25 ranking over fact data
+      (api#95 Phase 1); entity matches still use LIKE.
 
     Continuation tokens enable pagination for large result sets.
 
@@ -1350,14 +1352,25 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
     # Search facts (Soil/Facts) - using public API
     if request.target_type in ("fact", "all"):
         with get_soil() as soil:
-            # Use public search API instead of direct _conn access
-            item_rows = soil.search_items(
-                query=request.query,
-                coverage=request.coverage,
-                limit=request.limit,
-                allowed_scopes=allowed_scopes,
-                scope_uuid=scope_uuid,
-            )
+            if request.strategy == "lexical":
+                # api#95 Phase 1: ranked FTS5 plane — BM25 over the
+                # trigger-maintained item_fts index. Same pre-match scope
+                # enforcement contract as the LIKE path.
+                item_rows = soil.search_items_fts(
+                    query=request.query,
+                    limit=request.limit,
+                    allowed_scopes=allowed_scopes,
+                    scope_uuid=scope_uuid,
+                )
+            else:
+                # Use public search API instead of direct _conn access
+                item_rows = soil.search_items(
+                    query=request.query,
+                    coverage=request.coverage,
+                    limit=request.limit,
+                    allowed_scopes=allowed_scopes,
+                    scope_uuid=scope_uuid,
+                )
 
             # Convert to response format
             for row in item_rows:

@@ -5,6 +5,8 @@ Per RFC-005 v7, the search verb supports fuzzy text matching with
 configurable coverage levels and effort modes.
 """
 
+import json
+
 import pytest
 from flask import Flask
 
@@ -309,3 +311,96 @@ class TestSearchVerb:
         data = response.get_json()
         result = data["result"]
         assert len(result["results"]) >= 1
+
+
+class TestSearchLexical:
+    """strategy='lexical' — FTS5 BM25 over fact data (api#95 Phase 1)."""
+
+    def _make_fact(self, text: str, _type: str = "Note") -> str:
+        from system.soil.fact import Fact, generate_soil_uuid
+        from utils import isodatetime
+
+        with get_soil() as soil:
+            now = isodatetime.now()
+            fact = Fact(
+                uuid=generate_soil_uuid(),
+                _type=_type,
+                realized_at=now,
+                canonical_at=now,
+                data={"text": text},
+                metadata=None,
+            )
+            uuid = soil.create_fact(fact)
+            soil.commit()
+            return uuid
+
+    def _search(self, client, auth_headers, **overrides):
+        payload = {
+            "op": "search",
+            "query": "senoko",
+            "target_type": "fact",
+            "strategy": "lexical",
+        }
+        payload.update(overrides)
+        return client.post("/mg", json=payload, headers=auth_headers)
+
+    def test_lexical_finds_fact_content(self, client, auth_headers):
+        """BM25 full-text over the trigger-maintained index."""
+        uuid = self._make_fact("Meeting Notes - Senoko contract renewal")
+
+        response = self._search(client, auth_headers)
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+        result = data["result"]
+        assert result["strategy"] == "lexical"
+        uuids = [r["uuid"] for r in result["results"] if r.get("kind") == "fact"]
+        assert uuid in uuids
+
+    def test_lexical_prefix_query(self, client, auth_headers):
+        """Hardened queries are quoted prefix terms — 'seno' finds 'Senoko'."""
+        uuid = self._make_fact("Senoko electricity bill")
+
+        response = self._search(client, auth_headers, query="seno")
+
+        assert response.status_code == 200
+        result = response.get_json()["result"]
+        uuids = [r["uuid"] for r in result["results"] if r.get("kind") == "fact"]
+        assert uuid in uuids
+
+    def test_lexical_no_hits(self, client, auth_headers):
+        """Unrelated content is not matched. (The verb's own request is
+        audited into an Action fact that echoes the query string, so a
+        fact-target search can legitimately see that one record — the
+        contract is that nothing else matches.)"""
+        self._make_fact("ordinary note")
+
+        response = self._search(client, auth_headers, query="zzzqqqxyzwy")
+
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["ok"] is True
+        blobs = [json.dumps(r.get("data", "")) for r in data["result"]["results"]]
+        assert all("ordinary note" not in blob for blob in blobs)
+
+    def test_lexical_entities_still_like(self, client, auth_headers):
+        """With strategy=lexical, entity matches still use the LIKE path.
+        Entity results carry no kind marker; facts are marked 'fact'."""
+        from system.core import get_core
+
+        with get_core() as core:
+            core.entity.create(
+                entity_type="Artifact",
+                data='{"name": "widget invoice"}',
+            )
+        self._make_fact("widget invoice scan")
+
+        response = self._search(
+            client, auth_headers, query="invoice", target_type="all")
+
+        assert response.status_code == 200
+        result = response.get_json()["result"]
+        kinds = {r.get("kind", "entity") for r in result["results"]}
+        assert "entity" in kinds
+        assert "fact" in kinds

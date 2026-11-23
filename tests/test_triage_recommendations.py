@@ -239,8 +239,9 @@ def test_items_search_recent_and_filters(client, auth_headers, core):
     assert all("beta" in r["title"] for r in resp.get_json()["results"])
 
 
-def test_items_search_keyword_fallback_when_daemon_absent(client, auth_headers, core, monkeypatch, tmp_path):
-    """Semantic mode degrades to keyword matching if the daemon socket is dead."""
+def test_items_search_lexical_when_daemon_absent(client, auth_headers, core, monkeypatch, tmp_path):
+    """Semantic mode degrades to the lexical FTS plane (BM25) when the
+    daemon socket is dead (api#95 Phase 1)."""
     triage = _make_scope(core, "Triage / Untrusted")
     with get_soil() as soil:
         soil.create_fact(Fact(uuid=generate_soil_uuid(), _type="Email",
@@ -253,8 +254,26 @@ def test_items_search_keyword_fallback_when_daemon_absent(client, auth_headers, 
     resp = client.get("/api/v1/items/search?q=xylophone", headers=auth_headers)
     assert resp.status_code == 200
     body = resp.get_json()
-    assert body["mode"] == "keyword_fallback"
+    assert body["mode"] == "lexical"
     assert body["results"] and body["results"][0]["title"] == "xylophone receipt"
+
+
+def test_items_search_keyword_fallback_cjk_substring(client, auth_headers, core, monkeypatch, tmp_path):
+    """unicode61 does not tokenize CJK runs, so the lexical plane has no
+    hits — zero-hit queries fall through to the narrow LIKE path."""
+    with get_soil() as soil:
+        soil.create_fact(Fact(uuid=generate_soil_uuid(), _type="Email",
+            realized_at="2026-11-23T09:00:00+00:00",
+            canonical_at="2026-11-23T09:00:00+00:00",
+            data={"title": "东京银行对账单", "description": None, "summary": None},
+            metadata=None, integrity_hash=None, fidelity="full"))
+    monkeypatch.setattr("api.v1.operator._EMBED_SOCK",
+                        tmp_path / "missing.sock")
+    resp = client.get("/api/v1/items/search?q=银行", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["mode"] == "keyword_fallback"
+    assert body["results"] and body["results"][0]["title"] == "东京银行对账单"
 
 
 def test_items_search_requires_jwt(client):

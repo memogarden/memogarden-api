@@ -12,6 +12,7 @@ configuration out of API-key hands even in read form.
 import json
 import logging
 import os
+import sqlite3
 import time
 from pathlib import Path
 
@@ -854,10 +855,12 @@ def _daemon_search(q: str, scope_uuids, types, k: int):
 def items_search():
     """Browse + keyword/semantic item search for the console Items tab.
 
-    ?q= text query (semantic when the embed daemon is reachable, keyword
-    LIKE fallback otherwise); ?scope= label or uuid filter; ?type= comma
-    list of fact types; ?limit / ?offset for browse and keyword modes.
-    Semantic mode ignores offset (top-k by cosine).
+    ?q= text query (semantic when the embed daemon is reachable, lexical
+    FTS5/BM25 otherwise — narrow LIKE only when the lexical plane has no
+    hits, e.g. CJK/substring queries); ?scope= label or uuid filter;
+    ?type= comma list of fact types; ?limit / ?offset for browse,
+    keyword, and lexical modes. Semantic mode ignores offset (top-k by
+    cosine).
     """
     _authenticate_jwt()
 
@@ -947,6 +950,44 @@ def items_search():
                     })
             return jsonify({"mode": mode, "q": q, "results": results,
                             "offset": offset, "limit": limit})
+
+        # api#95 Phase 1: lexical plane — BM25 over the trigger-maintained
+        # FTS index (full item data, quoted prefix terms, implicit AND).
+        # Probe first so the mode is stable across pages: a query with any
+        # FTS hits stays lexical even when a page runs past the hits (an
+        # empty tail page) — flipping to LIKE mid-scroll would reorder and
+        # duplicate results. Zero hits falls through to the narrow LIKE
+        # path: unicode61 does not tokenize CJK runs, and short/substring
+        # recall is what LIKE is still for. The guard keeps the console's
+        # degradation ladder intact on version drift (system package older
+        # than api, or the item_fts DDL not yet applied).
+        if q:
+            try:
+                probe = soil.search_items_fts(
+                    q, limit=1, scope_filter=scope_uuids,
+                    live_only=True, types=filtered_types,
+                )
+            except (AttributeError, sqlite3.OperationalError):
+                probe = None
+            if probe:
+                mode = "lexical"
+                for r in soil.search_items_fts(
+                    q, limit=limit, offset=offset,
+                    scope_filter=scope_uuids, live_only=True,
+                    types=filtered_types,
+                ):
+                    d = _loads(r["data"])
+                    results.append({
+                        "uuid": uid.add_soil_prefix(r["uuid"]),
+                        "type": r["_type"],
+                        "title": (d.get("title") or d.get("subject")
+                                  or d.get("filename") or "")[:160],
+                        "canonical_at": r["canonical_at"],
+                        "scopes": (_loads(r["metadata"]) or {}).get("scopes", []),
+                        "score": round(-r["rank"], 3),
+                    })
+                return jsonify({"mode": mode, "q": q, "results": results,
+                                "offset": offset, "limit": limit})
 
         # recent / keyword_fallback: SQL-ordered
         if q:
