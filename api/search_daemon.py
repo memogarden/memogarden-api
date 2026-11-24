@@ -1,10 +1,11 @@
-"""Client for the triage-model embed daemon (api#95 semantic plane).
+"""Client for the memogarden-search embed daemon (api#95 semantic plane).
 
 Single place owning the unix-socket protocol + the lazy Popen spawn
 fallback (architecture decision 2026-11-22: query-time inference never
 lives in the serving process — the daemon is a model-layer child with
-idle self-exit; systemd socket activation is the Phase 2 successor of
-the spawn fallback, not yet installed).
+idle self-exit; systemd socket activation lives in the memogarden-search
+repo's deploy/ units and takes over when installed — this client then
+just connects, no spawn).
 
 The daemon is scope-masked with capture-time scope sets — that mask is
 DEFENSE-IN-DEPTH ONLY. RFC-011 §4.9(3) enforcement for semantic hits
@@ -25,10 +26,14 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def _triage_model_dir() -> Path:
+def _model_dir() -> Path:
+    """memogarden-search checkout (daemon + venv home since the slice-B
+    cutover; MEMOGARDEN_TRIAGE_MODEL_DIR kept as a legacy override)."""
     return Path(os.environ.get(
-        "MEMOGARDEN_TRIAGE_MODEL_DIR",
-        str(Path.home() / "memogarden/triage-model")))
+        "MEMOGARDEN_SEARCH_MODEL_DIR",
+        os.environ.get(
+            "MEMOGARDEN_TRIAGE_MODEL_DIR",
+            str(Path.home() / "memogarden/memogarden-search"))))
 
 
 def _embed_sock() -> Path:
@@ -65,15 +70,15 @@ def search(q: str, scopes=None, types=None, k: int = 50):
         except (ConnectionRefusedError, FileNotFoundError, socket.timeout,
                 json.JSONDecodeError):
             if not spawned:
-                log = _triage_model_dir() / "embed-daemon.log"
+                log = _model_dir() / "embed-daemon.log"
                 # Popen dups the fds onto the child — close the parent's
                 # copies immediately or the handle leaks per spawn (c0fd2d2)
                 try:
                     with open(log, "ab") as f:
                         subprocess.Popen(
-                            [str(_triage_model_dir() / ".venv/bin/python"),
-                             str(_triage_model_dir() / "embed_daemon.py")],
-                            cwd=str(_triage_model_dir()), stdout=f, stderr=f,
+                            [str(_model_dir() / ".venv/bin/python"),
+                             str(_model_dir() / "embed_daemon.py")],
+                            cwd=str(_model_dir()), stdout=f, stderr=f,
                             start_new_session=True)
                 except OSError:
                     # No model layer on this host (tests, stripped deploys):
