@@ -90,3 +90,38 @@ def search(q: str, scopes=None, types=None, k: int = 50):
                 spawned = True
             time.sleep(0.5)
     return None
+
+
+def rerank_scores(q: str, uuids: list, timeout: int = 15):
+    """Cross-encoder scores for already-recalled candidates (api#95 final).
+
+    Scoring-only op by contract: `uuids` arrive visibility-filtered from
+    the api boundary — the daemon scores whatever it is given. Returns
+    {uuid: logit} or None when the daemon can't answer (no spawn
+    fallback: if the daemon were up it just served the search call, so a
+    rerank miss means degradation — callers fall back to their unreranked
+    order, never to a cold start).
+    """
+    if not q or not uuids:
+        return None
+    payload = json.dumps({"op": "rerank", "q": q,
+                          "uuids": list(uuids)[:64]}).encode()
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(str(_embed_sock()))
+        s.sendall(payload)
+        buf = b""
+        while True:
+            chunk = s.recv(1 << 20)
+            if not chunk:
+                break
+            buf += chunk
+        s.close()
+        out = json.loads(buf)
+        if "results" not in out:
+            return None
+        return {u: sc for u, sc in out["results"]}
+    except (ConnectionRefusedError, FileNotFoundError, socket.timeout,
+            json.JSONDecodeError, OSError):
+        return None
