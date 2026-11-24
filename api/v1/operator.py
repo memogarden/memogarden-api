@@ -24,6 +24,7 @@ from system.soil import get_soil, resolve_chain, resolve_live
 from utils import uid
 
 from ..series import series_key, series_stats
+from ..search_daemon import search as daemon_search
 
 from ..middleware.decorators import _authenticate_jwt
 from ..middleware.scope_access import enforcement_enabled
@@ -799,56 +800,17 @@ def item_inspector(uuid: str):
 # layer's LAZY daemon (~/memogarden/triage-model/embed_daemon.py — unix
 # socket, spawned on first use, idle self-exit). The serving process never
 # loads torch (architecture decision, sysinfo incident 2026-11-22); if the
-# daemon cannot start, /items/search degrades to keyword mode.
-_EMBED_SOCK = Path.home() / ".local/share/memogarden/triage-model/embed.sock"
-_TRIAGE_MODEL = Path(os.environ.get(
-    "MEMOGARDEN_TRIAGE_MODEL_DIR",
-    str(Path.home() / "memogarden/triage-model")))
+# daemon cannot start, /items/search degrades down the mode ladder.
+# api#95 Phase 2: the socket client lives in api/search_daemon.py — the
+# verb (handlers/core.py semantic/hybrid) and this console endpoint share
+# one protocol implementation.
 _INDEXED_TYPES = ("Email", "Attachment", "Note", "Entry", "Event")
 
-
-def _daemon_search(q: str, scope_uuids, types, k: int):
-    """Ask the embed daemon; spawn it if the socket isn't listening.
-
-    Returns results or None (daemon unavailable → caller falls back to
-    keyword mode).
-    """
-    import socket
-    import subprocess
-
-    payload = json.dumps({"op": "search", "q": q, "scopes": scope_uuids,
-                          "types": types, "k": k}).encode()
-    spawned = False
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        try:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.settimeout(15)
-            s.connect(str(_EMBED_SOCK))
-            s.sendall(payload)
-            buf = b""
-            while True:
-                chunk = s.recv(1 << 20)
-                if not chunk:
-                    break
-                buf += chunk
-            s.close()
-            out = json.loads(buf)
-            return out.get("results") if "results" in out else None
-        except (ConnectionRefusedError, FileNotFoundError, socket.timeout,
-                json.JSONDecodeError):
-            if not spawned:
-                # Popen dups the fds onto the child — close the parent's
-                # copies immediately or the handle leaks per spawn
-                with open(_TRIAGE_MODEL / "embed-daemon.log", "ab") as log:
-                    subprocess.Popen(
-                        [str(_TRIAGE_MODEL / ".venv/bin/python"),
-                         str(_TRIAGE_MODEL / "embed_daemon.py")],
-                        cwd=str(_TRIAGE_MODEL), stdout=log, stderr=log,
-                        start_new_session=True)
-                spawned = True
-            time.sleep(0.5)
-    return None
+# api#95 Phase 2: hybrid fuses the lexical plane (FTS5 BM25) with the
+# semantic plane (daemon cosine) via Reciprocal Rank Fusion; when either
+# plane is unavailable the mode degrades honestly down the ladder.
+_RRF_K = 60
+_FETCH_FLOOR = 50
 
 
 @operator_bp.get("/items/search")
@@ -902,120 +864,185 @@ def items_search():
     filtered_types = [t for t in types if t in _INDEXED_TYPES] or list(
         _INDEXED_TYPES)
 
-    mode = "recent"
-    scored = []
-    if q:
-        daemon = _daemon_search(q, scope_uuids, filtered_types, limit)
-        if daemon is not None:
-            mode = "semantic"
-            scored = daemon
-        else:
-            mode = "keyword_fallback"
+    mode_req = (request.args.get("mode") or "").strip().lower()
+    if mode_req not in ("", "recent", "keyword", "keyword_fallback",
+                        "lexical", "semantic", "hybrid"):
+        raise ValidationError(
+            "unknown mode",
+            {"mode": mode_req},
+        )
 
+    def _console_row(r):
+        d = _loads(r["data"])
+        return {
+            "uuid": uid.add_soil_prefix(r["uuid"]),
+            "type": r["_type"],
+            "title": (d.get("title") or d.get("subject")
+                      or d.get("filename") or "")[:160],
+            "canonical_at": r["canonical_at"],
+            "scopes": (_loads(r["metadata"]) or {}).get("scopes", []),
+        }
+
+    mode = "recent"
+    results: list = []
     with get_soil() as soil:
         conn = soil._get_connection()
-        where = ["superseded_by IS NULL", f"_type IN ({','.join('?' * len(filtered_types))})"]
-        params: list = list(filtered_types)
+        base_where = ["superseded_by IS NULL",
+                      f"_type IN ({','.join('?' * len(filtered_types))})"]
+        base_params: list = list(filtered_types)
         if scope_uuids:
-            where.append("""EXISTS (SELECT 1 FROM json_each(metadata, '$.scopes') je
+            base_where.append(
+                """EXISTS (SELECT 1 FROM json_each(metadata, '$.scopes') je
                             WHERE je.value IN (%s))""" %
-                         ",".join("?" * len(scope_uuids)))
-            params.extend(scope_uuids)
-        results = []
-        if mode in ("semantic",):
-            hits = scored[offset:offset + limit] if offset else scored[:limit]
-            uuids = [u for u, _ in hits]
-            scores = {u: s for u, s in hits}
+                ",".join("?" * len(scope_uuids)))
+            base_params.extend(scope_uuids)
+
+        def _recency_or_like(with_like):
+            """Recent browse / keyword tail — SQL-ordered, offset-paged."""
+            where = list(base_where)
+            params = list(base_params)
+            if with_like:
+                like = f"%{q}%"
+                where.append(
+                    """(json_extract(data, '$.title') LIKE ? COLLATE NOCASE
+                        OR json_extract(data, '$.subject') LIKE ? COLLATE NOCASE
+                        OR json_extract(data, '$.filename') LIKE ? COLLATE NOCASE
+                        OR json_extract(data, '$.description') LIKE ? COLLATE NOCASE)""")
+                params.extend([like] * 4)
+            rows = conn.execute(
+                f"""SELECT uuid, _type, canonical_at, data, metadata FROM item
+                    WHERE {' AND '.join(where)}
+                    ORDER BY COALESCE(canonical_at, realized_at) DESC
+                    LIMIT ? OFFSET ?""",
+                (*params, limit, offset),
+            ).fetchall()
+            return [_console_row(r) for r in rows]
+
+        def _fts(probe_only=False):
+            """Lexical plane query; None when FTS is unavailable (version
+            drift, or the item_fts DDL not yet applied)."""
+            try:
+                return soil.search_items_fts(
+                    q,
+                    limit=1 if probe_only else limit,
+                    offset=0 if probe_only else offset,
+                    scope_filter=scope_uuids, live_only=True,
+                    types=filtered_types,
+                )
+            except (AttributeError, sqlite3.OperationalError):
+                return None
+
+        def _uuid_scores(pairs):
+            """Render uuid+score pairs in order (scope-filtered fetch)."""
+            out = []
+            uuids = [u for u, _ in pairs]
+            scores = dict(pairs)
             if uuids:
+                where = ["superseded_by IS NULL",
+                         f"uuid IN ({','.join('?' * len(uuids))})"]
+                params: list = list(uuids)
+                if scope_uuids:
+                    where.append(
+                        """EXISTS (SELECT 1 FROM json_each(metadata, '$.scopes') je
+                                        WHERE je.value IN (%s))""" %
+                        ",".join("?" * len(scope_uuids)))
+                    params.extend(scope_uuids)
                 rows = conn.execute(
-                    f"""SELECT uuid, _type, canonical_at, data, metadata
-                        FROM item WHERE superseded_by IS NULL
-                          AND uuid IN ({",".join("?" * len(uuids))})""",
-                    uuids,
+                    f"""SELECT uuid, _type, canonical_at, data, metadata FROM item
+                        WHERE {' AND '.join(where)}""",
+                    params,
                 ).fetchall()
                 by_uuid = {r["uuid"]: r for r in rows}
                 for u in uuids:
-                    r = by_uuid.get(u)
-                    if r is None:
-                        continue
-                    d = _loads(r["data"])
-                    results.append({
-                        "uuid": uid.add_soil_prefix(r["uuid"]),
-                        "type": r["_type"],
-                        "title": (d.get("title") or d.get("subject")
-                                  or d.get("filename") or "")[:160],
-                        "canonical_at": r["canonical_at"],
-                        "scopes": (_loads(r["metadata"]) or {}).get("scopes", []),
-                        "score": scores.get(u),
-                    })
-            return jsonify({"mode": mode, "q": q, "results": results,
-                            "offset": offset, "limit": limit})
+                    if u in by_uuid:
+                        row = _console_row(by_uuid[u])
+                        row["score"] = scores.get(u)
+                        out.append(row)
+            return out
 
-        # api#95 Phase 1: lexical plane — BM25 over the trigger-maintained
-        # FTS index (full item data, quoted prefix terms, implicit AND).
-        # Probe first so the mode is stable across pages: a query with any
-        # FTS hits stays lexical even when a page runs past the hits (an
-        # empty tail page) — flipping to LIKE mid-scroll would reorder and
-        # duplicate results. Zero hits falls through to the narrow LIKE
-        # path: unicode61 does not tokenize CJK runs, and short/substring
-        # recall is what LIKE is still for. The guard keeps the console's
-        # degradation ladder intact on version drift (system package older
-        # than api, or the item_fts DDL not yet applied).
-        if q:
-            try:
-                probe = soil.search_items_fts(
-                    q, limit=1, scope_filter=scope_uuids,
-                    live_only=True, types=filtered_types,
-                )
-            except (AttributeError, sqlite3.OperationalError):
-                probe = None
+        if not q or mode_req == "recent":
+            results = _recency_or_like(with_like=False)
+
+        elif mode_req in ("keyword", "keyword_fallback"):
+            mode = "keyword_fallback"
+            results = _recency_or_like(with_like=True)
+
+        elif mode_req == "lexical":
+            # Probe first so the mode is stable across pages: a query with
+            # any FTS hits stays lexical even when a page runs past the
+            # hits (an empty tail page) — flipping to LIKE mid-scroll
+            # would reorder and duplicate results. Zero hits falls through
+            # to the narrow LIKE path: unicode61 does not tokenize CJK
+            # runs, and short/substring recall is what LIKE is still for.
+            # The guard keeps the ladder intact on version drift (system
+            # package older than api, or the item_fts DDL not yet applied).
+            probe = _fts(probe_only=True)
             if probe:
                 mode = "lexical"
-                for r in soil.search_items_fts(
-                    q, limit=limit, offset=offset,
-                    scope_filter=scope_uuids, live_only=True,
-                    types=filtered_types,
-                ):
-                    d = _loads(r["data"])
-                    results.append({
-                        "uuid": uid.add_soil_prefix(r["uuid"]),
-                        "type": r["_type"],
-                        "title": (d.get("title") or d.get("subject")
-                                  or d.get("filename") or "")[:160],
-                        "canonical_at": r["canonical_at"],
-                        "scopes": (_loads(r["metadata"]) or {}).get("scopes", []),
-                        "score": round(-r["rank"], 3),
-                    })
-                return jsonify({"mode": mode, "q": q, "results": results,
-                                "offset": offset, "limit": limit})
+                for r in _fts():
+                    row = _console_row(r)
+                    row["score"] = round(-r["rank"], 3)
+                    results.append(row)
+            else:
+                mode = "keyword_fallback"
+                results = _recency_or_like(with_like=True)
 
-        # recent / keyword_fallback: SQL-ordered
-        if q:
-            mode = "keyword_fallback"
-            like = f"%{q}%"
-            where.append(
-                """(json_extract(data, '$.title') LIKE ? COLLATE NOCASE
-                    OR json_extract(data, '$.subject') LIKE ? COLLATE NOCASE
-                    OR json_extract(data, '$.filename') LIKE ? COLLATE NOCASE
-                    OR json_extract(data, '$.description') LIKE ? COLLATE NOCASE)""")
-            params.extend([like] * 4)
-        rows = conn.execute(
-            f"""SELECT uuid, _type, canonical_at, data, metadata FROM item
-                WHERE {' AND '.join(where)}
-                ORDER BY COALESCE(canonical_at, realized_at) DESC
-                LIMIT ? OFFSET ?""",
-            (*params, limit, offset),
-        ).fetchall()
-        for r in rows:
-            d = _loads(r["data"])
-            results.append({
-                "uuid": uid.add_soil_prefix(r["uuid"]),
-                "type": r["_type"],
-                "title": (d.get("title") or d.get("subject")
-                          or d.get("filename") or "")[:160],
-                "canonical_at": r["canonical_at"],
-                "scopes": (_loads(r["metadata"]) or {}).get("scopes", []),
-            })
+        elif mode_req == "semantic":
+            hits = daemon_search(q, scopes=scope_uuids,
+                                 types=filtered_types,
+                                 k=max(limit, _FETCH_FLOOR))
+            if hits is None:
+                mode = "keyword_fallback"
+                results = _recency_or_like(with_like=True)
+            else:
+                mode = "semantic"
+                page = hits[offset:offset + limit] if offset else hits[:limit]
+                results = _uuid_scores([(u, s) for u, s in page])
+
+        else:  # hybrid — the default whenever a query is present
+            # api#95 Phase 2: fuse the lexical plane (FTS5 BM25, pre-match
+            # scope-enforced) with the semantic plane (daemon cosine,
+            # capture-time mask + console scope filter) via Reciprocal
+            # Rank Fusion. Exact tokens, ids and names come from BM25;
+            # paraphrase recall comes from the embeddings. Either plane
+            # missing degrades honestly down the ladder.
+            fetch_n = max(limit, _FETCH_FLOOR)
+            lex_ranked = None
+            probe = _fts(probe_only=True)
+            if probe:
+                try:
+                    lex_ranked = [
+                        (r["uuid"], round(-r["rank"], 3))
+                        for r in soil.search_items_fts(
+                            q, limit=fetch_n, scope_filter=scope_uuids,
+                            live_only=True, types=filtered_types)
+                    ]
+                except (AttributeError, sqlite3.OperationalError):
+                    lex_ranked = None
+            sem_hits = daemon_search(q, scopes=scope_uuids,
+                                     types=filtered_types, k=fetch_n)
+            if lex_ranked is not None and sem_hits is not None:
+                mode = "hybrid"
+                rrf: dict = {}
+                for channel in (lex_ranked, sem_hits):
+                    for rank, (u, _s) in enumerate(channel):
+                        rrf[u] = rrf.get(u, 0.0) + 1.0 / (_RRF_K + rank + 1)
+                fused = sorted(rrf.items(), key=lambda kv: -kv[1])
+                results = _uuid_scores([(u, round(s, 4)) for u, s in fused])
+            elif lex_ranked is not None:
+                mode = "lexical"
+                for r in _fts():
+                    row = _console_row(r)
+                    row["score"] = round(-r["rank"], 3)
+                    results.append(row)
+            elif sem_hits is not None:
+                mode = "semantic"
+                results = _uuid_scores(
+                    [(u, s) for u, s in sem_hits[:limit]])
+            else:
+                mode = "keyword_fallback"
+                results = _recency_or_like(with_like=True)
+
     return jsonify({"mode": mode, "q": q, "results": results,
                     "offset": offset, "limit": limit})
 

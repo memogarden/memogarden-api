@@ -445,12 +445,17 @@ class SearchRequest(SemanticRequest):
         default="standard",
         description="Search effort mode"
     )
-    strategy: Literal["fuzzy", "auto", "lexical"] = Field(
+    strategy: Literal["fuzzy", "auto", "lexical", "semantic", "hybrid"] = Field(
         default="auto",
         description=(
             "Search strategy. 'fuzzy'/'auto': SQLite LIKE matching. "
             "'lexical': FTS5 full-text with BM25 ranking over fact data "
-            "(api#95 Phase 1); entities still match by LIKE."
+            "(api#95 Phase 1); entities still match by LIKE. 'semantic': "
+            "embed-daemon cosine, re-checked under current-time scope "
+            "visibility; degrades to fuzzy when the daemon is unreachable. "
+            "'hybrid': Reciprocal Rank Fusion of lexical + semantic fact "
+            "results; degrades to whichever plane is available — the "
+            "response 'strategy' echoes what actually ran."
         ),
     )
     continuation_token: str | None = Field(

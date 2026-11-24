@@ -95,9 +95,10 @@ async function runSearch(reset) {
     try {
         const r = await api('/api/v1/items/search?' + params.toString());
         document.getElementById('modeInfo').textContent =
+            r.mode === 'hybrid' ? '✨+🔤 hybrid (lexical + semantic)' :
             r.mode === 'semantic' ? '✨ semantic' :
             r.mode === 'lexical' ? 'lexical (full-text)' :
-            r.mode === 'keyword_fallback' ? 'keyword (daemon unavailable)' : 'recent';
+            r.mode === 'keyword_fallback' ? 'keyword (planes unavailable)' : 'recent';
         renderResults(r.results, !reset);
         reachedEnd = r.results.length < r.limit;
         document.getElementById('moreBtn').classList.toggle('hidden', reachedEnd);

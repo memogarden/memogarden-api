@@ -629,3 +629,54 @@ def sample_entity(core):
     """
     entity_uuid = core.entity.create("Artifact")
     return entity_uuid
+
+
+# ---------------------------------------------------------------------------
+# api#95 Phase 2: fake embed daemon (no torch) for semantic/hybrid tests
+# ---------------------------------------------------------------------------
+import json as _json  # noqa: E402
+import socket as _socket  # noqa: E402
+import threading as _threading  # noqa: E402
+
+
+@pytest.fixture
+def fake_daemon_factory(monkeypatch, tmp_path):
+    """Factory for a minimal embed-daemon protocol server.
+
+    Speaks just enough of the triage-model daemon protocol ({"op":
+    "search"} -> {"results": [...]}) over a unix socket, points the
+    search_daemon client env at it, and never spawns real torch. The
+    factory takes the results list to serve; responses are stateless.
+    """
+    started = []
+
+    def _factory(results):
+        sock_path = tmp_path / f"fake-embed-{len(started)}.sock"
+        srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        srv.bind(str(sock_path))
+        srv.listen(4)
+
+        def _serve():
+            while True:
+                try:
+                    conn, _ = srv.accept()
+                except OSError:
+                    return
+                # the real daemon does ONE recv (payloads fit 4MB) and
+                # responds without waiting for EOF — recv-until-EOF would
+                # deadlock against the client's open read
+                req = _json.loads(conn.recv(1 << 22).decode())
+                conn.sendall(
+                    _json.dumps({"results": results}).encode())
+                conn.close()
+
+        t = _threading.Thread(target=_serve, daemon=True)
+        t.start()
+        started.append(srv)
+        monkeypatch.setenv("MEMOGARDEN_EMBED_SOCK", str(sock_path))
+        monkeypatch.setenv("MEMOGARDEN_TRIAGE_MODEL_DIR", str(tmp_path))
+        return sock_path
+
+    yield _factory
+    for s in started:
+        s.close()

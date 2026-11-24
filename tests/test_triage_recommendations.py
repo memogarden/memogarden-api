@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from system.soil import Fact, generate_soil_uuid, get_soil
-from utils import isodatetime
+from utils import isodatetime, uid
 
 from api.v1 import operator as operator_mod
 
@@ -249,11 +249,15 @@ def test_items_search_lexical_when_daemon_absent(client, auth_headers, core, mon
             canonical_at="2026-11-22T09:00:00+00:00",
             data={"title": "xylophone receipt", "description": None, "summary": None},
             metadata={"scopes": [triage]}, integrity_hash=None, fidelity="full"))
-    monkeypatch.setattr("api.v1.operator._EMBED_SOCK",
-                        tmp_path / "missing.sock")
+    # api#95 Phase 2: the daemon client reads these env vars at call time;
+    # pointing both at tmp_path makes the plane unavailable instantly (no
+    # model layer to spawn) without touching the real triage-model dir.
+    monkeypatch.setenv("MEMOGARDEN_EMBED_SOCK", str(tmp_path / "missing.sock"))
+    monkeypatch.setenv("MEMOGARDEN_TRIAGE_MODEL_DIR", str(tmp_path))
     resp = client.get("/api/v1/items/search?q=xylophone", headers=auth_headers)
     assert resp.status_code == 200
     body = resp.get_json()
+    # hybrid default degrades honestly to the lexical plane
     assert body["mode"] == "lexical"
     assert body["results"] and body["results"][0]["title"] == "xylophone receipt"
 
@@ -267,8 +271,8 @@ def test_items_search_keyword_fallback_cjk_substring(client, auth_headers, core,
             canonical_at="2026-11-23T09:00:00+00:00",
             data={"title": "东京银行对账单", "description": None, "summary": None},
             metadata=None, integrity_hash=None, fidelity="full"))
-    monkeypatch.setattr("api.v1.operator._EMBED_SOCK",
-                        tmp_path / "missing.sock")
+    monkeypatch.setenv("MEMOGARDEN_EMBED_SOCK", str(tmp_path / "missing.sock"))
+    monkeypatch.setenv("MEMOGARDEN_TRIAGE_MODEL_DIR", str(tmp_path))
     resp = client.get("/api/v1/items/search?q=银行", headers=auth_headers)
     assert resp.status_code == 200
     body = resp.get_json()
@@ -279,3 +283,46 @@ def test_items_search_keyword_fallback_cjk_substring(client, auth_headers, core,
 def test_items_search_requires_jwt(client):
     resp = client.get("/api/v1/items/search")
     assert resp.status_code == 401
+
+
+def test_items_search_hybrid_default_fuses_planes(client, auth_headers,
+                                                  fake_daemon_factory):
+    """api#95 Phase 2: with a query and no explicit mode, hybrid fuses the
+    lexical plane (BM25) with the semantic plane (daemon cosine) — a hit
+    known only to the daemon still surfaces, and the badge says hybrid."""
+    with get_soil() as soil:
+        lex_uuid = soil.create_fact(Fact(
+            uuid=generate_soil_uuid(),
+            _type="Note",
+            realized_at=isodatetime.now(),
+            canonical_at=isodatetime.now(),
+            data={"title": "zephyr glider notes",
+                  "description": "zephyr winds and launch checklist",
+                  "summary": None},
+            metadata=None, integrity_hash=None, fidelity="full"))
+        sem_uuid = soil.create_fact(Fact(
+            uuid=generate_soil_uuid(),
+            _type="Note",
+            realized_at=isodatetime.now(),
+            canonical_at=isodatetime.now(),
+            data={"title": "sailplane wing repair",
+                  "description": "fiberglass patch on the outer wing",
+                  "summary": None},
+            metadata=None, integrity_hash=None, fidelity="full"))
+    fake_daemon_factory([[sem_uuid, 0.81]])
+    resp = client.get("/api/v1/items/search?q=zephyr", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["mode"] == "hybrid"
+    uuids = [r["uuid"] for r in body["results"]]
+    assert uid.add_soil_prefix(lex_uuid) in uuids, "lexical hit lost"
+    assert uid.add_soil_prefix(sem_uuid) in uuids, "semantic-only hit lost"
+    scores = {r["uuid"]: r["score"] for r in body["results"]}
+    assert scores[uid.add_soil_prefix(lex_uuid)] == pytest.approx(
+        1 / 61, abs=1e-3)
+
+
+def test_items_search_unknown_mode_rejected(client, auth_headers):
+    resp = client.get("/api/v1/items/search?q=x&mode=psychic",
+                      headers=auth_headers)
+    assert resp.status_code == 400

@@ -19,10 +19,13 @@ Publishes SSE events for context and scope operations:
 
 import json
 import logging
+import sqlite3
 
 from system.core import get_core
 from system.exceptions import PermissionDenied, ResourceNotFound, ValidationError
 from utils import uid
+
+from ..search_daemon import search as daemon_search
 
 from ..middleware.scope_access import (
     active_scope_for,
@@ -1276,6 +1279,68 @@ def handle_focus(request: FocusRequest, actor: str) -> dict:
 # Search Verb Handler (RFC-005 v7)
 # ============================================================================
 
+# api#95 Phase 2: hybrid fusion constants. RRF k=60 is the standard
+# constant (Cormack et al.); over-fetch floor keeps both channels large
+# enough that fusion is meaningful even at small request limits.
+_RRF_K = 60
+_SEM_FETCH_FLOOR = 50
+
+
+def _visible_rows(conn, uuids, allowed_scopes, scope_uuid):
+    """Fetch item rows by uuid under RFC-011 §4.9(3) visibility.
+
+    Current-time boundary enforcement for daemon-sourced hits — the
+    daemon's capture-time scope mask is defense-in-depth only (api#95:
+    enforcement happens at the API boundary, never in the model layer).
+    Mirrors the soil search contract: unlabeled items always pass
+    (SG-1); labeled items pass when any label is in allowed_scopes
+    (None = unrestricted, [] = only unlabeled). scope_uuid is the
+    convenience refinement (must carry that label). Rows return in
+    uuids order; uuids without a live visible row are dropped.
+    """
+    if not uuids:
+        return []
+    rows = conn.execute(
+        f"""SELECT uuid, _type, data, metadata, integrity_hash,
+                   realized_at, canonical_at, fidelity
+            FROM item WHERE superseded_by IS NULL
+              AND uuid IN ({','.join('?' * len(uuids))})""",
+        list(uuids),
+    ).fetchall()
+    by_uuid = {}
+    for r in rows:
+        try:
+            meta = json.loads(r["metadata"]) if r["metadata"] else {}
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+        labels = set(meta.get("scopes", []) or [])
+        if allowed_scopes is not None and labels:
+            if not labels.intersection(allowed_scopes):
+                continue
+        if scope_uuid and scope_uuid not in labels:
+            continue
+        by_uuid[r["uuid"]] = r
+    return [by_uuid[u] for u in uuids if u in by_uuid]
+
+
+def _semantic_hits(soil, query, allowed_scopes, scope_uuid, fetch_n):
+    """Semantic plane: daemon hits re-checked at the boundary.
+
+    Returns (rows_best_first, scores_by_uuid) or None when the daemon
+    is unreachable. The daemon's capture-time mask stays on as
+    defense-in-depth; over-fetching compensates for hits dropped by
+    the current-time visibility re-check.
+    """
+    hits = daemon_search(query, scopes=allowed_scopes, k=fetch_n)
+    if hits is None:
+        return None
+    uuids = [u for u, _ in hits]
+    scores = {u: s for u, s in hits}
+    rows = _visible_rows(soil._get_connection(), uuids, allowed_scopes,
+                         scope_uuid)
+    return rows, scores
+
+
 @with_audit
 def handle_search(request: SearchRequest, actor: str) -> dict:
     """Handle search verb - semantic search and discovery.
@@ -1300,6 +1365,13 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
     - auto: System chooses based on query characteristics
     - lexical: FTS5 full-text with BM25 ranking over fact data
       (api#95 Phase 1); entity matches still use LIKE.
+    - semantic: embed-daemon cosine over the chunked vector index
+      (api#95 Phase 2), re-checked at this boundary under current-time
+      visibility; entity matches still use LIKE; degrades to fuzzy
+      when the daemon is unreachable.
+    - hybrid: Reciprocal Rank Fusion of lexical + semantic fact
+      results (api#95 Phase 2); entities still use LIKE; degrades to
+      whichever plane is available (strategy echoes the degrade).
 
     Continuation tokens enable pagination for large result sets.
 
@@ -1328,6 +1400,11 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
         allowed_scopes = None
     scope_uuid = uid.strip_prefix(request.scope) if request.scope else None
 
+    # Strategy echo (api#95 Phase 2): may be downgraded by the facts
+    # branch below when a plane is unavailable — the response always
+    # reports what actually ran, never what was requested.
+    strategy_used = request.strategy
+
     # Collect results based on target_type
     results = []
     entity_results = []
@@ -1352,7 +1429,77 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
     # Search facts (Soil/Facts) - using public API
     if request.target_type in ("fact", "all"):
         with get_soil() as soil:
-            if request.strategy == "lexical":
+            scores = None
+            if request.strategy in ("semantic", "hybrid"):
+                # api#95 Phase 2: the model-layer planes. Scope
+                # enforcement stays at THIS boundary under current-time
+                # visibility (§4.9(3)) — daemon hits are re-checked in
+                # _semantic_hits; the lexical channel keeps the pre-match
+                # contract. Honest degrade: whichever plane is
+                # unavailable is reported in `strategy`.
+                fetch_n = min(max(request.limit * 2, _SEM_FETCH_FLOOR), 200)
+                lex_rows = None
+                sem = None
+                if request.strategy == "hybrid":
+                    try:
+                        lex_rows = soil.search_items_fts(
+                            query=request.query,
+                            limit=fetch_n,
+                            allowed_scopes=allowed_scopes,
+                            scope_uuid=scope_uuid,
+                        )
+                    except (AttributeError, sqlite3.OperationalError):
+                        lex_rows = None
+                sem = _semantic_hits(soil, request.query, allowed_scopes,
+                                     scope_uuid, fetch_n)
+
+                if request.strategy == "semantic":
+                    if sem is None:
+                        strategy_used = "fuzzy"
+                        item_rows = soil.search_items(
+                            query=request.query,
+                            coverage=request.coverage,
+                            limit=request.limit,
+                            allowed_scopes=allowed_scopes,
+                            scope_uuid=scope_uuid,
+                        )
+                    else:
+                        item_rows = sem[0][:request.limit]
+                        scores = sem[1]
+                else:  # hybrid — fuse whichever planes answered
+                    if lex_rows is not None and sem is not None:
+                        strategy_used = "hybrid"
+                        rrf: dict = {}
+                        for rank, r in enumerate(lex_rows):
+                            rrf[r["uuid"]] = rrf.get(r["uuid"], 0.0) \
+                                + 1.0 / (_RRF_K + rank + 1)
+                        for rank, r in enumerate(sem[0]):
+                            rrf[r["uuid"]] = rrf.get(r["uuid"], 0.0) \
+                                + 1.0 / (_RRF_K + rank + 1)
+                        rows_by = {r["uuid"]: r
+                                   for r in list(lex_rows) + list(sem[0])}
+                        order = [u for u, _ in
+                                 sorted(rrf.items(), key=lambda kv: -kv[1])]
+                        item_rows = [rows_by[u] for u in order
+                                     if u in rows_by][:request.limit]
+                        scores = {u: round(rrf[u], 4) for u in order}
+                    elif lex_rows is not None:
+                        strategy_used = "lexical"
+                        item_rows = lex_rows[:request.limit]
+                    elif sem is not None:
+                        strategy_used = "semantic"
+                        item_rows = sem[0][:request.limit]
+                        scores = sem[1]
+                    else:
+                        strategy_used = "fuzzy"
+                        item_rows = soil.search_items(
+                            query=request.query,
+                            coverage=request.coverage,
+                            limit=request.limit,
+                            allowed_scopes=allowed_scopes,
+                            scope_uuid=scope_uuid,
+                        )
+            elif request.strategy == "lexical":
                 # api#95 Phase 1: ranked FTS5 plane — BM25 over the
                 # trigger-maintained item_fts index. Same pre-match scope
                 # enforcement contract as the LIKE path.
@@ -1384,7 +1531,7 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
                 except (json.JSONDecodeError, TypeError, KeyError):
                     metadata = {}
 
-                fact_results.append({
+                fact = {
                     "uuid": uid.add_soil_prefix(row["uuid"]),
                     "type": row["_type"],
                     "data": data,
@@ -1394,7 +1541,11 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
                     "metadata": metadata,
                     "fidelity": row["fidelity"],
                     "kind": "fact",  # Add kind marker for disambiguation
-                })
+                }
+                if scores is not None:
+                    fact["score"] = scores.get(uid.add_soil_prefix(row["uuid"]),
+                                               scores.get(row["uuid"]))
+                fact_results.append(fact)
 
     # Merge and deduplicate results
     # Session 9: Simple concatenation (entities first, then facts)
@@ -1413,11 +1564,11 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
         # Would generate token here for real pagination
         continuation_token = None  # Session 9: Deferred
 
-    # TODO: Strategy parameter implementation
-    # Session 9: Always uses fuzzy (LIKE with wildcards)
-    # Future: Implement "auto" strategy to choose between fuzzy/semantic based on query
-    # Future: Implement "semantic" strategy with embeddings/vector DB
-    strategy_used = request.strategy  # Placeholder - currently ignored, always uses fuzzy
+    # TODO: Strategy "auto" implementation
+    # Session 9: Always ran fuzzy (LIKE with wildcards)
+    # api#95 Phase 2: semantic/hybrid/lexical now run their planes; the
+    # strategy_used echo was initialized before the target branches so
+    # honest degradation survives to the response.
 
     # TODO: Effort mode implementation
     # Session 9: Framework in place but not implemented
