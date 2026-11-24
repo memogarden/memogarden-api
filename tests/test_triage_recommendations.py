@@ -326,3 +326,76 @@ def test_items_search_unknown_mode_rejected(client, auth_headers):
     resp = client.get("/api/v1/items/search?q=x&mode=psychic",
                       headers=auth_headers)
     assert resp.status_code == 400
+
+
+def _triage_fact_at(title: str, triage: str, canonical_at: str) -> str:
+    """Triage fact with a pinned canonical time so recent order is known."""
+    with get_soil() as soil:
+        return soil.create_fact(Fact(
+            uuid=generate_soil_uuid(), _type="Email",
+            realized_at=canonical_at, canonical_at=canonical_at,
+            data={"title": title, "description": None, "summary": None},
+            metadata={"scopes": [triage]}, integrity_hash=None,
+            fidelity="full"))
+
+
+def test_triage_explore_sort_orders_by_nn_dist(client, auth_headers, core, recs_env):
+    """?sort=explore ranks facts farthest-from-decided first (nn_dist desc
+    from the sidecar), ties/missing last in canonical-DESC order."""
+    triage = _make_scope(core, "Triage / Untrusted")
+    old = _prefixed(_triage_fact_at("old lonely", triage, "2026-11-20T08:00:00+00:00"))
+    mid = _prefixed(_triage_fact_at("mid lonely", triage, "2026-11-21T08:00:00+00:00"))
+    near = _prefixed(_triage_fact_at("near decided", triage, "2026-11-22T08:00:00+00:00"))
+    recs_env({
+        near: {"pred": "unclassified", "confidence": 0.9, "runner": "t",
+               "nn_dist": 0.11},
+        old: {"pred": "Household", "confidence": 0.6, "runner": "t",
+              "nn_dist": 0.43},
+        mid: {"pred": "Household", "confidence": 0.6, "runner": "t",
+              "nn_dist": 0.43},  # tie with old -> canonical DESC keeps mid first
+    })
+    resp = client.get("/api/v1/triage?sort=explore", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["sort"] == "explore"
+    assert [f["uuid"] for f in body["facts"]] == [mid, old, near]
+    # nn_dist rides through on the rec payload for the console d= chip
+    assert body["facts"][0]["rec"]["nn_dist"] == 0.43
+
+
+def test_triage_explore_sort_rows_without_rec_sort_last(client, auth_headers, core, recs_env):
+    triage = _make_scope(core, "Triage / Untrusted")
+    covered = _prefixed(_triage_fact_at("covered", triage, "2026-11-22T08:00:00+00:00"))
+    orphan = _prefixed(_triage_fact_at("no rec yet", triage, "2026-11-23T08:00:00+00:00"))
+    recs_env({covered: {"pred": "unclassified", "confidence": 0.8,
+                        "runner": "t", "nn_dist": 0.2}})
+    resp = client.get("/api/v1/triage?sort=explore", headers=auth_headers)
+    body = resp.get_json()
+    assert [f["uuid"] for f in body["facts"]] == [covered, orphan]
+
+
+def test_triage_explore_sort_falls_back_without_signal(client, auth_headers, core, recs_env):
+    """A sidecar predating nn_dist must not scramble the queue: explore
+    falls back to recent and says so."""
+    triage = _make_scope(core, "Triage / Untrusted")
+    older = _prefixed(_triage_fact_at("older", triage, "2026-11-20T08:00:00+00:00"))
+    newer = _prefixed(_triage_fact_at("newer", triage, "2026-11-23T08:00:00+00:00"))
+    recs_env({older: {"pred": "unclassified", "confidence": 0.8, "runner": "t"}})
+    resp = client.get("/api/v1/triage?sort=explore", headers=auth_headers)
+    body = resp.get_json()
+    assert body["sort"] == "recent"
+    assert [f["uuid"] for f in body["facts"]] == [newer, older]
+
+
+def test_triage_recent_is_default_and_unknown_sort_rejected(client, auth_headers, core, recs_env):
+    triage = _make_scope(core, "Triage / Untrusted")
+    older = _prefixed(_triage_fact_at("older", triage, "2026-11-20T08:00:00+00:00"))
+    newer = _prefixed(_triage_fact_at("newer", triage, "2026-11-23T08:00:00+00:00"))
+    recs_env({newer: {"pred": "unclassified", "confidence": 0.8,
+                      "runner": "t", "nn_dist": 0.05}})
+    resp = client.get("/api/v1/triage", headers=auth_headers)
+    body = resp.get_json()
+    assert body["sort"] == "recent"
+    assert [f["uuid"] for f in body["facts"]] == [newer, older]
+    resp = client.get("/api/v1/triage?sort=psychic", headers=auth_headers)
+    assert resp.status_code == 400

@@ -29,10 +29,18 @@
     <span class="text-xs text-gray-400 dark:text-gray-500 hidden sm:inline">agents may sort with grants on triage + target — under enforcement</span>
 </div>
 
-<ul id="tabs" class="flex gap-2 mb-3 text-sm">
+<div class="flex justify-between items-center gap-2 mb-3 flex-wrap">
+<ul id="tabs" class="flex gap-2 text-sm">
     <li><button data-tab="facts" class="tab px-3 py-1 rounded-lg bg-gray-200 dark:bg-gray-700 font-medium">Facts (<span id="cntFacts">…</span>)</button></li>
     <li><button data-tab="entities" class="tab px-3 py-1 rounded-lg text-gray-600 dark:text-gray-400">Entities (<span id="cntEntities">…</span>)</button></li>
 </ul>
+<div class="flex gap-1 text-xs" role="group" aria-label="queue sort">
+    <button id="sortExplore" onclick="setSort('explore')"
+        title="farthest-from-decided first: each decision populates the emptiest region of the item space">Explore</button>
+    <button id="sortRecent" onclick="setSort('recent')"
+        title="newest first (canonical time)">Recent</button>
+</div>
+</div>
 
 <div id="evalStrip" class="hidden mb-3 px-3 py-2 bg-white dark:bg-gray-900 shadow rounded-lg text-xs text-gray-600 dark:text-gray-400"></div>
 <div id="factsList" class="space-y-2"></div>
@@ -170,7 +178,7 @@ function renderTriage() {
                 <input type="checkbox" data-uuid="${esc(f.uuid)}" data-kind="fact" class="mt-1 rounded triage-cb" onchange="updateCount()">
                 <div class="flex-1 min-w-0 group cursor-pointer" onclick="openItemModal('${esc(f.uuid)}')" title="Tap to view full item">
                     <div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate group-hover:underline">${esc(title)}</div>
-                    <div class="text-xs text-gray-500 dark:text-gray-400">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.canonical_at || f.realized_at)} · <a href="/item/${esc(f.uuid)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="underline decoration-dotted hover:text-gray-700 dark:hover:text-gray-300" title="open item inspector in new tab">${shortUuid(f.uuid)}</a>${f.pulled_in ? ' · <span title="parent still in triage — pulled in from an older page so the family decides together">↩ pulled in</span>' : ''}</div>
+                    <div class="text-xs text-gray-500 dark:text-gray-400">${esc(f.type)} · ${esc(src)} ${account ? '· account: ' + esc(account) : ''} · ${fmtTime(f.canonical_at || f.realized_at)} · <a href="/item/${esc(f.uuid)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" class="underline decoration-dotted hover:text-gray-700 dark:hover:text-gray-300" title="open item inspector in new tab">${shortUuid(f.uuid)}</a>${(TRIAGE.sort === 'explore' && f.rec && typeof f.rec.nn_dist === 'number') ? ` · <span title="cosine distance to the nearest decided item — high = nothing like it labeled yet">d=${f.rec.nn_dist.toFixed(2)}</span>` : ''}${f.pulled_in ? ' · <span title="parent still in triage — pulled in from an older page so the family decides together">↩ pulled in</span>' : ''}</div>
                     ${familyBlock(kids)}
                 </div>
                 <div class="flex gap-1 flex-wrap w-full sm:w-auto">
@@ -698,16 +706,50 @@ async function loadRelabelLog() {
     }
 }
 
+// Queue sort (operator proposal 2026-11-24): 'explore' surfaces the items
+// farthest from every decided anchor first — greedy coverage of the item
+// space — so each decision adds the most new information. Preference
+// persists across sessions; the API reports what it actually applied
+// ('recent' when the sidecar predates the nn_dist signal).
+let SORT = localStorage.getItem('triageSort') || 'explore';
+
+function setSort(s) {
+    SORT = s;
+    localStorage.setItem('triageSort', s);
+    loadQueue();
+}
+
+function renderSortToggle(applied) {
+    for (const s of ['explore', 'recent']) {
+        const b = document.getElementById('sort' + s[0].toUpperCase() + s.slice(1));
+        const on = applied === s;
+        b.className = 'px-2 py-1 rounded-lg ' + (on
+            ? 'bg-gray-200 dark:bg-gray-700 font-medium text-gray-900 dark:text-gray-100'
+            : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800');
+    }
+    const exp = document.getElementById('sortExplore');
+    const unavailable = SORT === 'explore' && applied !== 'explore';
+    exp.disabled = unavailable;
+    exp.title = unavailable
+        ? 'the recommendations sidecar carries no distance signal — run recommend.py to regenerate it'
+        : 'farthest-from-decided first: each decision populates the emptiest region of the item space';
+}
+
+async function loadQueue() {
+    try {
+        TRIAGE = await api(`/api/v1/triage?limit=200&sort=${SORT}`);
+        renderTriage();
+        renderSortToggle(TRIAGE.sort || 'recent');
+    } catch (error) {
+        showError('Failed to load triage queue: ' + error.message);
+    }
+}
+
 (async function init() {
     document.addEventListener('console:overview', async function(evt) {
         OVERVIEW = evt.detail;
         renderScopeOptions();
-        try {
-            TRIAGE = await api('/api/v1/triage?limit=200');
-            renderTriage();
-        } catch (error) {
-            showError('Failed to load triage queue: ' + error.message);
-        }
+        await loadQueue();
         loadEvalStrip();
         loadRelabelLog();
     }, { once: false });

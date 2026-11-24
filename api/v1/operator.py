@@ -187,13 +187,17 @@ def triage_queue():
     """List facts and entities currently labeled into a scope (RFC-015 §3.3).
 
     Defaults to the builtin Triage scope; `?scope=` may name any scope by
-    uuid, alias, or label. Items newest-first. `?account=` filters on the
-    RFC-012 attribution stamp (facts metadata.account / entities data.account).
+    uuid, alias, or label. Items newest-first, or `?sort=explore` orders
+    facts farthest-first by the decision model's `nn_dist` (cosine distance
+    to the nearest operator-decided anchor) so each decision populates the
+    least-covered region of the item space. Falls back to `recent` when the
+    sidecar predates the signal. `?account=` filters on the RFC-012
+    attribution stamp (facts metadata.account / entities data.account).
 
     Returns:
         200: {"scope": {...}, "facts": [...], "entities": [...],
-              "total_facts": n, "total_entities": n}
-        400: Unknown scope / bad limit
+              "total_facts": n, "total_entities": n, "sort": applied}
+        400: Unknown scope / bad limit / bad sort
     """
     _authenticate_jwt()
 
@@ -204,6 +208,12 @@ def triage_queue():
     account = request.args.get("account")
     raw_limit = request.args.get("limit", "200")
     raw_offset = request.args.get("offset", "0")
+    sort_mode = request.args.get("sort", "recent")
+    if sort_mode not in ("recent", "explore"):
+        raise ValidationError(
+            "sort must be 'recent' or 'explore'",
+            {"sort": sort_mode},
+        ) from None
     try:
         limit = max(1, min(int(raw_limit), 500))
         offset = max(0, int(raw_offset))
@@ -225,14 +235,44 @@ def triage_queue():
     # Canonical ordering: import batches land with near-identical realized_at
     # (the 2026-11 gmail/gcal backfills), which made the queue meaningless —
     # order by when the thing actually happened, falling back to import time.
+    # Explore sort (operator proposal 2026-11-24): nn_dist lives in the
+    # recommendations sidecar, not a column — rank ALL matching facts in
+    # Python farthest-first, then slice the window. SQL keeps canonical DESC
+    # so equal-distance items retain recency order (stable sort); rows with
+    # no sidecar entry (new mail, pulled parents) sort last.
+    recs_doc = _load_recs()
+    recs_by_uuid = recs_doc.get("recs", {})
+    applied_sort = sort_mode
+    if sort_mode == "explore" and not any(
+        "nn_dist" in v for v in list(recs_by_uuid.values())[:200]
+    ):
+        applied_sort = "recent"  # sidecar predates the exploration signal
+
     with get_soil() as soil:
         conn = soil._get_connection()
-        facts = conn.execute(
-            f"""SELECT uuid, _type, realized_at, canonical_at, data, metadata
-                FROM item WHERE {fact_where}
-                ORDER BY COALESCE(canonical_at, realized_at) DESC LIMIT ? OFFSET ?""",
-            (*fact_params, limit, offset),
-        ).fetchall()
+        if applied_sort == "explore":
+            rows = conn.execute(
+                f"""SELECT uuid, _type, realized_at, canonical_at, data, metadata
+                    FROM item WHERE {fact_where}
+                    ORDER BY COALESCE(canonical_at, realized_at) DESC""",
+                fact_params,
+            ).fetchall()
+
+            def _nn_key(row):
+                rec = recs_by_uuid.get(uid.add_soil_prefix(row["uuid"])) or {}
+                nd = rec.get("nn_dist")
+                return (nd is None,
+                        -(nd if isinstance(nd, (int, float)) else 0.0))
+
+            rows.sort(key=_nn_key)  # stable: ties keep canonical-DESC order
+            facts = rows[offset:offset + limit]
+        else:
+            facts = conn.execute(
+                f"""SELECT uuid, _type, realized_at, canonical_at, data, metadata
+                    FROM item WHERE {fact_where}
+                    ORDER BY COALESCE(canonical_at, realized_at) DESC LIMIT ? OFFSET ?""",
+                (*fact_params, limit, offset),
+            ).fetchall()
         total_facts = conn.execute(
             f"SELECT COUNT(*) AS n FROM item WHERE {fact_where}", fact_params
         ).fetchone()["n"]
@@ -510,8 +550,7 @@ def triage_queue():
 
     # Attach decision-model recommendations (badge + one-tap apply in the
     # console). Pulled-in parents are included — they are decisions too.
-    recs_doc = _load_recs()
-    recs_by_uuid = recs_doc.get("recs", {})
+    # recs_doc/recs_by_uuid were loaded before the fact query (explore rank).
     for f in facts_payload:
         rec = recs_by_uuid.get(f["uuid"])
         if rec:
@@ -527,6 +566,7 @@ def triage_queue():
         "entities": entities_payload,
         "total_facts": total_facts,
         "total_entities": total_entities,
+        "sort": applied_sort,
         "containment": {
             "child_parent": child_parent,
             "parent_stubs": parent_stubs,
