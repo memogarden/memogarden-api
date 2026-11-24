@@ -1045,12 +1045,17 @@ def items_search():
                 mode = "semantic"
                 ordered = hits
                 if rerank_req:
-                    scored = daemon_rerank(
-                        q, [u for u, _ in hits[:_RERANK_CANDIDATES]])
+                    head = hits[:_RERANK_CANDIDATES]
+                    scored = daemon_rerank(q, [u for u, _ in head])
                     if scored:
+                        head_set = {u for u, _ in head}
                         ordered = (
-                            [(u, round(s, 4)) for u, s in
-                             sorted(scored.items(), key=lambda kv: -kv[1])]
+                            [(u, round(scored[u], 4)) for u, _ in
+                             sorted(
+                                 ((u, sc) for u, sc in scored.items()
+                                  if u in head_set),
+                                 key=lambda kv: -kv[1])]
+                            + [hp for hp in head if hp[0] not in scored]
                             + hits[_RERANK_CANDIDATES:])
                         mode = "semantic+rerank"
                 page = ordered[offset:offset + limit] if offset else ordered[:limit]
@@ -1086,12 +1091,17 @@ def items_search():
                         rrf[u] = rrf.get(u, 0.0) + 1.0 / (_RRF_K + rank + 1)
                 fused = sorted(rrf.items(), key=lambda kv: -kv[1])
                 if rerank_req:
-                    scored = daemon_rerank(
-                        q, [u for u, _ in fused[:_RERANK_CANDIDATES]])
+                    head = fused[:_RERANK_CANDIDATES]
+                    scored = daemon_rerank(q, [u for u, _ in head])
                     if scored:
+                        head_set = {u for u, _ in head}
                         fused = (
-                            [(u, round(s, 4)) for u, s in
-                             sorted(scored.items(), key=lambda kv: -kv[1])]
+                            [(u, round(scored[u], 4)) for u, _ in
+                             sorted(
+                                 ((u, sc) for u, sc in scored.items()
+                                  if u in head_set),
+                                 key=lambda kv: -kv[1])]
+                            + [hp for hp in head if hp[0] not in scored]
                             + fused[_RERANK_CANDIDATES:])
                         mode = "hybrid+rerank"
                 results = _uuid_scores([(u, round(s, 4)) for u, s in fused])
@@ -1103,8 +1113,23 @@ def items_search():
                     results.append(row)
             elif sem_hits is not None:
                 mode = "semantic"
+                ordered = sem_hits
+                if rerank_req:
+                    head = sem_hits[:_RERANK_CANDIDATES]
+                    scored = daemon_rerank(q, [u for u, _ in head])
+                    if scored:
+                        head_set = {u for u, _ in head}
+                        ordered = (
+                            [(u, round(scored[u], 4)) for u, _ in
+                             sorted(
+                                 ((u, sc) for u, sc in scored.items()
+                                  if u in head_set),
+                                 key=lambda kv: -kv[1])]
+                            + [hp for hp in head if hp[0] not in scored]
+                            + sem_hits[_RERANK_CANDIDATES:])
+                        mode = "semantic+rerank"
                 results = _uuid_scores(
-                    [(u, s) for u, s in sem_hits[:limit]])
+                    [(u, s) for u, s in ordered[:limit]])
             else:
                 mode = "keyword_fallback"
                 results = _recency_or_like(with_like=True)

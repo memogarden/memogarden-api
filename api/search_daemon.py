@@ -92,7 +92,7 @@ def search(q: str, scopes=None, types=None, k: int = 50):
     return None
 
 
-def rerank_scores(q: str, uuids: list, timeout: int = 15):
+def rerank_scores(q: str, uuids: list, timeout: int = 5):
     """Cross-encoder scores for already-recalled candidates (api#95 final).
 
     Scoring-only op by contract: `uuids` arrive visibility-filtered from

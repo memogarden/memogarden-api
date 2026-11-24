@@ -364,6 +364,25 @@ def test_items_search_hybrid_rerank_reorders(client, auth_headers,
     assert body["results"][0]["score"] == pytest.approx(7.0)
 
 
+def test_items_search_semantic_rerank_reorders(client, auth_headers,
+                                               fake_daemon_factory):
+    """semantic mode + ?rerank=1: daemon cosine order is replaced by the
+    cross-encoder's, badge gains the marker."""
+    a = _triage_fact_at("alpha ledger note", "open", isodatetime.now())
+    b = _triage_fact_at("beta ledger note", "open", isodatetime.now())
+    fake_daemon_factory([[a, 0.9], [b, 0.5]],
+                        rerank_results=[[b, 6.0], [a, -0.5]])
+    resp = client.get(
+        "/api/v1/items/search?q=ledger&mode=semantic&rerank=1",
+        headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["mode"] == "semantic+rerank"
+    uuids = [r["uuid"] for r in body["results"]]
+    assert uuids == [uid.add_soil_prefix(b), uid.add_soil_prefix(a)]
+    assert body["results"][0]["score"] == pytest.approx(6.0)
+
+
 def _triage_fact_at(title: str, triage: str, canonical_at: str) -> str:
     """Triage fact with a pinned canonical time so recent order is known."""
     with get_soil() as soil:

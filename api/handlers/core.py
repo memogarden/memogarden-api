@@ -1294,9 +1294,10 @@ def _rerank_order(query, rows, scores, limit):
     Runs AFTER the boundary visibility check — only already-visible rows
     reach the daemon. Returns (rows, scores, reranked): the top
     _RERANK_CANDIDATES get daemon rerank logits as their scores and the
-    new order; the tail keeps the incoming order untouched. Any daemon
-    trouble degrades silently to (input, input, False) — rerank must
-    never turn a working search into a failed one.
+    new order; candidates the daemon couldn't score keep their incoming
+    order right behind the reranked ones, then the untouched tail. Any
+    daemon trouble degrades silently to (input, input, False) — rerank
+    must never turn a working search into a failed one.
     """
     top = rows[:_RERANK_CANDIDATES]
     ordered = daemon_rerank(query, [r["uuid"] for r in top])
@@ -1305,8 +1306,11 @@ def _rerank_order(query, rows, scores, limit):
     by_uuid = {r["uuid"]: r for r in top}
     ranked = [u for u, _ in sorted(ordered.items(), key=lambda kv: -kv[1])
               if u in by_uuid]
+    unscored = [r["uuid"] for r in top if r["uuid"] not in ordered]
     new_scores = {**scores, **{u: round(s, 4) for u, s in ordered.items()}}
-    new_rows = [by_uuid[u] for u in ranked] + rows[_RERANK_CANDIDATES:]
+    new_rows = ([by_uuid[u] for u in ranked]
+                + [by_uuid[u] for u in unscored]
+                + rows[_RERANK_CANDIDATES:])
     return new_rows[:limit], new_scores, True
 
 
@@ -1522,8 +1526,12 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
                         item_rows = lex_rows[:request.limit]
                     elif sem is not None:
                         strategy_used = "semantic"
-                        item_rows = sem[0][:request.limit]
-                        scores = sem[1]
+                        if request.rerank:
+                            item_rows, scores, reranked = _rerank_order(
+                                request.query, sem[0], sem[1], request.limit)
+                        else:
+                            item_rows = sem[0][:request.limit]
+                            scores = sem[1]
                     else:
                         strategy_used = "fuzzy"
                         item_rows = soil.search_items(

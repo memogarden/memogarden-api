@@ -589,6 +589,40 @@ class TestSemanticHybridStrategies:
         assert [f["uuid"] for f in facts] == [
             uid.add_soil_prefix(a), uid.add_soil_prefix(b)]
 
+    def test_semantic_rerank_degrades_when_socket_dead(
+            self, client, auth_headers, monkeypatch, tmp_path):
+        """Dead socket (not just an empty answer) degrades too — and the
+        rerank client never spawns a daemon (no model layer configured,
+        the spawn would fail; the point is rerank returns None without
+        burning a deadline and the search itself succeeds unreranked)."""
+        a = self._note("alpha ledger", "aaa")
+        monkeypatch.setenv("MEMOGARDEN_EMBED_SOCK",
+                           str(tmp_path / "none.sock"))
+        monkeypatch.setenv("MEMOGARDEN_TRIAGE_MODEL_DIR", str(tmp_path))
+        resp = self._search(client, auth_headers, rerank=True)
+        assert resp.status_code == 200
+        result = resp.get_json()["result"]
+        assert result["strategy"] == "fuzzy"     # whole daemon absent
+        assert result["reranked"] is False
+
+    def test_rerank_keeps_unscored_candidates(
+            self, client, auth_headers, fake_daemon_factory):
+        """Partial rerank answers keep unscored head candidates in their
+        incoming order — they must not vanish from the response."""
+        a = self._note("alpha ledger", "aaa")
+        b = self._note("beta ledger", "bbb")
+        fake_daemon_factory([[a, 0.9], [b, 0.5]],
+                            rerank_results=[[b, 8.0]])   # `a` unscored
+        resp = self._search(client, auth_headers, rerank=True)
+        assert resp.status_code == 200
+        result = resp.get_json()["result"]
+        assert result["reranked"] is True
+        facts = [r for r in result["results"] if r.get("kind") == "fact"]
+        assert [f["uuid"] for f in facts] == [
+            uid.add_soil_prefix(b), uid.add_soil_prefix(a)]
+        assert facts[0]["score"] == pytest.approx(8.0)
+        assert facts[1]["score"] == pytest.approx(0.9)   # incoming cosine
+
     def test_rerank_never_resurfaces_invisible_rows(
             self, client, auth_headers, fake_daemon_factory):
         """Boundary visibility runs BEFORE rerank: a daemon hit dropped
