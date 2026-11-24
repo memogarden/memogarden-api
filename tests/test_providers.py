@@ -272,6 +272,22 @@ class TestRuns:
         response = client.post("/api/v1/providers/nope/run", headers=auth_headers)
         assert response.status_code == 404
 
+    def test_run_pings_embed_daemon(self, client, auth_headers, dummy_module,
+                                    ping_server):
+        """Completed run wakes the semantic index (embed-on-ingest ping).
+
+        The ping lands on the run thread just after finish_run, so the
+        test polls the recording server rather than the manifest (no
+        race). See tests/test_provider_embed_ping.py for the ping
+        contract itself.
+        """
+        _register(client, auth_headers, _payload(dummy_module))
+        response = client.post(
+            "/api/v1/providers/testprov/run", headers=auth_headers
+        )
+        assert response.status_code == 202
+        assert json.loads(ping_server.wait_for_ping()) == {"op": "ping"}
+
     def test_run_single_flight_conflict(self, client, auth_headers, slow_module):
         _register(client, auth_headers, _payload(slow_module, **{"class": "SlowProvider"}))
         first = client.post("/api/v1/providers/testprov/run", headers=auth_headers)

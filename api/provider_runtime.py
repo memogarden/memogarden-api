@@ -27,6 +27,7 @@ Execution model:
 
 import json
 import logging
+import socket
 import threading
 from contextlib import ExitStack
 
@@ -36,6 +37,7 @@ from system.soil import Fact, generate_soil_uuid, get_soil
 from utils import isodatetime, uid
 
 from . import provider_registry
+from .search_daemon import _embed_sock
 from .series import series_key, series_members
 from .provider_registry import (
     accepts_account_cls,
@@ -241,6 +243,31 @@ def verify_account(name: str, account_id: str) -> dict:
     return provider_registry.mark_account_verified(name, account_id, ok, error)
 
 
+def _ping_embed_daemon() -> None:
+    """Fire-and-forget wake for the semantic-search index (api#95 phase 2).
+
+    After a provider run lands facts, a one-shot connect to the embed
+    daemon's socket makes systemd activate (or keep alive) the daemon,
+    whose startup catches the change_log up into the vector index — index
+    freshness tracks ingestion (≤1h via the heartbeat) instead of waiting
+    for the next query's cold start. Failures are swallowed by design:
+    the daemon may not be installed (memogarden-search is optional), the
+    socket may be stale, the daemon may be busy — search quality must
+    never depend on a best-effort ping. Socket path resolution is
+    search_daemon's (MEMOGARDEN_EMBED_SOCK override, same default).
+    """
+    sock_path = _embed_sock()
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(2)
+            sock.connect(str(sock_path))
+            sock.sendall(b'{"op":"ping"}')
+            sock.recv(256)  # drain the {"ok": true} reply; daemon closes next
+        logger.debug("Embed daemon pinged via %s", sock_path)
+    except Exception as e:  # noqa: BLE001 — best-effort by contract
+        logger.debug("Embed daemon ping skipped (%s): %s", sock_path, e)
+
+
 def _execute_run(
     run_id: str,
     name: str,
@@ -406,6 +433,11 @@ def _execute_run(
                        account_id=account["id"] if account else "")
         except Exception:  # noqa: BLE001 — bookkeeping must never mask the original error
             logger.exception("Failed to record run outcome: %s run_id=%s", name, run_id)
+    # Both completion paths land here — a failed run may still have
+    # committed facts per-fact before crashing, so the wake (and the
+    # catch-up it triggers) is not success-gated. Fire-and-forget:
+    # never raises, at most 2s of the run thread's tail.
+    _ping_embed_daemon()
 
 
 def _to_fact(yielded) -> Fact:

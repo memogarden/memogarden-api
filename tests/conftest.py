@@ -27,6 +27,14 @@ import pytest
 os.environ["DATABASE_PATH"] = ":memory:"
 os.environ["JWT_SECRET_KEY"] = "test-secret-key"
 os.environ["BYPASS_LOCALHOST_CHECK"] = "true"
+# Provider-run tests must not wake a real embed daemon installed at the
+# default socket path (best-effort ping would cold-start torch for
+# nothing) — point the runtime ping at a socket that does not exist;
+# ping-specific tests and fake_daemon_factory override this per-test.
+os.environ.setdefault(
+    "MEMOGARDEN_EMBED_SOCK",
+    str(Path(tempfile.gettempdir()) / "memogarden-tests-no-embed-daemon" / "embed.sock"),
+)
 
 # Import isodatetime for test fixtures (must be after env vars are set)
 from utils import isodatetime  # noqa: E402
@@ -637,6 +645,7 @@ def sample_entity(core):
 import json as _json  # noqa: E402
 import socket as _socket  # noqa: E402
 import threading as _threading  # noqa: E402
+import time as _time  # noqa: E402
 
 
 @pytest.fixture
@@ -680,3 +689,63 @@ def fake_daemon_factory(monkeypatch, tmp_path):
     yield _factory
     for s in started:
         s.close()
+
+
+class RecordingPingServer:
+    """Minimal embed-daemon stand-in that records request payloads.
+
+    Companion to fake_daemon_factory for the embed-on-ingest ping: it
+    records raw request bytes (the ping contract is the payload, not the
+    reply), answers {"ok": true} like the real daemon does for a ping,
+    and closes — the client drains one recv and moves on.
+    """
+
+    def __init__(self, sock_path):
+        self.payloads = []
+        self._lock = _threading.Lock()
+        self._srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        self._srv.bind(str(sock_path))
+        self._srv.listen(4)
+        self._thread = _threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self._srv.accept()
+            except OSError:
+                return
+            try:
+                req = conn.recv(1 << 20)
+                with self._lock:
+                    self.payloads.append(req)
+                conn.sendall(_json.dumps({"ok": True}).encode())
+            finally:
+                conn.close()
+
+    def wait_for_ping(self, timeout=5.0):
+        """Block until a request arrives (poll — the ping fires on the
+        run thread just after finish_run, later than the run manifest
+        flips to a terminal status)."""
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            with self._lock:
+                if self.payloads:
+                    return self.payloads[0]
+            _time.sleep(0.02)
+        raise AssertionError(f"no ping arrived within {timeout}s")
+
+    def close(self):
+        self._srv.close()
+
+
+@pytest.fixture
+def ping_server(tmp_path, monkeypatch):
+    """RecordingPingServer wired to MEMOGARDEN_EMBED_SOCK."""
+    import uuid
+
+    sock_path = tmp_path / f"ping-{uuid.uuid4().hex[:8]}.sock"
+    monkeypatch.setenv("MEMOGARDEN_EMBED_SOCK", str(sock_path))
+    server = RecordingPingServer(sock_path)
+    yield server
+    server.close()
