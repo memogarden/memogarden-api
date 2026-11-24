@@ -458,6 +458,20 @@ class SearchRequest(SemanticRequest):
             "response 'strategy' echoes what actually ran."
         ),
     )
+    rerank: bool = Field(
+        default=False,
+        description=(
+            "Cross-encoder rerank of the top candidates (api#95 final "
+            "slice): the daemon scores (query, best-chunk) pairs with an "
+            "int8 bge-reranker and the final order comes from those "
+            "logits. Applies to 'semantic' and 'hybrid' fact results "
+            "only; the scope boundary re-check runs BEFORE rerank, so "
+            "reranking never resurfaces invisible rows. Silently skipped "
+            "when the daemon can't score (response 'reranked' reports "
+            "whether it happened). Default flips to true for 'hybrid' "
+            "once the golden-set replay proves the gain."
+        ),
+    )
     continuation_token: str | None = Field(
         default=None,
         description="Pagination continuation token from previous search"

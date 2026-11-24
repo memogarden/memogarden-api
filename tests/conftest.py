@@ -656,14 +656,22 @@ def fake_daemon_factory(monkeypatch, tmp_path):
     "search"} -> {"results": [...]}) over a unix socket, points the
     search_daemon client env at it, and never spawns real torch. The
     factory takes the results list to serve; responses are stateless.
+    `rerank_results` (optional) answers the rerank op — pass [] or a
+    pair list to exercise rerank composition; None makes rerank requests
+    fall back to the search payload (pre-rerank daemon behavior). Every
+    request is recorded in `fake_daemon_factory.seen_requests` so tests
+    can assert what the api actually sent (e.g. boundary-filtered uuids
+    never reaching the model layer).
     """
     started = []
 
-    def _factory(results):
+    def _factory(results, rerank_results=None):
         sock_path = tmp_path / f"fake-embed-{len(started)}.sock"
         srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
         srv.bind(str(sock_path))
         srv.listen(4)
+        seen = []
+        _factory.seen_requests = seen
 
         def _serve():
             while True:
@@ -675,8 +683,12 @@ def fake_daemon_factory(monkeypatch, tmp_path):
                 # responds without waiting for EOF — recv-until-EOF would
                 # deadlock against the client's open read
                 req = _json.loads(conn.recv(1 << 22).decode())
-                conn.sendall(
-                    _json.dumps({"results": results}).encode())
+                seen.append(req)
+                if req.get("op") == "rerank" and rerank_results is not None:
+                    out = {"results": rerank_results}
+                else:
+                    out = {"results": results}
+                conn.sendall(_json.dumps(out).encode())
                 conn.close()
 
         t = _threading.Thread(target=_serve, daemon=True)

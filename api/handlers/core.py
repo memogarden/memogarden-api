@@ -26,6 +26,7 @@ from system.exceptions import PermissionDenied, ResourceNotFound, ValidationErro
 from utils import uid
 
 from ..search_daemon import search as daemon_search
+from ..search_daemon import rerank_scores as daemon_rerank
 
 from ..middleware.scope_access import (
     active_scope_for,
@@ -1284,6 +1285,33 @@ def handle_focus(request: FocusRequest, actor: str) -> dict:
 # enough that fusion is meaningful even at small request limits.
 _RRF_K = 60
 _SEM_FETCH_FLOOR = 50
+_RERANK_CANDIDATES = 30   # cross-encoder pair budget (~1s CPU int8)
+
+
+def _rerank_order(query, rows, scores, limit):
+    """Cross-encoder reorder of the top candidates (api#95 final slice).
+
+    Runs AFTER the boundary visibility check — only already-visible rows
+    reach the daemon. Returns (rows, scores, reranked): the top
+    _RERANK_CANDIDATES get daemon rerank logits as their scores and the
+    new order; candidates the daemon couldn't score keep their incoming
+    order right behind the reranked ones, then the untouched tail. Any
+    daemon trouble degrades silently to (input, input, False) — rerank
+    must never turn a working search into a failed one.
+    """
+    top = rows[:_RERANK_CANDIDATES]
+    ordered = daemon_rerank(query, [r["uuid"] for r in top])
+    if not ordered:
+        return rows[:limit], scores, False
+    by_uuid = {r["uuid"]: r for r in top}
+    ranked = [u for u, _ in sorted(ordered.items(), key=lambda kv: -kv[1])
+              if u in by_uuid]
+    unscored = [r["uuid"] for r in top if r["uuid"] not in ordered]
+    new_scores = {**scores, **{u: round(s, 4) for u, s in ordered.items()}}
+    new_rows = ([by_uuid[u] for u in ranked]
+                + [by_uuid[u] for u in unscored]
+                + rows[_RERANK_CANDIDATES:])
+    return new_rows[:limit], new_scores, True
 
 
 def _visible_rows(conn, uuids, allowed_scopes, scope_uuid):
@@ -1404,6 +1432,7 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
     # branch below when a plane is unavailable — the response always
     # reports what actually ran, never what was requested.
     strategy_used = request.strategy
+    reranked = False
 
     # Collect results based on target_type
     results = []
@@ -1464,8 +1493,12 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
                             scope_uuid=scope_uuid,
                         )
                     else:
-                        item_rows = sem[0][:request.limit]
-                        scores = sem[1]
+                        if request.rerank:
+                            item_rows, scores, reranked = _rerank_order(
+                                request.query, sem[0], sem[1], request.limit)
+                        else:
+                            item_rows = sem[0][:request.limit]
+                            scores = sem[1]
                 else:  # hybrid — fuse whichever planes answered
                     if lex_rows is not None and sem is not None:
                         strategy_used = "hybrid"
@@ -1480,16 +1513,25 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
                                    for r in list(lex_rows) + list(sem[0])}
                         order = [u for u, _ in
                                  sorted(rrf.items(), key=lambda kv: -kv[1])]
-                        item_rows = [rows_by[u] for u in order
-                                     if u in rows_by][:request.limit]
+                        rows_ordered = [rows_by[u] for u in order
+                                        if u in rows_by]
+                        item_rows = rows_ordered[:request.limit]
                         scores = {u: round(rrf[u], 4) for u in order}
+                        if request.rerank:
+                            item_rows, scores, reranked = _rerank_order(
+                                request.query, rows_ordered, scores,
+                                request.limit)
                     elif lex_rows is not None:
                         strategy_used = "lexical"
                         item_rows = lex_rows[:request.limit]
                     elif sem is not None:
                         strategy_used = "semantic"
-                        item_rows = sem[0][:request.limit]
-                        scores = sem[1]
+                        if request.rerank:
+                            item_rows, scores, reranked = _rerank_order(
+                                request.query, sem[0], sem[1], request.limit)
+                        else:
+                            item_rows = sem[0][:request.limit]
+                            scores = sem[1]
                     else:
                         strategy_used = "fuzzy"
                         item_rows = soil.search_items(
@@ -1589,4 +1631,5 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
         "strategy": strategy_used,
         "coverage": request.coverage,
         "effort": effort_used,
+        "reranked": reranked,
     }

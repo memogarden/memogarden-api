@@ -531,3 +531,142 @@ class TestSemanticHybridStrategies:
         )
         # the Semantic API layer answers schema violations with 400
         assert resp.status_code == 400
+
+    def _search(self, client, auth_headers, **over):
+        payload = {"op": "search", "query": "ledger", "strategy": "semantic",
+                   "target_type": "fact", "limit": 10}
+        payload.update(over)
+        return client.post("/mg", json=payload, headers=auth_headers)
+
+    def test_semantic_rerank_reorders_and_flags(
+            self, client, auth_headers, fake_daemon_factory):
+        """rerank=true: the daemon's cross-encoder order wins and the
+        response flags that reranking ran."""
+        a = self._note("alpha ledger", "aaa")
+        b = self._note("beta ledger", "bbb")
+        fake_daemon_factory([[a, 0.9], [b, 0.5]],
+                            rerank_results=[[b, 8.0], [a, -1.2]])
+        resp = self._search(client, auth_headers, rerank=True)
+        assert resp.status_code == 200
+        result = resp.get_json()["result"]
+        assert result["strategy"] == "semantic"
+        assert result["reranked"] is True
+        facts = [r for r in result["results"] if r.get("kind") == "fact"]
+        assert [f["uuid"] for f in facts] == [
+            uid.add_soil_prefix(b), uid.add_soil_prefix(a)]
+        assert facts[0]["score"] == pytest.approx(8.0)
+
+    def test_rerank_off_by_default(self, client, auth_headers,
+                                   fake_daemon_factory):
+        """No rerank param: cosine order and scores pass through, and no
+        rerank request reaches the daemon."""
+        a = self._note("alpha ledger", "aaa")
+        b = self._note("beta ledger", "bbb")
+        fake_daemon_factory([[a, 0.9], [b, 0.5]],
+                            rerank_results=[[b, 8.0], [a, -1.2]])
+        resp = self._search(client, auth_headers)
+        result = resp.get_json()["result"]
+        assert result["reranked"] is False
+        facts = [r for r in result["results"] if r.get("kind") == "fact"]
+        assert [f["uuid"] for f in facts] == [
+            uid.add_soil_prefix(a), uid.add_soil_prefix(b)]
+        assert facts[0]["score"] == pytest.approx(0.9)
+        assert not [r for r in fake_daemon_factory.seen_requests
+                    if r.get("op") == "rerank"]
+
+    def test_semantic_rerank_degrades_silently(
+            self, client, auth_headers, fake_daemon_factory):
+        """Daemon can't score (empty rerank results) → unreranked order,
+        reranked=False, still a 200."""
+        a = self._note("alpha ledger", "aaa")
+        b = self._note("beta ledger", "bbb")
+        fake_daemon_factory([[a, 0.9], [b, 0.5]], rerank_results=[])
+        resp = self._search(client, auth_headers, rerank=True)
+        assert resp.status_code == 200
+        result = resp.get_json()["result"]
+        assert result["reranked"] is False
+        facts = [r for r in result["results"] if r.get("kind") == "fact"]
+        assert [f["uuid"] for f in facts] == [
+            uid.add_soil_prefix(a), uid.add_soil_prefix(b)]
+
+    def test_semantic_rerank_degrades_when_socket_dead(
+            self, client, auth_headers, monkeypatch, tmp_path):
+        """Dead socket (not just an empty answer) degrades too — and the
+        rerank client never spawns a daemon (no model layer configured,
+        the spawn would fail; the point is rerank returns None without
+        burning a deadline and the search itself succeeds unreranked)."""
+        a = self._note("alpha ledger", "aaa")
+        monkeypatch.setenv("MEMOGARDEN_EMBED_SOCK",
+                           str(tmp_path / "none.sock"))
+        monkeypatch.setenv("MEMOGARDEN_TRIAGE_MODEL_DIR", str(tmp_path))
+        resp = self._search(client, auth_headers, rerank=True)
+        assert resp.status_code == 200
+        result = resp.get_json()["result"]
+        assert result["strategy"] == "fuzzy"     # whole daemon absent
+        assert result["reranked"] is False
+
+    def test_rerank_keeps_unscored_candidates(
+            self, client, auth_headers, fake_daemon_factory):
+        """Partial rerank answers keep unscored head candidates in their
+        incoming order — they must not vanish from the response."""
+        a = self._note("alpha ledger", "aaa")
+        b = self._note("beta ledger", "bbb")
+        fake_daemon_factory([[a, 0.9], [b, 0.5]],
+                            rerank_results=[[b, 8.0]])   # `a` unscored
+        resp = self._search(client, auth_headers, rerank=True)
+        assert resp.status_code == 200
+        result = resp.get_json()["result"]
+        assert result["reranked"] is True
+        facts = [r for r in result["results"] if r.get("kind") == "fact"]
+        assert [f["uuid"] for f in facts] == [
+            uid.add_soil_prefix(b), uid.add_soil_prefix(a)]
+        assert facts[0]["score"] == pytest.approx(8.0)
+        assert facts[1]["score"] == pytest.approx(0.9)   # incoming cosine
+
+    def test_rerank_never_resurfaces_invisible_rows(
+            self, client, auth_headers, fake_daemon_factory):
+        """Boundary visibility runs BEFORE rerank: a daemon hit dropped
+        by the scope re-check must not even reach the rerank op."""
+        with get_core() as c:
+            s_uuid = c.entity.create(
+                entity_type="Scope",
+                data={"label": "Household", "active_participants": [],
+                      "artifact_uuids": []},
+            )
+            c._conn.commit()
+        in_scope = self._note("scoped ledger", "private note",
+                              scopes=[s_uuid])
+        unscoped = self._note("open ledger", "public note")
+        fake_daemon_factory([[unscoped, 0.9], [in_scope, 0.8]],
+                            rerank_results=[[unscoped, 99.0],
+                                            [in_scope, 1.0]])
+        resp = self._search(client, auth_headers, rerank=True, scope=s_uuid)
+        assert resp.status_code == 200
+        result = resp.get_json()["result"]
+        uuids = [r["uuid"] for r in result["results"]
+                 if r.get("kind") == "fact"]
+        assert uuids == [uid.add_soil_prefix(in_scope)]
+        rerank_reqs = [r for r in fake_daemon_factory.seen_requests
+                       if r.get("op") == "rerank"]
+        assert rerank_reqs, "rerank op should have been called"
+        assert unscoped not in rerank_reqs[0]["uuids"], \
+            "boundary-dropped uuid reached the model layer"
+
+    def test_hybrid_rerank_reorders_fused(
+            self, client, auth_headers, fake_daemon_factory):
+        """hybrid+rerank: RRF fuses both channels, then the cross-encoder
+        reorders the fused top candidates."""
+        lex_u = self._note("zephyr manifest", "cargo list zephyr winds")
+        sem_u = self._note("sailplane ledger", "fiberglass wing patch")
+        fake_daemon_factory([[sem_u, 0.79]],
+                            rerank_results=[[lex_u, 3.0], [sem_u, 2.0]])
+        resp = self._search(client, auth_headers, query="zephyr",
+                            strategy="hybrid", rerank=True)
+        assert resp.status_code == 200
+        result = resp.get_json()["result"]
+        assert result["strategy"] == "hybrid"
+        assert result["reranked"] is True
+        facts = [r for r in result["results"] if r.get("kind") == "fact"]
+        assert [f["uuid"] for f in facts][:2] == [
+            uid.add_soil_prefix(lex_u), uid.add_soil_prefix(sem_u)]
+        assert facts[0]["score"] == pytest.approx(3.0)

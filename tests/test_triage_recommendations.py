@@ -328,6 +328,61 @@ def test_items_search_unknown_mode_rejected(client, auth_headers):
     assert resp.status_code == 400
 
 
+def test_items_search_hybrid_rerank_reorders(client, auth_headers,
+                                             fake_daemon_factory):
+    """?rerank=1 on the default hybrid mode: the fused candidates get
+    cross-encoder scores and the badge gains the +rerank marker."""
+    with get_soil() as soil:
+        lex_uuid = soil.create_fact(Fact(
+            uuid=generate_soil_uuid(),
+            _type="Note",
+            realized_at=isodatetime.now(),
+            canonical_at=isodatetime.now(),
+            data={"title": "zephyr glider notes",
+                  "description": "zephyr winds and launch checklist",
+                  "summary": None},
+            metadata=None, integrity_hash=None, fidelity="full"))
+        sem_uuid = soil.create_fact(Fact(
+            uuid=generate_soil_uuid(),
+            _type="Note",
+            realized_at=isodatetime.now(),
+            canonical_at=isodatetime.now(),
+            data={"title": "sailplane wing repair",
+                  "description": "fiberglass patch on the outer wing",
+                  "summary": None},
+            metadata=None, integrity_hash=None, fidelity="full"))
+    fake_daemon_factory([[sem_uuid, 0.81]],
+                        rerank_results=[[sem_uuid, 7.0], [lex_uuid, 0.5]])
+    resp = client.get("/api/v1/items/search?q=zephyr&rerank=1",
+                      headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["mode"] == "hybrid+rerank"
+    uuids = [r["uuid"] for r in body["results"]]
+    assert uuids[:2] == [uid.add_soil_prefix(sem_uuid),
+                         uid.add_soil_prefix(lex_uuid)]
+    assert body["results"][0]["score"] == pytest.approx(7.0)
+
+
+def test_items_search_semantic_rerank_reorders(client, auth_headers,
+                                               fake_daemon_factory):
+    """semantic mode + ?rerank=1: daemon cosine order is replaced by the
+    cross-encoder's, badge gains the marker."""
+    a = _triage_fact_at("alpha ledger note", "open", isodatetime.now())
+    b = _triage_fact_at("beta ledger note", "open", isodatetime.now())
+    fake_daemon_factory([[a, 0.9], [b, 0.5]],
+                        rerank_results=[[b, 6.0], [a, -0.5]])
+    resp = client.get(
+        "/api/v1/items/search?q=ledger&mode=semantic&rerank=1",
+        headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["mode"] == "semantic+rerank"
+    uuids = [r["uuid"] for r in body["results"]]
+    assert uuids == [uid.add_soil_prefix(b), uid.add_soil_prefix(a)]
+    assert body["results"][0]["score"] == pytest.approx(6.0)
+
+
 def _triage_fact_at(title: str, triage: str, canonical_at: str) -> str:
     """Triage fact with a pinned canonical time so recent order is known."""
     with get_soil() as soil:
