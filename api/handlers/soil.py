@@ -30,6 +30,7 @@ from ..schemas.semantic import (
 from ..events import publish_message_sent
 from ..middleware.scope_access import (
     active_scope_for,
+    derived_scopes_for_requester,
     enforcement_enabled,
     filter_visible,
     item_visible,
@@ -170,12 +171,12 @@ def handle_add(request: AddRequest, actor: str) -> dict:
         if canonical_at is None:
             canonical_at = now
 
-        # RFC-011 §4.6: scope applied at creation. Explicit caller-supplied
-        # labels require the requester to hold grants for them (operator
-        # JWT bypasses — SG-11) — grant-gated only under enforcement
-        # (§8 advisory mode: flag off, nothing is checked). Otherwise the
-        # creator's active scope is inherited — ALWAYS, advisory included,
-        # so the labeling corpus is correct before the flag flips.
+        # RFC-011 §4.6: scope applied at creation — first rule that applies
+        # wins: explicit labels, then the derived source (SG-9), then the
+        # creator's active scope. Explicit caller-supplied labels require
+        # the requester to hold grants for them (operator JWT bypasses —
+        # SG-11) — grant-gated only under enforcement (§8 advisory mode:
+        # flag off, nothing is checked).
         metadata = dict(request.metadata) if request.metadata else {}
         explicit_scopes = metadata.get("scopes")
         if explicit_scopes:
@@ -186,11 +187,20 @@ def handle_add(request: AddRequest, actor: str) -> dict:
                     require_scope_grant(uid.strip_prefix(s) if isinstance(s, str) else s)
             metadata["scopes"] = normalize_scopes(explicit_scopes)
         else:
-            # Inheritance runs advisory too: items created inside a scope
-            # are labeled before the flag flips (no silently-global corpus).
-            active_scope = active_scope_for(actor)
-            if active_scope:
-                metadata["scopes"] = [active_scope]
+            # SG-9: a fact derived from a source item inherits that source's
+            # current labels, so extracted text can never be more visible
+            # than the document it came from. Runs in advisory mode too;
+            # returns [] when the switch is off or nothing survives.
+            inherited = derived_scopes_for_requester(
+                soil, metadata.get("derived_from"))
+            if inherited:
+                metadata["scopes"] = inherited
+            else:
+                # Items created inside a scope are labeled before the flag
+                # flips (no silently-global corpus) — advisory included.
+                active_scope = active_scope_for(actor)
+                if active_scope:
+                    metadata["scopes"] = [active_scope]
 
         # Create Fact
         item = Fact(
@@ -226,6 +236,11 @@ def handle_add(request: AddRequest, actor: str) -> dict:
                 content=content,
                 fragments=fragments,
                 scope_uuid=scope_uuid,
+                # RFC-011 §4.9(5): the payload carries the whole message —
+                # judged on the labels just written, not a re-read (the
+                # fact's own transaction may still be open here).
+                item_labels={
+                    uid.add_soil_prefix(item_uuid): list(metadata.get("scopes") or [])},
             )
 
         return _fact_to_response(item)

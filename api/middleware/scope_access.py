@@ -16,16 +16,26 @@ Model (RFC-011 §4.5):
 
 Enforcement activates via MEMOGARDEN_SCOPE_ENFORCEMENT (default off,
 RFC-011 §8 rollout: provision grants first, then flip).
+
+Labeling at creation (RFC-011 §4.6) lives here too, and is deliberately
+NOT gated on that flag — labels have to be right before enforcement turns
+on. SG-9: a fact derived from a source item (metadata.derived_from)
+inherits that source's current scope labels, so text extracted from a
+scoped document never becomes a plaintext side-channel around the model.
+MEMOGARDEN_DERIVE_INHERIT_SCOPE=off is the operator's escape hatch.
 """
 
+import json
 import os
 
 from flask import g
 
-from system.exceptions import PermissionDenied
+from system.exceptions import PermissionDenied, ResourceNotFound
+from system.soil import resolve_live
 from utils import isodatetime, uid
 
 _TRUTHY = {"1", "true", "yes", "on"}
+_DERIVE_INHERIT_OFF = {"0", "false", "no", "off"}
 
 
 def enforcement_enabled() -> bool:
@@ -165,3 +175,170 @@ def filter_visible(items: list, actor: str, get_scopes) -> list:
         item for item in items
         if item_visible(get_scopes(item), active_scope, public_scopes)
     ]
+
+
+# ============================================================================
+# Labeling at creation — RFC-011 §4.6 / SG-9 "derived inherits"
+# ============================================================================
+
+def derive_inherit_enabled() -> bool:
+    """SG-9 switch: a fact derived from a source item inherits that source's
+    scope labels.
+
+    Default ON — without it, text extracted from a scoped document is a
+    plaintext side-channel around the whole model, so
+    MEMOGARDEN_DERIVE_INHERIT_SCOPE=off is the operator's escape hatch, not
+    the default. Anything but an explicit falsy value means on.
+    """
+    value = os.environ.get("MEMOGARDEN_DERIVE_INHERIT_SCOPE", "").strip().lower()
+    return value not in _DERIVE_INHERIT_OFF
+
+
+def row_labels(raw) -> list:
+    """Scope labels out of a row's JSON `data` / `metadata` value (dict,
+    JSON text or None), as plain uuids."""
+    if isinstance(raw, str):
+        raw = json.loads(raw) if raw else {}
+    return [
+        uid.strip_prefix(s) for s in ((raw or {}).get("scopes") or [])
+        if isinstance(s, str)
+    ]
+
+
+def current_labels(soil, core, ref) -> list | None:
+    """One referenced item's CURRENT scope labels, read through the stores'
+    public APIs: `resolve_live` + `Soil.get_fact` for a fact (bare or
+    soil_-prefixed uuid), `core.entity.get_by_id` for an entity.
+
+    A superseded reference resolves to its live version: a relabel is a new
+    version, so the operator's decision lives there, not on the row a
+    caller happened to hold. Labels come back as plain uuids.
+
+    Args:
+        soil: open Soil handle.
+        core: open Core handle, or None to resolve facts only.
+        ref: the item's uuid.
+
+    Returns:
+        [] for an item with no labels; None when nothing matches, or an
+        entity chain is cyclic. A cyclic FACT chain raises
+        ConsistencyError — the system layer's policy for single lookups.
+    """
+    if not isinstance(ref, str) or not ref:
+        return None
+    if core is not None and not ref.startswith("soil_"):
+        try:
+            entity = core.entity.get_by_id(ref)
+        except ResourceNotFound:
+            entity = None
+        if entity is not None:
+            seen = set()
+            while entity.get("superseded_by") and entity["superseded_by"] not in seen:
+                seen.add(entity["superseded_by"])
+                entity = core.entity.get_by_id(entity["superseded_by"])
+            if entity.get("superseded_by") in seen:
+                return None  # cyclic chain — no live version to name
+            return row_labels(entity.get("data"))
+    live, _chain = resolve_live(soil, ref)
+    fact = soil.get_fact(live)
+    return row_labels(fact.metadata) if fact is not None else None
+
+
+def source_item_scopes(soil, ref) -> list | None:
+    """A source FACT's current scope labels (SG-9). Facts only: a Core
+    entity as a derivation source is not covered — entity lineage is a
+    separate mechanism.
+
+    Args:
+        soil: open Soil handle.
+        ref: the source fact's uuid (metadata.derived_from).
+
+    Returns:
+        [] for a fact with no labels; None when no such fact exists.
+    """
+    return current_labels(soil, None, ref)
+
+
+def live_labels(refs) -> dict:
+    """Current scope labels for each referenced item — a fact or a Core
+    entity — read from committed state.
+
+    Feeds the RFC-011 §4.9(5) SSE suppress for items a publisher does not
+    hold in hand (relation endpoints, frame containers). Empty when
+    enforcement is off: the suppress is a no-op then, so skip the reads.
+    A reference that resolves to nothing maps to [] — the global space,
+    which the predicate treats as visible.
+    """
+    if not refs or not enforcement_enabled():
+        return {}
+    from system.core import get_core
+    from system.soil import get_soil
+
+    out = {}
+    with get_soil() as soil, get_core() as core:
+        for ref in refs:
+            if isinstance(ref, str):
+                out[ref] = current_labels(soil, core, ref) or []
+    return out
+
+
+def inherit_derived_scopes(metadata: dict | None, soil) -> bool:
+    """SG-9 for the provider lane: copy the source's current labels onto a
+    fact that declares `metadata.derived_from`, verbatim.
+
+    Providers are not principals (SG-7), so there is no grant to narrow by
+    here — they label at creation per operator policy, and a labeled source
+    outranks both the parent rule and that policy.
+
+    The source's labels are inherited whatever they are, the triage scope
+    included. A document still waiting in triage is restricted to triage
+    members; text extracted from it must not reach anyone else — not even
+    through a covering email that was already filed elsewhere. The rule has
+    one job: a derived fact is never more visible than its source.
+
+    Args:
+        metadata: the fact's metadata dict, mutated in place.
+        soil: open Soil handle.
+
+    Returns:
+        True when labels were applied. False when the switch is off, the
+        fact is already labeled (the creator labeled it deliberately), no
+        source is declared, or the source is unlabeled — those fall through
+        to the other creation-time defaults.
+    """
+    if not derive_inherit_enabled() or not metadata or metadata.get("scopes"):
+        return False
+    labels = source_item_scopes(soil, metadata.get("derived_from"))
+    if not labels:
+        return False
+    metadata["scopes"] = labels
+    return True
+
+
+def derived_scopes_for_requester(soil, ref) -> list:
+    """SG-9 for the API lane: the labels a fact derived from `ref` may carry
+    for the CURRENT requester.
+
+    The source's current labels — narrowed, under enforcement, to the ones
+    a non-sovereign requester holds a live grant for. Inheritance narrows
+    visibility; it must never become a way to write into a scope the
+    requester cannot enter (RFC-011 D2, symmetric grants). Advisory mode
+    inherits verbatim so the corpus is labeled correctly before the flip.
+
+    Returns:
+        Labels to apply (empty = use the ordinary creation default: the
+        switch is off, no source is named, or none of its labels survive).
+    """
+    if not derive_inherit_enabled():
+        return []
+    labels = source_item_scopes(soil, ref)
+    if not labels:
+        return []
+    if enforcement_enabled() and not requester_has_all_scopes():
+        granted = {
+            uid.strip_prefix(entry["scope_uuid"])
+            for entry in (getattr(g, "grants", None) or [])
+            if entry.get("scope_uuid") and _grant_active(entry)
+        }
+        labels = [label for label in labels if label in granted]
+    return labels
