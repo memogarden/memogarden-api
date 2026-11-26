@@ -604,3 +604,88 @@ class TestSearchPreMatch:
             if r.get("type") == "Note"
         ]
         assert {r["data"]["title"] for r in results} == {"scoped note"}
+
+
+class TestSupersededGetInherit:
+    """api#97 option (a): the get gate reads a superseded item's LIVE
+    successor's labels — the relabel's decision lives on the live
+    version; an unlabelled predecessor of a privately-relabeled item is
+    NOT the global space."""
+
+    def _add(self, client, headers, title, scopes=None):
+        payload = {"op": "add", "type": "Note", "data": {"title": title}}
+        if scopes is not None:
+            payload["metadata"] = {"scopes": scopes}
+        response = client.post("/mg", json=payload, headers=headers)
+        assert response.status_code == 200, response.get_json()
+        return response.get_json()["result"]["uuid"]
+
+    def _supersede(self, old_uuid, successor_uuid):
+        from system.soil import get_soil
+
+        with get_soil() as soil:
+            soil._get_connection().execute(
+                "UPDATE item SET superseded_by = ? WHERE uuid = ?",
+                (successor_uuid, old_uuid),
+            )
+            soil._get_connection().commit()
+
+    def _get(self, client, headers, uuid):
+        return client.post("/mg", json={"op": "get", "target": uuid}, headers=headers)
+
+    def test_unlabeled_predecessor_gated_by_successor(
+        self, client, auth_headers, agent_key, scope_uuid, enforcement
+    ):
+        old = self._add(client, auth_headers, "predecessor note")
+        successor = self._add(
+            client, auth_headers, "successor note", [_plain(scope_uuid)]
+        )
+        self._supersede(old, successor)
+
+        # Outside the frame: denied (was 200 before the fix — the leak).
+        response = self._get(client, agent_key["headers"], old)
+        assert response.status_code == 403
+        assert response.get_json()["error"]["details"]["code"] == "scope_read_denied"
+
+        # Inside the frame: history stays readable, the predecessor's own
+        # content comes back.
+        assert _grant_agent(client, auth_headers, agent_key, scope_uuid).status_code == 201
+        assert _enter(client, agent_key["headers"], scope_uuid).status_code == 200
+        response = self._get(client, agent_key["headers"], old)
+        assert response.status_code == 200
+        assert response.get_json()["result"]["data"]["title"] == "predecessor note"
+
+    def test_successor_unlabeled_is_global_history(
+        self, client, auth_headers, agent_key, enforcement
+    ):
+        old = self._add(client, auth_headers, "unscoped history")
+        successor = self._add(client, auth_headers, "unscoped live")
+        self._supersede(old, successor)
+        response = self._get(client, agent_key["headers"], old)
+        assert response.status_code == 200
+
+    def test_dangling_successor_denied(
+        self, client, auth_headers, agent_key, enforcement
+    ):
+        old = self._add(client, auth_headers, "dangling history")
+        self._supersede(old, "soil_does_not_exist")
+        response = self._get(client, agent_key["headers"], old)
+        assert response.status_code == 403
+
+    def test_cycle_denied(self, client, auth_headers, agent_key, enforcement):
+        """A cyclic supersession chain has no live version to gate by —
+        resolve_live raises, the helper returns None, the read is denied
+        (same ruling as the search plane's drop-the-row)."""
+        a = self._add(client, auth_headers, "cycle a")
+        b = self._add(client, auth_headers, "cycle b")
+        from system.soil import get_soil
+
+        with get_soil() as soil:
+            conn = soil._get_connection()
+            conn.execute(
+                "UPDATE item SET superseded_by = ? WHERE uuid = ?", (b, a))
+            conn.execute(
+                "UPDATE item SET superseded_by = ? WHERE uuid = ?", (a, b))
+            conn.commit()
+        response = self._get(client, agent_key["headers"], a)
+        assert response.status_code == 403
