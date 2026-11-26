@@ -33,6 +33,7 @@ from ..middleware.scope_access import (
     derived_scopes_for_requester,
     enforcement_enabled,
     filter_visible,
+    gate_labels_for_item,
     item_visible,
     normalize_scopes,
     public_scope_uuids,
@@ -365,9 +366,12 @@ def handle_get_fact(request: GetRequest, actor: str) -> dict:
         # only from inside one of their scopes (operator JWT bypasses).
         # READ semantics — public-visibility labels relax this gate (most
         # permissive wins); the amend write gate below stays strict.
+        # A superseded item is gated by its LIVE successor's labels
+        # (visibility addendum §6 item 1, option (a) — api#97): the
+        # relabel's decision lives there, never on the stale row.
         if enforcement_enabled() and not requester_has_all_scopes():
-            item_scopes = (item.metadata or {}).get("scopes") or []
-            if not item_visible(
+            item_scopes = gate_labels_for_item(soil, item)
+            if item_scopes is None or not item_visible(
                 item_scopes, active_scope_for(actor), public_scope_uuids()
             ):
                 raise PermissionDenied(

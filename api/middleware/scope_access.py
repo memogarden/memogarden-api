@@ -30,7 +30,7 @@ import os
 
 from flask import g
 
-from system.exceptions import PermissionDenied, ResourceNotFound
+from system.exceptions import ConsistencyError, PermissionDenied, ResourceNotFound
 from system.soil import resolve_live
 from utils import isodatetime, uid
 
@@ -120,7 +120,7 @@ def item_visible(
 
     Args:
         item_scopes: The item's metadata.scopes labels (empty/None = unscoped)
-        active_scope: The requester's active scope (None = unscoped operation)
+        active_scope: The requester's active scope (None = unframed)
         public_scopes: Plain uuids of public-visibility scopes (read paths
             only). Any public label short-circuits visible — most permissive
             wins on mixed public/private labels (visibility addendum).
@@ -132,6 +132,31 @@ def item_visible(
     if public_scopes and any(label in public_scopes for label in item_scopes):
         return True
     return active_scope is not None and active_scope in item_scopes
+
+
+def gate_labels_for_item(soil, item) -> list | None:
+    """The labels the §4.5 read gate applies to one item: its own
+    metadata.scopes — or, when the item is superseded, its LIVE
+    successor's (visibility addendum §6 item 1, option (a) "inherit",
+    api#97). A relabel's decision lives on the live version; history
+    stays readable, gated by the successor — an unlabelled predecessor
+    of a privately-relabeled item is NOT the global space.
+
+    Returns:
+        The effective labels (empty = unscoped), or None when no live
+        version exists (cyclic or dangling superseded_by) — callers
+        treat None as invisible.
+    """
+    if not getattr(item, "superseded_by", None):
+        return (item.metadata or {}).get("scopes") or []
+    try:
+        live, _chain = resolve_live(soil, item.uuid)
+    except ConsistencyError:
+        return None
+    fact = soil.get_fact(live)
+    if fact is None:
+        return None
+    return (fact.metadata or {}).get("scopes") or []
 
 
 def active_scope_for(actor: str) -> str | None:
