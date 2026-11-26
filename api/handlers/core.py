@@ -33,10 +33,12 @@ from ..middleware.scope_access import (
     enforcement_enabled,
     filter_visible,
     item_visible,
+    live_labels,
     normalize_scopes,
     public_scope_uuids,
     require_scope_grant,
     requester_has_all_scopes,
+    row_labels,
 )
 from ..series import series_key, series_members
 
@@ -238,6 +240,8 @@ def handle_create(request: CreateRequest, actor: str) -> dict:
                     "actor": actor,
                 },
                 scope_uuid=uid.add_core_prefix(entity_uuid),
+                item_labels={
+                    uid.add_core_prefix(entity_uuid): row_labels(entity.get("data"))},
             )
 
         return _add_core_prefix(entity)
@@ -423,6 +427,8 @@ def handle_edit(request: EditRequest, actor: str) -> dict:
                     "actor": actor,
                 },
                 scope_uuid=uid.add_core_prefix(entity_id),
+                item_labels={
+                    uid.add_core_prefix(entity_id): row_labels(row.get("data"))},
             )
 
         return _add_core_prefix(row)
@@ -612,6 +618,8 @@ def handle_link(request: LinkRequest, actor: str) -> dict:
                 "actor": actor,
             },
             scope_uuid=None,  # Relations are cross-scope, global event
+            # §4.9(5): the payload names both endpoints — judge by them.
+            item_labels=live_labels([request.source, request.target]),
         )
 
         return {
@@ -661,6 +669,12 @@ def handle_unlink(request: UnlinkRequest, actor: str) -> dict:
         # Verify that actor created this relation before allowing deletion
         # This requires adding created_by field to user_relation table
 
+        # RFC-011 §4.9(5): the event is judged by the relation's endpoints,
+        # which are gone once the row is deleted — read them first (a
+        # missing relation raises the same 404 the delete itself would).
+        existing = core.relation.get_by_id(request.target)
+        endpoints = live_labels([existing["source"], existing["target"]])
+
         # Delete the relation
         core.relation.delete(request.target)
 
@@ -673,6 +687,7 @@ def handle_unlink(request: UnlinkRequest, actor: str) -> dict:
                 "actor": actor,
             },
             scope_uuid=None,  # Relations are cross-scope, global event
+            item_labels=endpoints,
         )
 
         return {
@@ -721,6 +736,7 @@ def handle_edit_relation(request: EditRequest, actor: str) -> dict:
                 "actor": actor,
             },
             scope_uuid=None,  # Relations are cross-scope, global event
+            item_labels=live_labels([row["source"], row["target"]]),
         )
 
         return {
@@ -1169,20 +1185,27 @@ def handle_enter(request: EnterRequest, actor: str) -> dict:
         # Enter the scope (exclusive; atomic switch per INV-11a)
         context_frame = core.context.enter_scope(context_frame, scope_uuid)
 
-        # Session 20B: Publish SSE event for context update
-        # Get containers from updated context frame for event payload
+        # Session 20B: the context update is published once the `with`
+        # block has committed — see the publish below.
         containers = context_frame.containers if hasattr(context_frame, "containers") else []
-        publish_context_updated(
-            participant_uuid=actor,
-            containers=containers,
-            scope_uuid=uid.add_core_prefix(scope_uuid),
-        )
-
-        return {
+        entered = {
             "scope": uid.add_core_prefix(scope_uuid),
             "previous_scope": uid.add_core_prefix(previous_scope) if previous_scope else None,
             "active_scope": uid.add_core_prefix(context_frame.active_scope) if context_frame.active_scope else None,
         }
+
+    # Publish SSE event for context update AFTER the transaction commits:
+    # RFC-011 §4.9(5) judges each subscriber by its committed frame, and
+    # this principal's own frame is the one that just changed. Publishing
+    # inside the block judged the principal against its pre-transition
+    # frame (its own stream missed `enter`, and still heard `leave`).
+    # It also keeps a rolled-back transition from ever being announced.
+    publish_context_updated(
+        participant_uuid=actor,
+        containers=containers,
+        scope_uuid=uid.add_core_prefix(scope_uuid),
+    )
+    return entered
 
 
 @with_audit
@@ -1227,27 +1250,29 @@ def handle_leave(request: LeaveRequest, actor: str) -> dict:
         # mismatch maps to 400 in the dispatcher)
         context_frame = core.context.leave_scope(context_frame, scope_uuid)
 
-        # Session 20B: Publish SSE events for context update
-        # Get containers from updated context frame for event payload
+        # Session 20B: event inputs are collected here and published once
+        # the `with` block has committed — see below.
         containers = context_frame.containers if hasattr(context_frame, "containers") else []
-        publish_context_updated(
-            participant_uuid=actor,
-            containers=containers,
-            scope_uuid=uid.add_core_prefix(scope_uuid),
-        )
-
-        # Get head item for frame_updated event
         head_item_uuid = context_frame.head_item_uuid if hasattr(context_frame, "head_item_uuid") else None
-        publish_frame_updated(
-            participant_uuid=actor,
-            head_item_uuid=head_item_uuid,
-            scope_uuid=uid.add_core_prefix(scope_uuid),
-        )
-
-        return {
+        left = {
             "scope": uid.add_core_prefix(scope_uuid),
             "active_scope": None,
         }
+
+    # Publish the SSE events AFTER the transaction commits: RFC-011
+    # §4.9(5) judges each subscriber by its committed frame, and this
+    # principal's own frame is the one that just changed (see handle_enter).
+    publish_context_updated(
+        participant_uuid=actor,
+        containers=containers,
+        scope_uuid=uid.add_core_prefix(scope_uuid),
+    )
+    publish_frame_updated(
+        participant_uuid=actor,
+        head_item_uuid=head_item_uuid,
+        scope_uuid=uid.add_core_prefix(scope_uuid),
+    )
+    return left
 
 
 @with_audit

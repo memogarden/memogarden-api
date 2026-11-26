@@ -30,7 +30,6 @@ from api.events import (
     sse_manager,
 )
 
-
 # ============================================================================
 # SSEManager Tests (Unit Tests)
 # ============================================================================
@@ -553,3 +552,375 @@ class TestSSEThreading:
         assert len(errors) == 0
         assert len(client_ids) == 10
         assert sse_manager.get_connection_count() == 0
+
+
+class TestBackpressure:
+    """A slow consumer must not break the request that published."""
+
+    def test_full_queue_drops_the_event_instead_of_raising(self):
+        """A full queue drops the event and publish returns cleanly. (The
+        handler used to catch a name that was never imported — a NameError
+        on every full queue.)"""
+        _, conn = sse_manager.register("user_1", "slow", set())
+        try:
+            conn.queue = Queue.Queue(maxsize=1)
+            conn.queue.put({"type": "filler", "data": {}})
+            assert publish_event("scope_modified", {"scope_uuid": "core_abc"}) == 0
+            assert conn.queue.qsize() == 1  # still the filler
+        finally:
+            sse_manager.unregister(conn.client_id)
+
+
+# ============================================================================
+# RFC-011 §4.9(5) — scoped-item events are suppressed for non-members
+# ============================================================================
+
+class TestScopeSuppress:
+    """api#90: under enforcement, a connection whose principal cannot read
+    an item the event is about receives nothing — not even the reference.
+
+    Publishers hand over `item_labels` (the labels as they stand after
+    their write); the manager judges each subscriber by its own frame.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_leftover_connections(self):
+        for cid in list(sse_manager._connections.keys()):
+            sse_manager.unregister(cid)
+        yield
+        for cid in list(sse_manager._connections.keys()):
+            sse_manager.unregister(cid)
+
+    @pytest.fixture
+    def agent_key(self, client, auth_headers):
+        """A bound agent key — a genuinely separate principal (RFC-010)."""
+        agent_id = client.post(
+            "/agents", json={"label": "listener-agent"}, headers=auth_headers
+        ).get_json()["agent_id"]
+        key = client.post(
+            "/api-keys/",
+            json={"name": "listener-key", "agent_id": agent_id},
+            headers=auth_headers,
+        ).get_json()
+        return {
+            "headers": {"X-API-Key": key["key"]},
+            "agent_id": agent_id,
+            "actor": client.get(
+                "/auth/me", headers={"X-API-Key": key["key"]}
+            ).get_json()["actor"],
+        }
+
+    @pytest.fixture
+    def scope_uuid(self, client, auth_headers):
+        response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Scope", "data": {"label": "Finances"}},
+            headers=auth_headers,
+        )
+        return response.get_json()["result"]["uuid"].split("core_", 1)[-1]
+
+    @pytest.fixture
+    def enforcement(self, monkeypatch):
+        monkeypatch.setenv("MEMOGARDEN_SCOPE_ENFORCEMENT", "1")
+
+    @staticmethod
+    def _stream(actor=None, sovereign=False, scopes=frozenset()):
+        _, conn = sse_manager.register(
+            "user", "listener", set(scopes), actor=actor, sovereign=sovereign)
+        return conn
+
+    @staticmethod
+    def _heard(conn):
+        """The event waiting on `conn`, or None when nothing arrived."""
+        try:
+            return conn.queue.get(timeout=0.2)
+        except Queue.Empty:
+            return None
+
+    def test_scoped_event_reaches_members_and_the_sovereign_only(
+            self, client, auth_headers, agent_key, scope_uuid, enforcement):
+        outsider = self._stream(actor=agent_key["actor"])
+        sovereign = self._stream(actor="admin", sovereign=True)
+        event = {"content": "statement is due"}
+        labels = {"soil_message": [scope_uuid]}
+
+        assert publish_event("message_sent", event, item_labels=labels) == 1
+        assert self._heard(outsider) is None, "leaked to a non-member"
+        assert self._heard(sovereign)["data"] == event
+
+        # Granted and inside the scope, the same principal now hears it.
+        assert client.post(
+            "/grants",
+            json={"agent_id": agent_key["agent_id"], "scope_uuid": scope_uuid},
+            headers=auth_headers,
+        ).status_code == 201
+        assert client.post(
+            "/mg", json={"op": "enter", "scope": scope_uuid},
+            headers=agent_key["headers"],
+        ).status_code == 200
+        assert publish_event("message_sent", event, item_labels=labels) == 2
+        assert self._heard(outsider)["data"] == event
+        assert self._heard(sovereign)["data"] == event
+
+    def test_unlabeled_item_events_flow_to_everyone(
+            self, client, agent_key, enforcement):
+        """The global space is unchanged: unscoped events reach everyone."""
+        listener = self._stream(actor=agent_key["actor"])
+        publish_event("message_sent", {"content": "hello"},
+                      item_labels={"soil_message": []})
+        assert self._heard(listener)["data"] == {"content": "hello"}
+
+    def test_flag_off_every_subscriber_hears(
+            self, client, agent_key, scope_uuid):
+        """§8 advisory mode: no behavior change until the flag flips."""
+        listener = self._stream(actor=agent_key["actor"])
+        publish_event("message_sent", {"content": "x"},
+                      item_labels={"soil_message": [scope_uuid]})
+        assert self._heard(listener)["data"] == {"content": "x"}
+
+    def test_public_visibility_label_is_not_suppressed(
+            self, client, auth_headers, agent_key, enforcement):
+        public = client.post(
+            "/mg",
+            json={"op": "create", "type": "Scope",
+                  "data": {"label": "Announcements", "visibility": "public"}},
+            headers=auth_headers,
+        ).get_json()["result"]["uuid"].split("core_", 1)[-1]
+        listener = self._stream(actor=agent_key["actor"])
+        publish_event("message_sent", {"content": "x"},
+                      item_labels={"soil_message": [public]})
+        assert self._heard(listener)["data"] == {"content": "x"}
+
+    def test_one_invisible_reference_suppresses_the_whole_event(
+            self, client, auth_headers, agent_key, scope_uuid, enforcement):
+        """A relation names both endpoints — if either is unreadable the
+        event goes, since the payload cannot be filtered field by field."""
+        listener = self._stream(actor=agent_key["actor"])
+        publish_event("relation_created", {"kind": "cites"},
+                      item_labels={"core_open": [], "soil_scoped": [scope_uuid]})
+        assert self._heard(listener) is None
+
+    def test_relation_events_about_a_private_entity_are_suppressed(
+            self, client, auth_headers, agent_key, scope_uuid, enforcement):
+        """link / edit_relation / unlink all name both endpoints. When one
+        endpoint is private, a non-member hears none of the three — here
+        the labels are resolved from the database, not handed over by the
+        publisher, and unlink must read them before the row is deleted."""
+        def entity(label, scopes=None):
+            data = {"description": label}
+            if scopes:
+                data["scopes"] = scopes
+            response = client.post(
+                "/mg", json={"op": "create", "type": "Transaction",
+                             "data": data},
+                headers=auth_headers,
+            )
+            assert response.status_code == 200, response.get_json()
+            return response.get_json()["result"]["uuid"]
+
+        private = entity("private", [scope_uuid])
+        open_ = entity("open")
+        outsider = self._stream(actor=agent_key["actor"])
+        sovereign = self._stream(actor="admin", sovereign=True)
+
+        linked = client.post(
+            "/mg",
+            json={"op": "link", "source": private, "source_type": "entity",
+                  "target": open_, "target_type": "entity"},
+            headers=auth_headers,
+        )
+        assert linked.status_code == 200, linked.get_json()
+        relation = linked.get_json()["result"]["uuid"]
+        assert self._heard(outsider) is None, "relation_created leaked"
+        assert self._heard(sovereign)["type"] == "relation_created"
+
+        edited = client.post(
+            "/mg",
+            json={"op": "edit_relation", "target": relation,
+                  "set": {"time_horizon": 365}},
+            headers=auth_headers,
+        )
+        assert edited.status_code == 200, edited.get_json()
+        assert self._heard(outsider) is None, "edit leaked"
+        assert self._heard(sovereign)["type"] == "relation_modified"
+
+        unlinked = client.post(
+            "/mg", json={"op": "unlink", "target": relation},
+            headers=auth_headers,
+        )
+        assert unlinked.status_code == 200, unlinked.get_json()
+        assert self._heard(outsider) is None, "unlink leaked"
+        deleted = self._heard(sovereign)
+        assert deleted["type"] == "relation_modified"
+        assert deleted["data"]["action"] == "deleted"
+
+        # a missing relation still answers 404, as before the label read
+        missing = client.post(
+            "/mg", json={"op": "unlink", "target": relation},
+            headers=auth_headers,
+        )
+        assert missing.status_code == 404
+
+    def test_message_created_in_a_scope_is_not_streamed_out(
+            self, client, auth_headers, agent_key, scope_uuid, enforcement):
+        """End to end through the add verb: the message is labeled with its
+        creator's scope at creation, and the publisher hands those labels
+        over — so a non-member elsewhere on the stream never sees it."""
+        outsider = self._stream(actor=agent_key["actor"])
+        sovereign = self._stream(actor="admin", sovereign=True)
+        assert client.post(
+            "/mg", json={"op": "enter", "scope": scope_uuid}, headers=auth_headers
+        ).status_code == 200
+        assert client.post(
+            "/mg",
+            json={"op": "add", "type": "Message",
+                  "data": {"sender": "operator", "description": "statement is due"}},
+            headers=auth_headers,
+        ).status_code == 200
+
+        assert self._heard(outsider) is None, "scoped message leaked"
+        assert self._heard(sovereign)["type"] == "message_sent"
+
+    def test_stream_endpoint_registers_the_authenticated_principal(
+            self, client, auth_headers, agent_key, scope_uuid, enforcement):
+        """The real `/mg/events` wiring: an API-key stream is registered as
+        its non-sovereign principal, a JWT stream as sovereign — so the
+        same scoped event reaches the operator's stream and not the key's.
+        (One stream open at a time: the test client cannot close two
+        concurrent streams cleanly.)"""
+        private_event = {"content": "statement is due"}
+        labels = {"soil_message": [scope_uuid]}
+
+        def open_stream(headers):
+            before = set(sse_manager._connections)
+            response = client.get("/mg/events", headers=headers)
+            opened = [sse_manager._connections[cid]
+                      for cid in set(sse_manager._connections) - before]
+            return response, opened
+
+        key_stream, opened = open_stream(agent_key["headers"])
+        try:
+            assert len(opened) == 1
+            assert opened[0].sovereign is False
+            assert opened[0].actor == agent_key["actor"]
+            publish_event("message_sent", private_event, item_labels=labels)
+            assert opened[0].queue.empty(), "scoped event reached a key"
+            publish_event("message_sent", {"content": "hello"}, item_labels={})
+            assert opened[0].queue.get(timeout=1)["data"] == {"content": "hello"}
+        finally:
+            key_stream.close()
+
+        jwt_stream, opened = open_stream(auth_headers)
+        try:
+            assert len(opened) == 1 and opened[0].sovereign is True
+            publish_event("message_sent", private_event, item_labels=labels)
+            assert opened[0].queue.get(timeout=1)["data"] == private_event
+        finally:
+            jwt_stream.close()
+
+    def test_artifact_delta_follows_the_artifact_relabels(
+            self, client, auth_headers, agent_key, scope_uuid, enforcement):
+        """`artifact_delta` carries the commit's content, so it is judged on
+        the artifact's labels as they stand after each commit (api#90's
+        relabel transition; visibility addendum §6 item 2): an unlabeled
+        artifact's commits reach a non-member, they stop once the artifact
+        is filed into a private scope, and resume when it is cleared."""
+        created = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact",
+                  "data": {"title": "draft", "content": ""}},
+            headers=auth_headers,
+        )
+        assert created.status_code == 200, created.get_json()
+        artifact = created.get_json()["result"]["uuid"]
+        outsider = self._stream(actor=agent_key["actor"])
+        sovereign = self._stream(actor="admin", sovereign=True)
+
+        def commit():
+            current = client.post(
+                "/mg", json={"op": "get", "target": artifact},
+                headers=auth_headers,
+            ).get_json()["result"]
+            response = client.post(
+                "/mg",
+                json={"op": "commit_artifact", "artifact": artifact,
+                      "ops": "+1:^abc", "based_on_hash": current["hash"][:8]},
+                headers=auth_headers,
+            )
+            assert response.status_code == 200, response.get_json()
+            assert self._heard(sovereign)["type"] == "artifact_delta"
+
+        commit()
+        assert self._heard(outsider)["type"] == "artifact_delta"  # global
+
+        filed = client.post(
+            "/mg", json={"op": "edit", "target": artifact,
+                         "set": {"scopes": [scope_uuid]}},
+            headers=auth_headers,
+        )
+        assert filed.status_code == 200, filed.get_json()
+        commit()
+        assert self._heard(outsider) is None, "private artifact's delta leaked"
+
+        cleared = client.post(
+            "/mg", json={"op": "edit", "target": artifact,
+                         "unset": ["scopes"]},
+            headers=auth_headers,
+        )
+        assert cleared.status_code == 200, cleared.get_json()
+        commit()
+        assert self._heard(outsider)["type"] == "artifact_delta"  # global again
+
+    def test_a_principal_hears_its_own_frame_transitions(
+            self, client, auth_headers, agent_key, scope_uuid, enforcement):
+        """enter / leave publish AFTER the transition commits, so a
+        principal's own stream is judged on the frame it just entered or
+        left — not on the one it had before (that made `enter` silent and
+        `leave` leaky on the principal's own stream)."""
+        private = client.post(
+            "/mg",
+            json={"op": "create", "type": "Transaction",
+                  "data": {"description": "private", "scopes": [scope_uuid]}},
+            headers=auth_headers,
+        ).get_json()["result"]["uuid"]
+        granted = client.post(
+            "/grants",
+            json={"agent_id": agent_key["agent_id"], "scope_uuid": scope_uuid},
+            headers=auth_headers,
+        )
+        assert granted.status_code == 201, granted.get_json()
+
+        # the private entity sits in the agent's frame as a container
+        from system.core import get_core
+        with get_core() as core:
+            frame = core.context.get_context_frame(
+                owner=agent_key["actor"], owner_type="operator",
+                create_if_missing=True,
+            )
+            core.context.update_containers(frame, private.split("core_", 1)[-1])
+        # subscribed to the scope: frame events route to it
+        own = self._stream(actor=agent_key["actor"],
+                           scopes={f"core_{scope_uuid}"})
+
+        entered = client.post(
+            "/mg", json={"op": "enter", "scope": scope_uuid},
+            headers=agent_key["headers"],
+        )
+        assert entered.status_code == 200, entered.get_json()
+        heard = self._heard(own)
+        assert heard is not None and heard["type"] == "context_updated"
+
+        left = client.post(
+            "/mg", json={"op": "leave", "scope": scope_uuid},
+            headers=agent_key["headers"],
+        )
+        assert left.status_code == 200, left.get_json()
+        # `leave` publishes context_updated then frame_updated; only the
+        # first names the now-unreadable container.
+        heard_types = []
+        while True:
+            event = self._heard(own)
+            if event is None:
+                break
+            heard_types.append(event["type"])
+        assert "context_updated" not in heard_types, "left, but still heard it"

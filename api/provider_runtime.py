@@ -37,6 +37,7 @@ from system.soil import Fact, generate_soil_uuid, get_soil
 from utils import isodatetime, uid
 
 from . import provider_registry
+from .middleware.scope_access import inherit_derived_scopes
 from .search_daemon import _embed_sock
 from .series import series_key, series_members
 from .provider_registry import (
@@ -380,6 +381,12 @@ def _execute_run(
                     soil.commit()
                     continue
                 fact = _to_fact(yielded)
+                # RFC-011 §4.6 / SG-9: a fact derived from a source item
+                # (metadata.derived_from) inherits that source's CURRENT
+                # labels verbatim — text extracted from a scoped document
+                # must not become a plaintext side-channel. Ahead of the
+                # parent rule and the policy: a decided source outranks both.
+                _inherit_derived_scopes(fact, soil)
                 # RFC-012 §4.9 addendum (2026-11-21 operator decision): a
                 # fact yielded with a parent reference (metadata.email_uuid
                 # — gmail attachments) inherits the parent's CURRENT scopes
@@ -759,6 +766,31 @@ def _make_scope_resolver():
     return resolve
 
 
+def _inherit_derived_scopes(fact: Fact, soil) -> None:
+    """RFC-011 §4.6 / SG-9: a yielded fact that declares a source item
+    (metadata.derived_from) copies that source's CURRENT scope labels.
+
+    The anti-side-channel default for extraction: text pulled out of a
+    Finances-scoped PDF lands labeled Finances, whatever the provider's
+    policy would have done with an unattributed fact — so it can never be
+    filed to Public by a triage pass that never saw the source's scope.
+    Providers are not principals (SG-7), so there is no grant to narrow by;
+    the source's labels are applied as they stand, triage included: a
+    derived fact is never more visible than its source.
+
+    Order of precedence across the creation-time rules: provider-set scopes
+    win, then this, then the parent rule (_inherit_parent_scopes), then the
+    scope policy. A labeled source outranks both the parent rule and the
+    policy. An unlabeled or missing source, or the
+    MEMOGARDEN_DERIVE_INHERIT_SCOPE=off escape hatch, falls through.
+
+    Args:
+        fact: the fact about to be created (mutated in place).
+        soil: open Soil handle — the source's labels are read live.
+    """
+    inherit_derived_scopes(fact.metadata, soil)
+
+
 def _inherit_parent_scopes(fact: Fact, soil) -> None:
     """RFC-012 §4.9 addendum (2026-11-21 operator decision): a yielded fact
     carrying a parent reference (metadata.email_uuid — gmail attachments)
@@ -766,8 +798,9 @@ def _inherit_parent_scopes(fact: Fact, soil) -> None:
     has any. Late-extracted attachments of already-filed emails then land
     filed instead of stranding in triage as orphan rows.
 
-    Order of precedence: provider-set scopes win (unchanged), then parent
-    inheritance, then the scope policy. Parents with NO scopes (unscoped)
+    Order of precedence: provider-set scopes win (unchanged), then the
+    derived-source rule (_inherit_derived_scopes), then parent inheritance,
+    then the scope policy. Parents with NO scopes (unscoped)
     or still sitting in triage fall through to the policy unchanged —
     fail-closed defaults are never weakened by inheritance, and an
     undecided (triage-labeled) parent keeps routing children to triage,

@@ -24,6 +24,7 @@ from ..schemas.semantic import (
     GetArtifactAtCommitRequest,
 )
 from ..events import publish_artifact_delta
+from ..middleware.scope_access import row_labels
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,11 @@ def handle_commit_artifact(request: CommitArtifactRequest, actor: str) -> dict:
                 ops=request.ops,
                 actor=actor,
                 scope_uuid=scope_uuid,
+                # RFC-011 §4.9(5): judged on the artifact's labels as they
+                # stand after this commit (the row was re-read above).
+                item_labels={
+                    request.artifact: row_labels(
+                        artifact_entity.get("data") if artifact_entity else None)},
             )
 
             # delta_uuid already has soil_ prefix from Soil
