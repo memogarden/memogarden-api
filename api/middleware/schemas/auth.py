@@ -361,6 +361,10 @@ class APIKeyListResponse(APIKeyBase):
         description="Restricted capability classes (E3); empty = unrestricted")
     expires_at: datetime | None = Field(
         default=None, description="Expiration timestamp (ISO 8601 UTC, null if no expiry)")
+    expired: bool = Field(
+        default=False,
+        description="True when expires_at is set and in the past (api#98 — "
+        "verification rejects such keys; the list surfaces the state)")
     created_at: datetime = Field(..., description="When the API key was created (ISO 8601 UTC)")
     last_seen: datetime | None = Field(
         default=None, description="Last time this key was used (ISO 8601 UTC, null if never used)")

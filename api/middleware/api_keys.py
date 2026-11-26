@@ -11,7 +11,7 @@ Confines bcrypt dependency for API key hashing to this module only.
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 
 from system.exceptions import (
     LockConflictError,
@@ -236,14 +236,22 @@ def list_api_keys(conn: sqlite3.Connection, user_id: str) -> list[APIKeyListResp
     )
 
     results = []
+    now = isodatetime.to_datetime(isodatetime.now())
     for row in cursor.fetchall():
+        expires_at = (
+            isodatetime.to_datetime(row["expires_at"]) if row["expires_at"] else None
+        )
         results.append(APIKeyListResponse(
             id=row["id"],
             name=row["name"],
             prefix=row["key_prefix"],
             agent_id=row["agent_entity_id"],
             capabilities=json.loads(row["capabilities"] or "[]"),
-            expires_at=isodatetime.to_datetime(row["expires_at"]) if row["expires_at"] else None,
+            expires_at=expires_at,
+            # api#98: verification now rejects expired keys — the list
+            # surfaces the state instead of leaving a past date to be
+            # noticed by hand.
+            expired=bool(expires_at and expires_at <= now),
             created_at=isodatetime.to_datetime(row["created_at"]),
             last_seen=isodatetime.to_datetime(row["last_seen"]) if row["last_seen"] else None,
             revoked_at=isodatetime.to_datetime(row["revoked_at"]) if row["revoked_at"] else None,
@@ -310,13 +318,19 @@ def get_api_key_by_id(conn: sqlite3.Connection, api_key_id: str) -> APIKeyListRe
     if row is None:
         return None
 
+    expires_at = (
+        isodatetime.to_datetime(row["expires_at"]) if row["expires_at"] else None
+    )
     return APIKeyListResponse(
         id=row["id"],
         name=row["name"],
         prefix=row["key_prefix"],
         agent_id=row["agent_entity_id"],
         capabilities=json.loads(row["capabilities"] or "[]"),
-        expires_at=isodatetime.to_datetime(row["expires_at"]) if row["expires_at"] else None,
+        expires_at=expires_at,
+        # Same flag the list computes — the detail endpoint must not
+        # report expired=False for a key the list calls expired.
+        expired=bool(expires_at and expires_at <= isodatetime.to_datetime(isodatetime.now())),
         created_at=isodatetime.to_datetime(row["created_at"]),
         last_seen=isodatetime.to_datetime(row["last_seen"]) if row["last_seen"] else None,
         revoked_at=isodatetime.to_datetime(row["revoked_at"]) if row["revoked_at"] else None,
@@ -384,13 +398,19 @@ def verify_api_key_and_get_user(conn: sqlite3.Connection, plain_key: str) -> tup
     # Get all active API keys and check each one
     # (We can't hash the input key and look it up because bcrypt has random salts)
     cursor = conn.execute(
-        """SELECT id, user_id, key_hash, agent_entity_id, grants, capabilities
+        """SELECT id, user_id, key_hash, agent_entity_id, grants, capabilities, expires_at
         FROM api_keys
         WHERE revoked_at IS NULL"""
     )
 
+    now = isodatetime.to_datetime(isodatetime.now())
     for row in cursor.fetchall():
         if verify_api_key(plain_key, row["key_hash"]):
+            # api#98: an expired key authenticates no longer — same
+            # treatment as a revoked one (the row stays; the console's
+            # key list flags it expired).
+            if row["expires_at"] and isodatetime.to_datetime(row["expires_at"]) <= now:
+                continue
             # Update last_seen timestamp
             update_last_seen(conn, row["id"])
             grants = json.loads(row["grants"]) if row["grants"] else []
@@ -776,18 +796,36 @@ def _merge_agent_envelope(
     _save_grants(conn, api_key_id, merged)
 
 
+def _grant_expiry_string(expires_at: str | datetime | None) -> str | None:
+    """Grant expiries are stored as ISO-8601 UTC strings — the format
+    `_grant_active`'s lexicographic check and `json.dumps` both need
+    (api#99). The GrantCreate schema hands the route a datetime, which
+    is normalized to UTC first: to_timestamp only rewrites +00:00, so an
+    aware non-UTC offset stored verbatim would misorder the string
+    compare (api#98 review). String inputs pass through as-is — both
+    write paths are covered; key expiries are parsed back to datetimes
+    at verify, so they compare correctly regardless of stored offset."""
+    if isinstance(expires_at, datetime):
+        return isodatetime.to_timestamp(expires_at.astimezone(UTC))
+    return expires_at
+
+
 def grant_scope_to_key(
     conn: sqlite3.Connection,
     user_id: str,
     api_key_id: str,
     scope_uuid: str,
-    expires_at: str | None = None,
+    expires_at: str | datetime | None = None,
 ) -> dict:
     """Grant a scope to one API key (RFC-011 §6 POST /grants).
 
     Appends a grant entry ({grant_id, scope_uuid, granted_at, expires_at}).
     Idempotent per scope: re-granting a held scope refreshes nothing and
     returns the existing entry (revoke + re-grant to change expiry).
+    `expires_at` accepts a datetime (the GrantCreate schema parses ISO
+    strings into one) or an ISO string; it is stored as an ISO-8601 UTC
+    string either way (api#99 — the datetime used to reach json.dumps
+    and fail the request with a 500).
 
     Returns:
         The grant entry as stored.
@@ -807,7 +845,7 @@ def grant_scope_to_key(
         "grant_id": uid.generate_uuid(),
         "scope_uuid": scope_uuid,
         "granted_at": isodatetime.now(),
-        "expires_at": expires_at,
+        "expires_at": _grant_expiry_string(expires_at),
     }
     grants.append(entry)
     _save_grants(conn, api_key_id, grants)
@@ -819,7 +857,7 @@ def grant_scope_to_agent(
     user_id: str,
     agent_id: str,
     scope_uuid: str,
-    expires_at: str | None = None,
+    expires_at: str | datetime | None = None,
 ) -> list[dict]:
     """Grant a scope to an agent — i.e. to ALL keys bound to it (RFC-011 §6).
 
@@ -852,7 +890,7 @@ def grant_scope_to_agent(
             "grant_id": uid.generate_uuid(),
             "scope_uuid": scope_uuid,
             "granted_at": isodatetime.now(),
-            "expires_at": expires_at,
+            "expires_at": _grant_expiry_string(expires_at),
         }
         grants.append(entry)
         _save_grants(conn, row["id"], grants)
