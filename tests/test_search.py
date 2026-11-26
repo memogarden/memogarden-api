@@ -707,3 +707,158 @@ class TestSemanticHybridStrategies:
         assert [f["uuid"] for f in facts][:2] == [
             uid.add_soil_prefix(lex_u), uid.add_soil_prefix(sem_u)]
         assert facts[0]["score"] == pytest.approx(3.0)
+
+
+# ============================================================================
+# api#91: continuation token — the verb pages the fact results
+# ============================================================================
+
+class TestSearchContinuation:
+    """The Session-9 TODO is real: an opaque base64 offset into the ranked
+    fact candidates, echoed back as `continuation_token`. Entities page
+    only on the first call (core search is limit-only); a continuation
+    call serves facts alone."""
+
+    def _notes(self, token, n=5):
+        """n notes newer than any audit Action the searches themselves
+        write, so the LIKE/FTS result lists cannot be reordered between
+        pages by the request's own audit trail."""
+        out = []
+        with get_soil() as soil:
+            for i in range(n):
+                u = soil.create_fact(Fact(
+                    uuid=generate_soil_uuid(),
+                    _type="Note",
+                    realized_at=f"2027-01-24T09:0{i}:00+00:00",
+                    canonical_at=f"2027-01-24T09:0{i}:00+00:00",
+                    data={"title": f"ledger page {token} {i}",
+                          "description": token, "summary": None},
+                    metadata=None,
+                    integrity_hash=None,
+                    fidelity="full",
+                ))
+                out.append(uid.add_soil_prefix(u))
+        return out
+
+    def _page(self, client, headers, payload, token):
+        body = {**payload}
+        if token:
+            body["continuation_token"] = token
+        resp = client.post("/mg", json=body, headers=headers)
+        assert resp.status_code == 200, resp.get_json()
+        return resp.get_json()["result"]
+
+    def test_semantic_pages_exactly(self, client, auth_headers,
+                                    fake_daemon_factory):
+        uuids = self._notes("semcont")
+        fake_daemon_factory([[u, 0.9 - i * 0.1] for i, u in enumerate(uuids)])
+        payload = {"op": "search", "query": "ledger", "strategy": "semantic",
+                   "target_type": "fact", "limit": 2}
+        pages, token = [], None
+        for _ in range(4):
+            result = self._page(client, auth_headers, payload, token)
+            pages.append([r["uuid"] for r in result["results"]])
+            token = result["continuation_token"]
+            if not token:
+                break
+        assert pages == [uuids[0:2], uuids[2:4], uuids[4:]], pages
+
+    def test_fuzzy_pages_exactly(self, client, auth_headers):
+        uuids = self._notes("fzycont")          # newest first: uuids[-1] …
+        newest_first = list(reversed(uuids))
+        payload = {"op": "search", "query": "fzycont", "strategy": "fuzzy",
+                   "target_type": "fact", "limit": 2}
+        pages, token = [], None
+        for _ in range(6):
+            result = self._page(client, auth_headers, payload, token)
+            page_notes = [r["uuid"] for r in result["results"]
+                          if r.get("type") == "Note"]
+            # Audit Actions match the query too (the query string lands in
+            # their params) and sit below the future-dated notes, so the
+            # corpus-backed walk has rows long after the notes are done —
+            # stop at the first page that contributes no notes.
+            if not page_notes:
+                break
+            pages.append(page_notes)
+            token = result["continuation_token"]
+            if not token:
+                break
+        assert pages == [newest_first[0:2], newest_first[2:4],
+                         newest_first[4:]], pages
+
+    def test_lexical_pages_without_overlap_or_loss(self, client, auth_headers):
+        uuids = set(self._notes("lexcont"))
+        payload = {"op": "search", "query": "lexcont", "strategy": "lexical",
+                   "target_type": "fact", "limit": 2}
+        seen, token = [], None
+        for _ in range(8):
+            # The verb writes an audit Action fact per call that MATCHES
+            # the query (the query string lands in its params) and would
+            # shift the rank ordering between pages — drop audit rows so
+            # the corpus is static and the offset honest. (Their presence
+            # in corpus-backed search results is a separate, known wart.)
+            with get_soil() as soil:
+                soil._get_connection().execute(
+                    "DELETE FROM item WHERE _type = 'Action'")
+                soil._get_connection().commit()
+            result = self._page(client, auth_headers, payload, token)
+            seen += [r["uuid"] for r in result["results"]]
+            token = result["continuation_token"]
+            if not token:
+                break
+        assert len(seen) == len(set(seen)), "pages overlap"
+        assert uuids <= set(seen), "pages dropped rows"
+
+    def test_entities_do_not_repeat_on_continuation(self, client, auth_headers):
+        self._notes("entcont", n=2)
+        create = client.post(
+            "/mg", json={"op": "create", "type": "Task",
+                         "data": {"title": "ledger entcont task"}},
+            headers=auth_headers)
+        assert create.status_code == 200
+        payload = {"op": "search", "query": "entcont", "strategy": "fuzzy",
+                   "limit": 1}
+        first = self._page(client, auth_headers, payload, None)
+        assert any(r.get("type") == "Task" for r in first["results"])
+        assert first["continuation_token"]
+        second = self._page(client, auth_headers, payload,
+                            first["continuation_token"])
+        assert not any(r.get("type") == "Task" for r in second["results"])
+
+    def test_invalid_token_rejected(self, client, auth_headers):
+        resp = client.post(
+            "/mg", json={"op": "search", "query": "ledger",
+                         "continuation_token": "not-a-token!!"},
+            headers=auth_headers)
+        assert resp.status_code == 400
+        assert resp.get_json()["error"]["details"]["code"] == "invalid_continuation_token"
+
+    def test_semantic_pages_past_the_old_truncation(self, client, auth_headers,
+                                                    fake_daemon_factory):
+        """Review must-fix: fetch_n equaled offset+limit past the fetch
+        floor, so a full page could never prove more existed — the walk
+        died after ~2 pages. The +1 probe keeps the token honest at depth
+        (65 candidates page as 20/20/20/5)."""
+        uuids = self._notes("deepcont", n=65)
+        fake_daemon_factory([[u, 1.0 - i * 0.001] for i, u in enumerate(uuids)])
+        payload = {"op": "search", "query": "ledger", "strategy": "semantic",
+                   "target_type": "fact", "limit": 20}
+        seen, token = [], None
+        for _ in range(10):
+            result = self._page(client, auth_headers, payload, token)
+            seen += [r["uuid"] for r in result["results"]]
+            token = result["continuation_token"]
+            if not token:
+                break
+        assert seen == uuids, f"{len(seen)} of {len(uuids)} paged"
+
+    def test_negative_offset_token_rejected(self, client, auth_headers):
+        import base64
+
+        token = base64.urlsafe_b64encode(b"-3").decode()
+        resp = client.post(
+            "/mg", json={"op": "search", "query": "ledger",
+                         "continuation_token": token},
+            headers=auth_headers)
+        assert resp.status_code == 400
+        assert resp.get_json()["error"]["details"]["code"] == "invalid_continuation_token"
