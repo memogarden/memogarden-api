@@ -17,6 +17,7 @@ Publishes SSE events for context and scope operations:
 - scope_modified: Published when Scope entity data changes
 """
 
+import base64
 import json
 import logging
 import sqlite3
@@ -1311,6 +1312,35 @@ _SEM_FETCH_FLOOR = 50
 _RERANK_CANDIDATES = 30   # cross-encoder pair budget (~1s CPU int8)
 
 
+def _encode_continuation_token(offset: int) -> str:
+    """Opaque paging cursor for the search verb (api#91, the Session-9
+    TODO): urlsafe base64 of the integer offset into the ranked fact
+    candidates. The client echoes it back unchanged; its only content
+    is the offset."""
+    return base64.urlsafe_b64encode(str(offset).encode()).decode()
+
+
+def _decode_continuation_token(token: str) -> int:
+    try:
+        offset = int(base64.urlsafe_b64decode(token.encode()).decode())
+    except Exception as e:
+        raise ValidationError(
+            "Invalid continuation token",
+            {"continuation_token": token, "code": "invalid_continuation_token"},
+        ) from e
+    if offset < 0:
+        raise ValidationError(
+            "Invalid continuation token",
+            {"continuation_token": token, "code": "invalid_continuation_token"},
+        )
+    return offset
+
+
+def _page_candidates(rows, offset: int, limit: int):
+    """One page of ranked candidates plus whether more remain (api#91)."""
+    return rows[offset:offset + limit], len(rows) > offset + limit
+
+
 def _rerank_order(query, rows, scores, limit):
     """Cross-encoder reorder of the top candidates (api#95 final slice).
 
@@ -1451,6 +1481,15 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
         allowed_scopes = None
     scope_uuid = uid.strip_prefix(request.scope) if request.scope else None
 
+    # api#91: the Session-9 continuation token is an offset into the
+    # ranked FACT candidates. Entities page only on the first call
+    # (core.entity.search is limit-only — there is no offset to resume),
+    # so a continuation call serves facts alone and the first page's
+    # entity results do not repeat.
+    fact_offset = 0
+    if request.continuation_token:
+        fact_offset = _decode_continuation_token(request.continuation_token)
+
     # Strategy echo (api#95 Phase 2): may be downgraded by the facts
     # branch below when a plane is unavailable — the response always
     # reports what actually ran, never what was requested.
@@ -1460,6 +1499,7 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
     # only catches up when the embed daemon wakes — the response says how
     # far behind it is.
     index_freshness: dict = {}
+    fact_has_more = False
 
     # Collect results based on target_type
     results = []
@@ -1467,7 +1507,7 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
     fact_results = []
 
     # Search entities (Core) - using public API
-    if request.target_type in ("entity", "all"):
+    if request.target_type in ("entity", "all") and fact_offset == 0:
         with get_core() as core:
             # Use public search API instead of direct _conn access
             entity_rows = core.entity.search(
@@ -1493,7 +1533,15 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
                 # _semantic_hits; the lexical channel keeps the pre-match
                 # contract. Honest degrade: whichever plane is
                 # unavailable is reported in `strategy`.
-                fetch_n = min(max(request.limit * 2, _SEM_FETCH_FLOOR), 200)
+                # +1 probe row (api#91 review): the daemon returns at most
+                # k rows, so has_more can only be honest when fetch_n
+                # exceeds offset+limit. Past the 200 ceiling the walk ends
+                # — that budget is the daemon fetch design, pre-existing.
+                fetch_n = min(
+                    max(fact_offset + request.limit + 1,
+                        max(request.limit * 2, _SEM_FETCH_FLOOR)),
+                    200,
+                )
                 lex_rows = None
                 sem = None
                 if request.strategy == "hybrid":
@@ -1517,19 +1565,23 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
                 if request.strategy == "semantic":
                     if sem is None:
                         strategy_used = "fuzzy"
-                        item_rows = soil.search_items(
+                        rows = soil.search_items(
                             query=request.query,
                             coverage=request.coverage,
-                            limit=request.limit,
+                            limit=fact_offset + request.limit + 1,
                             allowed_scopes=allowed_scopes,
                             scope_uuid=scope_uuid,
                         )
+                        item_rows, fact_has_more = _page_candidates(
+                            rows, fact_offset, request.limit)
                     else:
+                        page, fact_has_more = _page_candidates(
+                            sem[0], fact_offset, request.limit)
                         if request.rerank:
                             item_rows, scores, reranked = _rerank_order(
-                                request.query, sem[0], sem[1], request.limit)
+                                request.query, page, sem[1], request.limit)
                         else:
-                            item_rows = sem[0][:request.limit]
+                            item_rows = page
                             scores = sem[1]
                 else:  # hybrid — fuse whichever planes answered
                     if lex_rows is not None and sem is not None:
@@ -1547,51 +1599,63 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
                                  sorted(rrf.items(), key=lambda kv: -kv[1])]
                         rows_ordered = [rows_by[u] for u in order
                                         if u in rows_by]
-                        item_rows = rows_ordered[:request.limit]
+                        item_rows, fact_has_more = _page_candidates(
+                            rows_ordered, fact_offset, request.limit)
                         scores = {u: round(rrf[u], 4) for u in order}
                         if request.rerank:
                             item_rows, scores, reranked = _rerank_order(
-                                request.query, rows_ordered, scores,
+                                request.query, item_rows, scores,
                                 request.limit)
                     elif lex_rows is not None:
                         strategy_used = "lexical"
-                        item_rows = lex_rows[:request.limit]
+                        item_rows, fact_has_more = _page_candidates(
+                            lex_rows, fact_offset, request.limit)
                     elif sem is not None:
                         strategy_used = "semantic"
+                        page, fact_has_more = _page_candidates(
+                            sem[0], fact_offset, request.limit)
                         if request.rerank:
                             item_rows, scores, reranked = _rerank_order(
-                                request.query, sem[0], sem[1], request.limit)
+                                request.query, page, sem[1], request.limit)
                         else:
-                            item_rows = sem[0][:request.limit]
+                            item_rows = page
                             scores = sem[1]
                     else:
                         strategy_used = "fuzzy"
-                        item_rows = soil.search_items(
+                        rows = soil.search_items(
                             query=request.query,
                             coverage=request.coverage,
-                            limit=request.limit,
+                            limit=fact_offset + request.limit + 1,
                             allowed_scopes=allowed_scopes,
                             scope_uuid=scope_uuid,
                         )
+                        item_rows, fact_has_more = _page_candidates(
+                            rows, fact_offset, request.limit)
             elif request.strategy == "lexical":
                 # api#95 Phase 1: ranked FTS5 plane — BM25 over the
                 # trigger-maintained item_fts index. Same pre-match scope
-                # enforcement contract as the LIKE path.
-                item_rows = soil.search_items_fts(
+                # enforcement contract as the LIKE path. One extra row
+                # answers "is there a next page" (api#91).
+                rows = soil.search_items_fts(
                     query=request.query,
-                    limit=request.limit,
+                    limit=request.limit + 1,
+                    offset=fact_offset,
                     allowed_scopes=allowed_scopes,
                     scope_uuid=scope_uuid,
                 )
+                item_rows = rows[:request.limit]
+                fact_has_more = len(rows) > request.limit
             else:
                 # Use public search API instead of direct _conn access
-                item_rows = soil.search_items(
+                rows = soil.search_items(
                     query=request.query,
                     coverage=request.coverage,
-                    limit=request.limit,
+                    limit=fact_offset + request.limit + 1,
                     allowed_scopes=allowed_scopes,
                     scope_uuid=scope_uuid,
                 )
+                item_rows, fact_has_more = _page_candidates(
+                    rows, fact_offset, request.limit)
 
             # Convert to response format
             for row in item_rows:
@@ -1629,14 +1693,13 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
     # the system searches (above) — scoped items outside the requester's
     # allowed set never became matches, so no post-fetch exclusion here.
 
-    # TODO: Continuation token implementation (RFC-005)
-    # Session 9: Deferred - requires encoding offset/limit in base64
-    # Future: Implement continuation_token = base64encode(f"{offset}:{limit}:{last_timestamp}")
-    # Future: If request.continuation_token is provided, decode and resume from offset
-    continuation_token = None
-    if len(results) == request.limit:
-        # Would generate token here for real pagination
-        continuation_token = None  # Session 9: Deferred
+    # api#91: the continuation token is real — an opaque offset into the
+    # ranked fact candidates, emitted only when the fact plane has more.
+    # Echo it back as `continuation_token` to fetch the next page.
+    continuation_token = (
+        _encode_continuation_token(fact_offset + request.limit)
+        if fact_has_more and request.target_type != "entity" else None
+    )
 
     # TODO: Strategy "auto" implementation
     # Session 9: Always ran fuzzy (LIKE with wildcards)
