@@ -14,7 +14,6 @@ from system.core import get_core
 from system.soil import Fact, generate_soil_uuid, get_soil
 from utils import uid
 
-
 # ============================================================================
 # Test Fixtures
 # ============================================================================
@@ -490,6 +489,44 @@ class TestSemanticHybridStrategies:
         # both rank-0 → RRF tie at 1/61; lexical channel inserted first
         assert uuids[0] == uid.add_soil_prefix(lex_u)
         assert facts[0]["score"] == pytest.approx(1 / 61, abs=1e-3)
+
+    def test_index_lag_rides_on_semantic_shaped_answers(
+            self, client, auth_headers, fake_daemon_factory, tmp_path,
+            monkeypatch):
+        """api#91: an answer the semantic plane shaped says how far the
+        index is behind (it only catches up when the embed daemon wakes);
+        answers no semantic plane touched carry no figure. Every audited
+        /mg call writes Action facts — not indexed types, never counted."""
+        u = self._note("quarterly ledger", "q4 reconciliation notes")
+        fake_daemon_factory([[u, 0.9]])
+        cache = tmp_path / "idx"
+        cache.mkdir()
+        monkeypatch.setenv("MEMOGARDEN_SEARCH_CACHE", str(cache))
+        state = cache / "index_state.json"
+
+        def search(strategy):
+            resp = client.post(
+                "/mg",
+                json={"op": "search", "query": "ledger", "strategy": strategy,
+                      "target_type": "fact", "limit": 10},
+                headers=auth_headers,
+            )
+            return resp.get_json()["result"]
+
+        # no index on disk → nothing to report
+        assert "index_lag" not in search("semantic")
+
+        from system.soil import get_soil
+        with get_soil() as soil:
+            state.write_text(json.dumps({"watermark": soil.max_change_seq()}))
+        for strategy in ("semantic", "hybrid"):
+            assert search(strategy)["index_lag"] == 0, strategy
+
+        # an indexed-type item changes after the watermark → one behind
+        self._note("later ledger", "written after the catch-up")
+        assert search("semantic")["index_lag"] == 1
+        for plain in ("fuzzy", "lexical"):
+            assert "index_lag" not in search(plain), plain
 
     def test_semantic_scope_refinement_filters_at_boundary(
             self, client, auth_headers, fake_daemon_factory):

@@ -11,10 +11,10 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from system.soil import Fact, generate_soil_uuid, get_soil
-from utils import isodatetime, uid
 
 from api.v1 import operator as operator_mod
+from system.soil import Fact, generate_soil_uuid, get_soil
+from utils import isodatetime, uid
 
 
 def _make_scope(core, label: str) -> str:
@@ -381,6 +381,289 @@ def test_items_search_semantic_rerank_reorders(client, auth_headers,
     uuids = [r["uuid"] for r in body["results"]]
     assert uuids == [uid.add_soil_prefix(b), uid.add_soil_prefix(a)]
     assert body["results"][0]["score"] == pytest.approx(6.0)
+
+
+# --- console paging + live re-check (api#96, api#91) -----------------------
+
+def _search_note(title: str, _type: str = "Note") -> str:
+    """A plain fact of the given type, for the search paging/re-check tests."""
+    with get_soil() as soil:
+        return soil.create_fact(Fact(
+            uuid=generate_soil_uuid(), _type=_type,
+            realized_at=isodatetime.now(), canonical_at=isodatetime.now(),
+            data={"title": title, "description": None, "summary": None},
+            metadata=None, integrity_hash=None, fidelity="full"))
+
+
+def _walk_pages(client, auth_headers, query: str, step: int = 20):
+    """Page a search the way the console does (offset += rows returned)
+    until a short page; returns (uuids in order, per-page sizes)."""
+    seen, sizes, offset = [], [], 0
+    for _ in range(15):
+        body = client.get(
+            f"/api/v1/items/search?{query}&limit={step}&offset={offset}",
+            headers=auth_headers).get_json()
+        uuids = [r["uuid"] for r in body["results"]]
+        seen.extend(uuids)
+        sizes.append(len(uuids))
+        if len(uuids) < step:
+            break
+        offset += len(uuids)
+    return seen, sizes
+
+
+def _two_channel_corpus():
+    """60 lexical-matching notes + 60 daemon-only notes."""
+    lex = [_search_note(f"zephyr glider note {i}") for i in range(60)]
+    sem = [_search_note(f"sailplane wing repair {i}") for i in range(60)]
+    return lex, sem
+
+
+def test_items_search_hybrid_pages_honor_limit(client, auth_headers,
+                                               fake_daemon_factory):
+    """api#96: the default hybrid mode pages like every other mode — no page
+    longer than `limit`, no row on two pages, the walk ends on a short page.
+    It used to return the whole fused set on every call, so the console's
+    "Load more" re-appended page one forever."""
+    lex, sem = _two_channel_corpus()
+    fake_daemon_factory([[u, 0.81 - i * 0.001] for i, u in enumerate(sem)])
+    seen, sizes = _walk_pages(client, auth_headers, "q=zephyr")
+    assert max(sizes) == 20
+    assert sizes[-1] < 20
+    assert len(seen) == len(set(seen)), "a row came back on two pages"
+    # every daemon hit plus the lexical plane's fetch floor (50 of 60)
+    reachable = {uid.add_soil_prefix(u) for u in sem + lex}
+    assert len(seen) == 110 and set(seen) <= reachable
+    assert {uid.add_soil_prefix(u) for u in sem} <= set(seen)
+
+
+def test_items_search_hybrid_rerank_still_pages(client, auth_headers,
+                                                fake_daemon_factory):
+    """?rerank=1 reorders the candidate head, then the same paging applies."""
+    lex, sem = _two_channel_corpus()
+    fake_daemon_factory([[u, 0.5] for u in sem],
+                        rerank_results=[[sem[3], 9.0], [lex[0], 1.0]])
+    first = client.get("/api/v1/items/search?q=zephyr&limit=20&rerank=1",
+                       headers=auth_headers).get_json()
+    assert first["mode"] == "hybrid+rerank"
+    assert len(first["results"]) == 20
+    assert first["results"][0]["uuid"] == uid.add_soil_prefix(sem[3])
+    seen, sizes = _walk_pages(client, auth_headers, "q=zephyr&rerank=1")
+    assert max(sizes) == 20 and sizes[-1] < 20
+    assert len(seen) == len(set(seen))
+    assert len(seen) == 110
+
+
+def test_items_search_drops_hits_of_the_wrong_live_type(client, auth_headers,
+                                                        fake_daemon_factory):
+    """api#91: daemon hits are re-checked against live rows for TYPE as well
+    as scope — the index's build-time type is only a hint, so a row the
+    daemon returns under a type filter it no longer satisfies is dropped."""
+    keep = _search_note("ledger note alpha", _type="Note")
+    stale = _search_note("ledger mail beta", _type="Email")
+    fake_daemon_factory([[stale, 0.9], [keep, 0.5]])
+    for mode in ("semantic", "hybrid"):
+        body = client.get(
+            f"/api/v1/items/search?q=ledger&mode={mode}&type=Note",
+            headers=auth_headers).get_json()
+        assert [r["uuid"] for r in body["results"]] == [
+            uid.add_soil_prefix(keep)], mode
+
+
+def test_items_search_drops_hits_relabelled_out_of_the_scope_filter(
+        client, auth_headers, fake_daemon_factory, core):
+    """api#91: scope is re-checked against live rows — an item relabelled
+    out of the requested scope no longer surfaces under it, even though the
+    daemon's build-time metadata still ranks it there."""
+    hh = _make_scope(core, "Household")
+    ns = _make_scope(core, "NS")
+    relabelled = _labeled_fact("insurance claim doc", [ns])
+    kept = _labeled_fact("insurance renewal home", [hh])
+    fake_daemon_factory([[relabelled, 0.9], [kept, 0.5]])
+    body = client.get(
+        f"/api/v1/items/search?q=insurance&mode=semantic"
+        f"&scope={uid.add_core_prefix(hh)}",
+        headers=auth_headers).get_json()
+    assert [r["uuid"] for r in body["results"]] == [
+        uid.add_soil_prefix(kept)]
+
+
+def _get_search(client, auth_headers, query):
+    return client.get(f"/api/v1/items/search?{query}",
+                      headers=auth_headers).get_json()
+
+
+def test_items_search_reports_how_far_the_index_is_behind(
+        client, auth_headers, fake_daemon_factory, tmp_path, monkeypatch):
+    """api#91: a page the semantic plane shaped says how many indexed-type
+    items changed since the index's last catch-up (it only catches up when
+    the embed daemon wakes). Audit facts never count — the index does not
+    cover them — and pages no semantic plane touched carry no figure."""
+    target = _search_note("ledger note alpha")
+    fake_daemon_factory([[target, 0.9]])
+    cache = tmp_path / "idx"
+    cache.mkdir()
+    monkeypatch.setenv("MEMOGARDEN_SEARCH_CACHE", str(cache))
+    state = cache / "index_state.json"
+
+    # no index on disk → nothing to report
+    assert "index_lag" not in _get_search(client, auth_headers, "q=ledger&mode=semantic")
+
+    # an index caught up to the change feed is current
+    with get_soil() as soil:
+        state.write_text(json.dumps({"watermark": soil.max_change_seq()}))
+    shaped = [_get_search(client, auth_headers, "q=ledger&mode=semantic"),
+              _get_search(client, auth_headers, "q=ledger")]
+    assert [b["mode"] for b in shaped] == ["semantic", "hybrid"]
+    assert [b["index_lag"] for b in shaped] == [0, 0]
+
+    # an audited request writes Action facts — not indexed types, ignored
+    audited = client.post(
+        "/mg", json={"op": "query", "target_type": "fact", "type": "Note"},
+        headers=auth_headers)
+    assert audited.status_code == 200
+    assert _get_search(client, auth_headers, "q=ledger&mode=semantic")["index_lag"] == 0
+
+    # an indexed-type item changes after the watermark → one behind
+    _search_note("later ledger note")
+    assert _get_search(client, auth_headers, "q=ledger&mode=semantic")["index_lag"] == 1
+
+    for plain in ("limit=5", "q=ledger&mode=keyword", "q=ledger&mode=lexical"):
+        assert "index_lag" not in _get_search(client, auth_headers, plain), plain
+
+
+def test_items_search_tells_the_console_where_the_next_page_starts(
+        client, auth_headers):
+    """Every mode answers with `next_offset` and `has_more`. The SQL-paged
+    modes advance by the rows they returned."""
+    for i in range(5):
+        _search_note(f"ledger note {i}")
+    first = _get_search(client, auth_headers, "limit=2")
+    assert (len(first["results"]), first["has_more"], first["next_offset"]) == (2, True, 2)
+    second = _get_search(client, auth_headers, "limit=2&offset=2")
+    assert (second["next_offset"], second["has_more"]) == (4, True)
+    last = _get_search(client, auth_headers, "limit=2&offset=4")
+    assert (len(last["results"]), last["next_offset"], last["has_more"]) == (1, 5, False)
+
+
+def _stale_and_live(client, auth_headers):
+    """40 live notes plus 12 the index still ranks first but which have
+    been superseded since it was built — the normal state after any edit,
+    until the embed daemon wakes."""
+    live = [_search_note(f"sailplane repair note {i}") for i in range(40)]
+    stale = [_search_note(f"sailplane repair old {i}") for i in range(12)]
+    for old in stale:
+        amended = client.post(
+            "/mg",
+            json={"op": "amend", "target": old,
+                  "data": {"title": "renamed away", "description": None,
+                           "summary": None}},
+            headers=auth_headers,
+        )
+        assert amended.status_code == 200, amended.get_json()
+    return live, stale
+
+
+def test_items_search_fills_a_page_past_stale_hits(
+        client, auth_headers, fake_daemon_factory):
+    """api#91: a candidate the live re-check drops must not shorten a page
+    — the console reads a short page as the end of results. The walk keeps
+    going until the page is full; `offset`/`next_offset` are positions in
+    the candidate list, not counts of returned rows."""
+    live, stale = _stale_and_live(client, auth_headers)
+    fake_daemon_factory(
+        [[u, 0.9 - i * 0.001] for i, u in enumerate(stale + live)])
+
+    pages, offset, more = [], 0, True
+    while more and len(pages) < 10:
+        body = _get_search(
+            client, auth_headers,
+            f"q=sailplane&mode=semantic&limit=20&offset={offset}")
+        pages.append(body)
+        offset, more = body["next_offset"], body["has_more"]
+
+    assert [p["mode"] for p in pages] == ["semantic"] * 2
+    assert [len(p["results"]) for p in pages] == [20, 20]
+    assert [p["next_offset"] for p in pages] == [32, 52]
+    assert [p["has_more"] for p in pages] == [True, False]
+    seen = [r["uuid"] for p in pages for r in p["results"]]
+    assert seen == live, "every live row exactly once, stale ones never"
+
+
+def test_items_search_hybrid_pages_are_never_shortened_by_stale_hits(
+        client, auth_headers, fake_daemon_factory):
+    """The default hybrid mode under the same conditions: every page but
+    the last is full, and the walk yields each live row exactly once."""
+    live, stale = _stale_and_live(client, auth_headers)
+    fake_daemon_factory([[u, 0.5] for u in stale + live])
+
+    sizes, seen, offset, more = [], [], 0, True
+    while more and len(sizes) < 10:
+        body = _get_search(
+            client, auth_headers, f"q=sailplane&limit=20&offset={offset}")
+        assert body["mode"] == "hybrid"
+        sizes.append(len(body["results"]))
+        seen.extend(r["uuid"] for r in body["results"])
+        offset, more = body["next_offset"], body["has_more"]
+
+    assert sizes[:-1] == [20] * (len(sizes) - 1) and sizes[-1] <= 20
+    assert len(seen) == len(set(seen)) and set(seen) == set(live)
+
+
+def test_items_search_hybrid_degraded_to_semantic_still_pages(
+        client, auth_headers, fake_daemon_factory):
+    """No lexical hit for the query, so a hybrid request degrades to the
+    semantic plane alone — and that page honors `offset` too."""
+    notes = [_search_note(f"sailplane repair {i}") for i in range(60)]
+    fake_daemon_factory([[u, 0.8 - i * 0.001] for i, u in enumerate(notes)])
+
+    pages = [_get_search(client, auth_headers,
+                         f"q=zephyr&limit=20&offset={o}") for o in (0, 20, 40)]
+    assert {p["mode"] for p in pages} == {"semantic"}
+    assert [len(p["results"]) for p in pages] == [20, 20, 20]
+    assert [p["next_offset"] for p in pages] == [20, 40, 60]
+    assert [p["has_more"] for p in pages] == [True, True, False]
+    seen = [r["uuid"] for p in pages for r in p["results"]]
+    assert seen == notes
+
+
+def test_items_search_rerank_skips_pages_beyond_the_candidate_head(
+        client, auth_headers, fake_daemon_factory):
+    """+rerank only permutes the first _RERANK_CANDIDATES. A page wholly
+    beyond them is served without the cross-encoder (about a second of CPU
+    on the single sync worker) and in exactly the un-reranked order."""
+    lex, sem = _two_channel_corpus()
+    fake_daemon_factory([[u, 0.5] for u in sem],
+                        rerank_results=[[sem[3], 9.0], [lex[0], 1.0]])
+
+    def rerank_calls():
+        return sum(1 for req in fake_daemon_factory.seen_requests
+                   if req.get("op") == "rerank")
+
+    head = _get_search(client, auth_headers, "q=zephyr&limit=20&rerank=1")
+    assert head["mode"] == "hybrid+rerank" and rerank_calls() == 1
+
+    fake_daemon_factory.seen_requests.clear()
+    tail = _get_search(client, auth_headers,
+                       "q=zephyr&limit=20&offset=30&rerank=1")
+    assert tail["mode"] == "hybrid" and rerank_calls() == 0
+    plain = _get_search(client, auth_headers, "q=zephyr&limit=20&offset=30")
+    assert [r["uuid"] for r in tail["results"]] == [r["uuid"] for r in plain["results"]]
+
+
+def test_items_search_clamps_an_oversized_offset(client, auth_headers):
+    """A huge offset used to overflow SQLite in the SQL-paged modes (a
+    500); it now clamps to an empty page."""
+    for i in range(3):
+        _search_note(f"ledger note {i}")
+    for query in ("limit=5", "q=ledger&mode=keyword", "q=ledger&mode=lexical",
+                  "q=ledger&mode=semantic"):
+        response = client.get(
+            f"/api/v1/items/search?{query}&offset={10 ** 30}",
+            headers=auth_headers)
+        assert response.status_code == 200, query
+        body = response.get_json()
+        assert body["results"] == [] and body["has_more"] is False, query
 
 
 def _triage_fact_at(title: str, triage: str, canonical_at: str) -> str:

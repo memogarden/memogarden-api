@@ -23,12 +23,12 @@ from system.exceptions import ValidationError
 from system.soil import get_soil, resolve_chain, resolve_live
 from utils import uid
 
-from ..series import series_key, series_stats
-from ..search_daemon import rerank_scores as daemon_rerank
-from ..search_daemon import search as daemon_search
-
 from ..middleware.decorators import _authenticate_jwt
 from ..middleware.scope_access import enforcement_enabled
+from ..search_daemon import INDEXED_TYPES, index_lag, index_watermark
+from ..search_daemon import rerank_scores as daemon_rerank
+from ..search_daemon import search as daemon_search
+from ..series import series_key, series_stats
 
 logger = logging.getLogger(__name__)
 
@@ -845,26 +845,47 @@ def item_inspector(uuid: str):
 # api#95 Phase 2: the socket client lives in api/search_daemon.py — the
 # verb (handlers/core.py semantic/hybrid) and this console endpoint share
 # one protocol implementation.
-_INDEXED_TYPES = ("Email", "Attachment", "Note", "Entry", "Event")
 
 # api#95 Phase 2: hybrid fuses the lexical plane (FTS5 BM25) with the
 # semantic plane (daemon cosine) via Reciprocal Rank Fusion; when either
 # plane is unavailable the mode degrades honestly down the ladder.
 _RRF_K = 60
+# Candidates fetched from EACH plane for a semantic-shaped query. Paging
+# walks this fixed-depth list (the depth must not change between pages, or
+# RRF would reorder the tail), so those modes end when it runs out.
 _FETCH_FLOOR = 50
 _RERANK_CANDIDATES = 30   # cross-encoder pair budget (~1s CPU int8)
+_OFFSET_CAP = 100_000     # past any real page; SQLite would overflow first
+
+
+def _index_lag(soil) -> dict:
+    """api#91: how far behind the semantic index is, for pages it shaped."""
+    watermark = index_watermark()
+    if watermark is None:
+        return {}
+    return {"index_lag": index_lag(soil, watermark)}
 
 
 @operator_bp.get("/items/search")
 def items_search():
     """Browse + keyword/semantic item search for the console Items tab.
 
-    ?q= text query (semantic when the embed daemon is reachable, lexical
-    FTS5/BM25 otherwise — narrow LIKE only when the lexical plane has no
-    hits, e.g. CJK/substring queries); ?scope= label or uuid filter;
-    ?type= comma list of fact types; ?limit / ?offset for browse,
-    keyword, and lexical modes. Semantic mode ignores offset (top-k by
-    cosine).
+    ?q= text query (hybrid — lexical FTS5/BM25 fused with semantic daemon
+    cosine via RRF — whenever both planes answer; otherwise whichever plane
+    is up, down to narrow LIKE keyword matching); ?scope= label or uuid
+    filter; ?type= comma list of fact types; ?limit / ?offset page every
+    mode.
+
+    Daemon hits are re-checked against LIVE rows for scope and type before
+    they are returned (api#91) — the index's build-time metadata is never
+    trusted. A semantic-shaped page walks the ranked candidate list until
+    it holds `limit` live rows, so dropped hits do not shorten it; `offset`
+    and `next_offset` are positions in that candidate list (at most
+    _FETCH_FLOOR per plane deep), not counts of returned rows.
+
+    Every response carries `next_offset` and `has_more`; a page a semantic
+    plane shaped also carries `index_lag` (indexed-type items changed since
+    the index's last catch-up).
     """
     _authenticate_jwt()
 
@@ -879,7 +900,7 @@ def items_search():
              if t.strip()]
     try:
         limit = max(1, min(int(request.args.get("limit", "50")), 200))
-        offset = max(0, int(request.args.get("offset", "0")))
+        offset = min(max(0, int(request.args.get("offset", "0"))), _OFFSET_CAP)
     except ValueError:
         raise ValidationError(
             "limit/offset must be integers",
@@ -903,8 +924,8 @@ def items_search():
         if not scope_uuids:
             raise ValidationError("unknown scope", {"scope": scope_ref})
 
-    filtered_types = [t for t in types if t in _INDEXED_TYPES] or list(
-        _INDEXED_TYPES)
+    filtered_types = [t for t in types if t in INDEXED_TYPES] or list(
+        INDEXED_TYPES)
 
     mode_req = (request.args.get("mode") or "").strip().lower()
     if mode_req not in ("", "recent", "keyword", "keyword_fallback",
@@ -918,6 +939,12 @@ def items_search():
     # gains a "+rerank" marker so the operator sees what actually ran.
     rerank_req = (request.args.get("rerank") or "").strip().lower() in (
         "1", "true", "yes", "on")
+    # Rerank only permutes the candidate head, so a page entirely beyond it
+    # is the same with or without rerank: skip the cross-encoder there — it
+    # costs about a second on the single sync worker per click, and an
+    # order that could shift if a later page scored where an earlier one
+    # had not.
+    rerank_req = rerank_req and offset < _RERANK_CANDIDATES
 
     def _console_row(r):
         d = _loads(r["data"])
@@ -932,6 +959,12 @@ def items_search():
 
     mode = "recent"
     results: list = []
+    # Semantic-shaped modes set these from their candidate list below.
+    next_offset: int | None = None
+    has_more = False
+    # api#91: results a semantic plane shaped come from an index that only
+    # catches up when the embed daemon wakes — say how far behind it is.
+    freshness: dict = {}
     with get_soil() as soil:
         conn = soil._get_connection()
         base_where = ["superseded_by IS NULL",
@@ -980,14 +1013,22 @@ def items_search():
                 return None
 
         def _uuid_scores(pairs):
-            """Render uuid+score pairs in order (scope-filtered fetch)."""
+            """Render uuid+score pairs in order, fetched against LIVE rows.
+
+            Daemon hits are only a ranking hint: each uuid is re-read and
+            dropped unless it is still live, still in the requested scope
+            AND still of a requested type (api#91 — the daemon answers from
+            build-time metadata, which a relabel or a superseding version
+            can have made wrong).
+            """
             out = []
             uuids = [u for u, _ in pairs]
             scores = dict(pairs)
             if uuids:
                 where = ["superseded_by IS NULL",
-                         f"uuid IN ({','.join('?' * len(uuids))})"]
-                params: list = list(uuids)
+                         f"uuid IN ({','.join('?' * len(uuids))})",
+                         f"_type IN ({','.join('?' * len(filtered_types))})"]
+                params: list = [*uuids, *filtered_types]
                 if scope_uuids:
                     where.append(
                         """EXISTS (SELECT 1 FROM json_each(metadata, '$.scopes') je
@@ -1006,6 +1047,24 @@ def items_search():
                         row["score"] = scores.get(u)
                         out.append(row)
             return out
+
+        def _live_page(ranked):
+            """One page of a ranked candidate list, starting at `offset`.
+
+            Walks `ranked` until it holds `limit` live rows: a candidate
+            the re-check drops (superseded, relabeled or retyped since the
+            index was built) must not shorten the page — the console reads
+            a short page as the end of results (api#91). Returns
+            (rows, next_offset, has_more), the offsets being positions in
+            `ranked`.
+            """
+            rows, position = [], offset
+            while position < len(ranked) and len(rows) < limit:
+                need = limit - len(rows)
+                rows.extend(_uuid_scores(ranked[position:position + need]))
+                position += need
+            position = min(position, len(ranked))
+            return rows, position, position < len(ranked)
 
         if not q or mode_req == "recent":
             results = _recency_or_like(with_like=False)
@@ -1043,6 +1102,7 @@ def items_search():
                 results = _recency_or_like(with_like=True)
             else:
                 mode = "semantic"
+                freshness = _index_lag(soil)
                 ordered = hits
                 if rerank_req:
                     head = hits[:_RERANK_CANDIDATES]
@@ -1058,8 +1118,7 @@ def items_search():
                             + [hp for hp in head if hp[0] not in scored]
                             + hits[_RERANK_CANDIDATES:])
                         mode = "semantic+rerank"
-                page = ordered[offset:offset + limit] if offset else ordered[:limit]
-                results = _uuid_scores([(u, s) for u, s in page])
+                results, next_offset, has_more = _live_page(ordered)
 
         else:  # hybrid — the default whenever a query is present
             # api#95 Phase 2: fuse the lexical plane (FTS5 BM25, pre-match
@@ -1085,6 +1144,7 @@ def items_search():
                                      types=filtered_types, k=fetch_n)
             if lex_ranked is not None and sem_hits is not None:
                 mode = "hybrid"
+                freshness = _index_lag(soil)
                 rrf: dict = {}
                 for channel in (lex_ranked, sem_hits):
                     for rank, (u, _s) in enumerate(channel):
@@ -1104,7 +1164,10 @@ def items_search():
                             + [hp for hp in head if hp[0] not in scored]
                             + fused[_RERANK_CANDIDATES:])
                         mode = "hybrid+rerank"
-                results = _uuid_scores([(u, round(s, 4)) for u, s in fused])
+                # api#96: page the fused list like every other mode. The
+                # whole candidate union used to come back regardless of
+                # limit, so "Load more" re-appended page one forever.
+                results, next_offset, has_more = _live_page(fused)
             elif lex_ranked is not None:
                 mode = "lexical"
                 for r in _fts():
@@ -1128,14 +1191,22 @@ def items_search():
                             + [hp for hp in head if hp[0] not in scored]
                             + sem_hits[_RERANK_CANDIDATES:])
                         mode = "semantic+rerank"
-                results = _uuid_scores(
-                    [(u, s) for u, s in ordered[:limit]])
+                freshness = _index_lag(soil)
+                results, next_offset, has_more = _live_page(ordered)
             else:
                 mode = "keyword_fallback"
                 results = _recency_or_like(with_like=True)
 
+    if next_offset is None:
+        # The SQL-paged modes (recent, keyword, lexical) advance by the
+        # rows they returned; a full page means there may be more.
+        next_offset = offset + len(results)
+        has_more = len(results) == limit
+
     return jsonify({"mode": mode, "q": q, "results": results,
-                    "offset": offset, "limit": limit})
+                    "offset": offset, "limit": limit,
+                    "next_offset": next_offset, "has_more": has_more,
+                    **freshness})
 
 
 @operator_bp.get("/scopes/overview")

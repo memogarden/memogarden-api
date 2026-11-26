@@ -35,6 +35,12 @@ os.environ.setdefault(
     "MEMOGARDEN_EMBED_SOCK",
     str(Path(tempfile.gettempdir()) / "memogarden-tests-no-embed-daemon" / "embed.sock"),
 )
+# The api#91 index-lag signal reads the semantic index's state file. Set
+# unconditionally (not setdefault): an exported MEMOGARDEN_SEARCH_CACHE
+# from the developer's shell would point tests at the real index. No state
+# file there = no lag reported; the lag tests point this at their tmp_path.
+os.environ["MEMOGARDEN_SEARCH_CACHE"] = str(
+    Path(tempfile.gettempdir()) / "memogarden-tests-no-search-cache")
 
 # Import isodatetime for test fixtures (must be after env vars are set)
 from utils import isodatetime  # noqa: E402
