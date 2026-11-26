@@ -9,9 +9,10 @@
     <span class="text-xs text-gray-500 dark:text-gray-400">browse · keyword · ✨ semantic</span>
 </div>
 <p class="text-sm text-gray-600 dark:text-gray-400 mb-3">
-    Recent items by default. A text query searches semantically (✨ bge
-    embeddings); when the embedding daemon is unavailable it falls back to
-    keyword matching. Click a row's id to open its inspector.
+    Recent items by default. A text query runs hybrid — lexical (full-text)
+    fused with ✨ semantic (bge embeddings); when a plane is unavailable it
+    falls back down the ladder to keyword matching. Click a row's id to
+    open its inspector.
 </p>
 
 <div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 mb-4 flex flex-wrap gap-2 items-center">
@@ -79,6 +80,13 @@ function renderResults(items, append) {
         '<div class="bg-white dark:bg-gray-900 shadow rounded-lg p-6 text-center text-gray-400 dark:text-gray-500 text-sm">Nothing found.</div>');
 }
 
+// The semantic index only catches up when the embed daemon wakes, so a
+// page it shaped says how many indexed items changed since (api#91).
+function behind(lag) {
+    if (lag >= 1000) return ' · index 1000+ changes behind';
+    return lag > 0 ? ` · index ${lag} change${lag === 1 ? '' : 's'} behind` : ' · index current';
+}
+
 async function runSearch(reset) {
     const q = document.getElementById('q').value.trim();
     const scope = document.getElementById('scopeFilter').value;
@@ -94,15 +102,25 @@ async function runSearch(reset) {
     const el = document.getElementById('results');
     try {
         const r = await api('/api/v1/items/search?' + params.toString());
+        // Modes are <plane>[+rerank] — match on the plane so a reranked
+        // page still names its plane instead of falling through to recent.
+        const mode = String(r.mode || '');
+        const plane = mode.split('+')[0];
+        const label =
+            plane === 'hybrid' ? '✨+🔤 hybrid (lexical + semantic)' :
+            plane === 'semantic' ? '✨ semantic' :
+            plane === 'lexical' ? 'lexical (full-text)' :
+            plane === 'keyword_fallback' ? 'keyword (planes unavailable)' : 'recent';
+        const lag = Number.isInteger(r.index_lag) ? behind(r.index_lag) : '';
         document.getElementById('modeInfo').textContent =
-            r.mode === 'hybrid' ? '✨+🔤 hybrid (lexical + semantic)' :
-            r.mode === 'semantic' ? '✨ semantic' :
-            r.mode === 'lexical' ? 'lexical (full-text)' :
-            r.mode === 'keyword_fallback' ? 'keyword (planes unavailable)' : 'recent';
+            label + (mode.endsWith('+rerank') ? ' +rerank' : '') + lag;
         renderResults(r.results, !reset);
-        reachedEnd = r.results.length < r.limit;
+        // The server says where the next page starts and whether one exists:
+        // for a semantic-shaped query the offset is a position in the
+        // candidate list, not a count of returned rows.
+        reachedEnd = typeof r.has_more === 'boolean' ? !r.has_more : (r.results.length < r.limit);
         document.getElementById('moreBtn').classList.toggle('hidden', reachedEnd);
-        offset += r.results.length;
+        offset = Number.isInteger(r.next_offset) ? r.next_offset : (offset + r.results.length);
     } catch (err) {
         el.innerHTML = `<div class="text-red-600 dark:text-red-400 text-sm p-3">Search failed: ${esc(err.message)}</div>`;
         document.getElementById('moreBtn').classList.add('hidden');

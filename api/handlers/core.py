@@ -25,9 +25,11 @@ from system.core import get_core
 from system.exceptions import PermissionDenied, ResourceNotFound, ValidationError
 from utils import uid
 
-from ..search_daemon import search as daemon_search
-from ..search_daemon import rerank_scores as daemon_rerank
-
+from ..events import (
+    publish_context_updated,
+    publish_event,
+    publish_frame_updated,
+)
 from ..middleware.scope_access import (
     active_scope_for,
     enforcement_enabled,
@@ -35,11 +37,9 @@ from ..middleware.scope_access import (
     item_visible,
     normalize_scopes,
     public_scope_uuids,
-    require_scope_grant,
     requester_has_all_scopes,
+    require_scope_grant,
 )
-from ..series import series_key, series_members
-
 from ..schemas.semantic import (
     CreateRequest,
     EditRequest,
@@ -56,13 +56,11 @@ from ..schemas.semantic import (
     TrackRequest,
     UnlinkRequest,
 )
+from ..search_daemon import index_lag, index_watermark
+from ..search_daemon import rerank_scores as daemon_rerank
+from ..search_daemon import search as daemon_search
+from ..series import series_key, series_members
 from .decorators import with_audit
-
-from ..events import (
-    publish_context_updated,
-    publish_frame_updated,
-    publish_event,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -1433,6 +1431,10 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
     # reports what actually ran, never what was requested.
     strategy_used = request.strategy
     reranked = False
+    # api#91: results the semantic plane shaped come from an index that
+    # only catches up when the embed daemon wakes — the response says how
+    # far behind it is.
+    index_freshness: dict = {}
 
     # Collect results based on target_type
     results = []
@@ -1481,6 +1483,11 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
                         lex_rows = None
                 sem = _semantic_hits(soil, request.query, allowed_scopes,
                                      scope_uuid, fetch_n)
+                if sem is not None:
+                    watermark = index_watermark()
+                    index_freshness = (
+                        {"index_lag": index_lag(soil, watermark)}
+                        if watermark is not None else {})
 
                 if request.strategy == "semantic":
                     if sem is None:
@@ -1632,4 +1639,5 @@ def handle_search(request: SearchRequest, actor: str) -> dict:
         "coverage": request.coverage,
         "effort": effort_used,
         "reranked": reranked,
+        **index_freshness,
     }
