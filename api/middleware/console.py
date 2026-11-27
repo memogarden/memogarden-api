@@ -96,6 +96,14 @@ def console_items():
     return render_template("console_items.html")
 
 
+@console_bp.route("/console/documents", methods=["GET"])
+def console_documents():
+    """Ingested-document browse screen (statement-pipeline register v2 D9):
+    the Artifact entities the docling trial creates — listing, full-text
+    search, detail, and the source PDF. The trial's exit interface."""
+    return render_template("console_documents.html")
+
+
 @console_bp.route("/console/identity", methods=["GET"])
 def console_identity():
     """Keys & agents management screen (RFC-015 §4.1 + consolidation addendum)."""
