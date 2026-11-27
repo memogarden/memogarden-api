@@ -20,8 +20,10 @@ from utils import uid
 from ..events import publish_artifact_delta
 from ..middleware.scope_access import (
     active_scope_for,
+    current_labels,
     enforcement_enabled,
     item_visible,
+    public_scope_uuids,
     requester_has_all_scopes,
     row_labels,
 )
@@ -148,6 +150,37 @@ def handle_commit_artifact(request: CommitArtifactRequest, actor: str) -> dict:
             raise ValueError(str(e)) from e
 
 
+def _gate_artifact_read(core, artifact_ref: str, actor: str) -> None:
+    """§4.5 read gate for the artifact commit verbs (api#102) — these serve
+    artifact CONTENT, so they gate like a direct read (the get/track-target
+    pattern): the caller's fetch has already 404'd a missing artifact,
+    then current_labels resolves the LIVE version's labels (superseded
+    chains, SG-9/api#97 semantics — a relabel's decision governs history
+    reads) with the public-visibility short-circuit; a cyclic chain (None)
+    fails closed on the named row's own labels, the track-target review
+    ruling. Flag-off and sovereign callers skip the gate (§8 / §4.10).
+
+    Raises:
+        PermissionDenied: 403 scope_read_denied when the artifact is
+            invisible to the requester.
+    """
+    if not enforcement_enabled() or requester_has_all_scopes():
+        return
+    from system.soil import get_soil
+
+    plain = uid.strip_prefix(artifact_ref)
+    entity_row = core.entity.get_by_id(plain)
+    with get_soil() as soil:
+        labels = current_labels(soil, core, plain)
+    if labels is None:
+        labels = row_labels(entity_row.get("data"))
+    if not item_visible(labels, active_scope_for(actor), public_scope_uuids()):
+        raise PermissionDenied(
+            "Artifact is in a scope you are not inside",
+            {"artifact": artifact_ref, "code": "scope_read_denied"},
+        )
+
+
 @with_audit
 def handle_get_artifact_at_commit(request: GetArtifactAtCommitRequest, actor: str) -> dict:
     """Handle get_artifact_at_commit verb - retrieve artifact at commit.
@@ -173,6 +206,7 @@ def handle_get_artifact_at_commit(request: GetArtifactAtCommitRequest, actor: st
             artifact_uuid=request.artifact,
             commit_hash=request.commit_hash,
         )
+        _gate_artifact_read(core, request.artifact, actor)
 
         # artifact_uuid already has core_ prefix from artifact.py
         return result
@@ -203,6 +237,7 @@ def handle_diff_commits(request: DiffCommitsRequest, actor: str) -> dict:
             commit_a=request.commit_a,
             commit_b=request.commit_b,
         )
+        _gate_artifact_read(core, request.artifact, actor)
 
         # artifact_uuid already has core_ prefix from artifact.py
         return result
