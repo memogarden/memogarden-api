@@ -109,10 +109,14 @@ def _artifact_row(entity: dict) -> dict:
     """Console row shape for one live Artifact entity (no content)."""
     data = entity.get("data") or {}
     extraction = data.get("extraction") or {}
+    classification = data.get("classification") or {}
     return {
         "uuid": uid.add_core_prefix(entity["uuid"]),
         "label": data.get("label") or "",
         "category": data.get("category") or "unknown",
+        "doc_class": data.get("doc_class") or "unknown",
+        "mixed": bool(classification.get("mixed")),
+        "confidence": classification.get("confidence"),
         "scopes": data.get("scopes") or [],
         "pages": extraction.get("pages"),
         "seconds": extraction.get("seconds"),
@@ -181,20 +185,20 @@ def _jwt_actor() -> str:
 def list_artifacts():
     """List live Artifact documents, newest first.
 
-    ?category= doc-class filter (categorisation lands later; 'unknown'
-    today) · ?scope= narrow-to-scope filter · ?limit/?offset page.
-    Visibility runs the §4.5 predicate post-fetch (SG-10) — the total
-    reflects the fetched window when filtering hides rows (the same
-    trade-off handle_query documents).
+    ?doc_class= filter (statement/overview/bill/notice/policy/document/
+    mixed/unknown) · ?scope= narrow-to-scope filter · ?limit/?offset
+    page. Visibility runs the §4.5 predicate post-fetch (SG-10) — the
+    total reflects the fetched window when filtering hides rows (the
+    same trade-off handle_query documents).
     """
     _authenticate_jwt()
     limit = _int_arg("limit", 50, _LIST_LIMIT_CAP)
     offset = _int_arg("offset", 0, _OFFSET_CAP)
-    category = (request.args.get("category") or "").strip()
+    doc_class = (request.args.get("doc_class") or "").strip()
     scope_ref = (request.args.get("scope") or "").strip()
     scope_uuid = _resolve_scope_ref(scope_ref) if scope_ref else None
 
-    entities, total = _list_entities(category, scope_uuid, limit, offset)
+    entities, total = _list_entities(doc_class, scope_uuid, limit, offset)
     entities = filter_visible(entities, _jwt_actor(), lambda e: (e.get("data") or {}).get("scopes"))
     return jsonify({
         "artifacts": [_artifact_row(e) for e in entities],
@@ -208,7 +212,7 @@ def list_artifacts():
 def search_artifacts():
     """Document search for the console Documents tab.
 
-    ?q= text query · ?scope= filter · ?category= filter · ?limit/?offset.
+    ?q= text query · ?scope= filter · ?doc_class= filter · ?limit/?offset.
     Ladder, degrading downward never upward: lexical (entity_fts BM25 —
     the runtime-ensured internal index) → keyword_fallback (LIKE via
     core.entity.search) → recent (no query). Lexical hits are re-checked
@@ -218,14 +222,14 @@ def search_artifacts():
     """
     _authenticate_jwt()
     q = (request.args.get("q") or "").strip()
-    category = (request.args.get("category") or "").strip()
+    doc_class = (request.args.get("doc_class") or "").strip()
     scope_ref = (request.args.get("scope") or "").strip()
     limit = _int_arg("limit", 50, _SEARCH_LIMIT_CAP)
     offset = _int_arg("offset", 0, _OFFSET_CAP)
     scope_uuid = _resolve_scope_ref(scope_ref) if scope_ref else None
 
     if not q:
-        entities, total = _list_entities(category, scope_uuid, limit, offset)
+        entities, total = _list_entities(doc_class, scope_uuid, limit, offset)
         entities = filter_visible(entities, _jwt_actor(), lambda e: (e.get("data") or {}).get("scopes"))
         rows = [_artifact_row(e) for e in entities]
         return jsonify({
@@ -262,7 +266,7 @@ def search_artifacts():
                 mode = "keyword_fallback"
             else:
                 rows, next_offset, has_more = _lexical_page(
-                    q, limit, offset, scope_uuid, category
+                    q, limit, offset, scope_uuid, doc_class
                 )
         except (AttributeError, sqlite3.DatabaseError) as e:
             # DatabaseError covers OperationalError and FTS5 corruption
@@ -272,7 +276,7 @@ def search_artifacts():
             mode = "keyword_fallback"
 
         if mode == "keyword_fallback":
-            rows = _keyword_page(q, limit, offset, scope_uuid, category)
+            rows = _keyword_page(q, limit, offset, scope_uuid, doc_class)
             next_offset = offset + limit if len(rows) == limit else None
             has_more = len(rows) == limit
 
@@ -288,7 +292,7 @@ def search_artifacts():
 
 
 def _lexical_page(q: str, limit: int, offset: int, scope_uuid: str | None,
-                  category: str):
+                  doc_class: str):
     """One page of the ranked candidate list, starting at candidate
     position `offset`.
 
@@ -298,7 +302,7 @@ def _lexical_page(q: str, limit: int, offset: int, scope_uuid: str | None,
     short page as the end of results (the api#91 rule, /items/search's
     _live_page). The offsets are positions in the candidate list, not
     counts of returned rows. Lexical hits are re-checked against the
-    LIVE entity row for existence, scope, category and §4.5 visibility —
+    LIVE entity row for existence, scope, doc_class and §4.5 visibility —
     the index is never trusted.
     """
     rows: list = []
@@ -322,7 +326,7 @@ def _lexical_page(q: str, limit: int, offset: int, scope_uuid: str | None,
                     uid.strip_prefix(s) for s in entity["data"].get("scopes") or []
                 ]:
                     continue
-                if category and (entity["data"].get("category") or "unknown") != category:
+                if doc_class and (entity["data"].get("doc_class") or "unknown") != doc_class:
                     continue
                 if not _visible(entity):
                     continue
@@ -338,7 +342,7 @@ def _lexical_page(q: str, limit: int, offset: int, scope_uuid: str | None,
 
 
 def _keyword_page(q: str, limit: int, offset: int, scope_uuid: str | None,
-                  category: str) -> list:
+                  doc_class: str) -> list:
     """The LIKE recall tail (core.entity.search has no offset, so the
     window is fetched whole and sliced — pages stay duplicate-free)."""
     with get_core() as core:
@@ -349,7 +353,7 @@ def _keyword_page(q: str, limit: int, offset: int, scope_uuid: str | None,
     entities = [
         e for e in entities
         if e.get("type") == "Artifact"
-        and (not category or (e.get("data") or {}).get("category", "unknown") == category)
+        and (not doc_class or (e.get("data") or {}).get("doc_class", "unknown") == doc_class)
         and (not scope_uuid or scope_uuid in [
             uid.strip_prefix(s) for s in (e.get("data") or {}).get("scopes") or []
         ])
@@ -358,9 +362,10 @@ def _keyword_page(q: str, limit: int, offset: int, scope_uuid: str | None,
     return [_artifact_row(e) for e in entities[offset:offset + limit]]
 
 
-def _list_entities(category: str, scope_uuid: str | None, limit: int, offset: int):
+def _list_entities(doc_class: str, scope_uuid: str | None, limit: int,
+                   offset: int):
     """The list query behind ?recent mode and GET /artifacts."""
-    data_filters = {"category": category} if category else None
+    data_filters = {"doc_class": doc_class} if doc_class else None
     with get_core() as core:
         entities, total = core.entity.query_with_filters(
             entity_type="Artifact",
@@ -414,6 +419,7 @@ def get_artifact(uuid: str):
             **_artifact_row(entity),
             "content": data.get("content") or "",
             "source": source,
+            "classification": data.get("classification") or {},
         },
         "source_fact": source_fact,
     })
