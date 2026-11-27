@@ -21,6 +21,7 @@ call) but can never leave a fact whose entity update did not commit.
 
 import json
 import logging
+import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
 
@@ -28,6 +29,7 @@ from flask import Blueprint, g, jsonify, request
 
 from system.core import get_core
 from system.exceptions import (
+    LockConflictError,
     PermissionDenied,
     ResourceNotFound,
     ValidationError,
@@ -35,7 +37,7 @@ from system.exceptions import (
 from system.soil import Fact, generate_soil_uuid, get_soil
 from utils import isodatetime, uid
 
-from ..schemas.event import MarkOccurredRequest
+from ..schemas.event import DismissRequest, MarkOccurredRequest
 from ..validation import validate_request
 
 logger = logging.getLogger(__name__)
@@ -48,8 +50,11 @@ calendar_events_bp = Blueprint(
 # legitimately be marked within moments of its end time.
 _MARK_TOLERANCE = timedelta(minutes=5)
 
-# Double-submit serialization for mark-occurred (see _mark_locked).
-_MARK_LOCK = threading.Lock()
+# Review-action double-submit serialization for mark-occurred AND dismiss
+# (see _mark_locked / _dismiss_locked). Process-local; the DB-level
+# guarantee for cross-process races is the verdict identity index
+# (system#5) — these locks narrow the window, the index closes it.
+_REVIEW_LOCK = threading.Lock()
 
 # Event entity fields projected FLAT into the Event fact (the 2026-11-19
 # convergence: no snapshot nest — the occurrence memory is an authored
@@ -119,8 +124,10 @@ def _load_event(core, event_uuid: str) -> dict:
 
 
 def _existing_occurrence(soil, plain_uuid: str) -> dict | None:
-    """Idempotency probe: the Event fact for this event, if any (#31 — the
-    convergence retired the EventOccurrence type; zero instances existed).
+    """Idempotency probe: the Event VERDICT fact for this event, if any
+    (#31 — the convergence retired the EventOccurrence type; zero
+    instances existed). Status-filtered so a dismissal never satisfies a
+    mark probe or vice versa.
 
     Private-connection access mirrors the tada provider / RFC-008 checker
     precedent; Soil has no public content query yet.
@@ -130,10 +137,35 @@ def _existing_occurrence(soil, plain_uuid: str) -> dict | None:
            WHERE _type = 'Event'
              AND superseded_by IS NULL
              AND json_extract(data, '$.event_uuid') IN (?, ?)
+             AND json_extract(metadata, '$.status') = 'occurred'
            LIMIT 1""",
         (plain_uuid, uid.add_core_prefix(plain_uuid)),
     ).fetchone()
     return dict(row) if row else None
+
+
+def _existing_dismissal(soil, plain_uuid: str) -> dict | None:
+    """Idempotency probe for the dismiss action: the Event verdict fact
+    with metadata.status='did_not_occur' (RFC-014 amendment 2026-11-26,
+    api#57)."""
+    row = soil._get_connection().execute(
+        """SELECT * FROM item
+           WHERE _type = 'Event'
+             AND superseded_by IS NULL
+             AND json_extract(data, '$.event_uuid') IN (?, ?)
+             AND json_extract(metadata, '$.status') = 'did_not_occur'
+           LIMIT 1""",
+        (plain_uuid, uid.add_core_prefix(plain_uuid)),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _verdict_landed(soil, plain_uuid: str) -> dict | None:
+    """Either verdict, post-IntegrityError: the identity index rejected
+    our insert because a verdict (either kind) landed first."""
+    return _existing_occurrence(soil, plain_uuid) or _existing_dismissal(
+        soil, plain_uuid
+    )
 
 
 def _occurrence_view(row: dict) -> dict:
@@ -167,6 +199,8 @@ def mark_occurred(event_uuid: str, data: MarkOccurredRequest):
         ResourceNotFound: Unknown event uuid (404)
         ValidationError: Not an Event / bad occurred_at (400)
         PermissionDenied: Unbound API key (403)
+        LockConflictError: Review state already closed (409; the error
+        envelope type is ConflictError, matching mg_client's mapping)
     """
     # Authz gate BEFORE any reads or writes (RFC-014 §6.2).
     if getattr(g, "actor_type", None) not in ("operator", "agent"):
@@ -180,13 +214,11 @@ def mark_occurred(event_uuid: str, data: MarkOccurredRequest):
     plain = uid.strip_prefix(event_uuid)
     now = isodatetime.now()
 
-    # Double-submit serialization (review P1): a process-local lock around
-    # probe → core update → fact write. Covers the realistic double-submit
-    # case (review UI); a cross-worker residual race remains and is
-    # documented — the airtight fix is a partial unique index on
-    # Event.data.event_uuid (schema-version bump, deferred; the
-    # runtime upsert path shares this posture).
-    with _MARK_LOCK:
+    # Review-action serialization: a process-local lock around probe →
+    # core update → fact write. Covers the realistic double-submit case
+    # (review UI); a cross-process race is closed by the verdict identity
+    # index (system#5) — see the IntegrityError translation below.
+    with _REVIEW_LOCK:
         return _mark_locked(plain, occurred_at, now)
 
 
@@ -194,6 +226,17 @@ def _mark_locked(plain: str, occurred_at: str, now: str):
     with get_core() as core:
         entity = _load_event(core, plain)
         entity_data = entity.get("data") or {}
+
+        # Terminal review (RFC-014 amendment §3, api#57): a dismissal
+        # closes the review state — mark-after-dismiss is 409.
+        if entity_data.get("did_not_occur"):
+            raise LockConflictError(
+                "Event already dismissed as did-not-occur — review state "
+                "is closed (RFC-014 amendment: review stamps are terminal)",
+                {"event_uuid": uid.add_core_prefix(plain),
+                 "dismissed_at": entity_data.get("dismissed_at"),
+                 "code": "review_terminal"},
+            )
 
         with get_soil() as soil:
             existing = _existing_occurrence(soil, plain)
@@ -224,9 +267,10 @@ def _mark_locked(plain: str, occurred_at: str, now: str):
         action_uuid = generate_soil_uuid()
         with get_soil() as soil:
             # In-transaction re-probe: under the process lock this is
-            # belt-and-suspenders; if the lock is ever bypassed
-            # (multi-worker), it narrows the duplicate window to the
-            # SQLite write-serialization point.
+            # belt-and-suspenders; across processes the verdict identity
+            # index (system#5) is the guarantee — a raced double-insert
+            # raises IntegrityError, which converges on the verdict that
+            # landed first (idempotent), never duplicates it.
             duplicate = _existing_occurrence(soil, plain)
             if duplicate is not None:
                 return jsonify({
@@ -246,44 +290,60 @@ def _mark_locked(plain: str, occurred_at: str, now: str):
                 _to_schema_field(f): entity_data.get(f)
                 for f in _FLAT_FIELDS
             })
-            soil.create_fact(
-                Fact(
-                    uuid=occurrence_uuid,
-                    _type="Event",
-                    realized_at=now,
-                    canonical_at=occurred_at,
-                    data=flat_data,
-                    metadata={
-                        "source": entity_data.get("source"),
-                        "status": "occurred",
-                        "resolved_at": occurred_at,
-                        "account": entity_data.get("account"),
-                        "calendar_id": entity_data.get("calendar_id"),
-                    },
-                    integrity_hash=None,  # computed by create_fact
-                    fidelity="full",
-                )
-            )
-            soil.create_fact(
-                Fact(
-                    uuid=action_uuid,
-                    _type="Action",
-                    realized_at=now,
-                    canonical_at=now,
-                    data={
-                        "actor": g.actor,
-                        "actor_type": g.actor_type,
-                        "operation": "mark_occurred",
-                        "params": {
-                            "event_uuid": uid.add_core_prefix(plain),
-                            "occurred_at": occurred_at,
+            try:
+                soil.create_fact(
+                    Fact(
+                        uuid=occurrence_uuid,
+                        _type="Event",
+                        realized_at=now,
+                        canonical_at=occurred_at,
+                        data=flat_data,
+                        metadata={
+                            "source": entity_data.get("source"),
+                            "status": "occurred",
+                            "resolved_at": occurred_at,
+                            "account": entity_data.get("account"),
+                            "calendar_id": entity_data.get("calendar_id"),
                         },
-                        "context": "RFC-014 §6 mark-occurred review action",
-                    },
-                    integrity_hash=None,
-                    fidelity="full",
+                        integrity_hash=None,  # computed by create_fact
+                        fidelity="full",
+                    )
                 )
-            )
+                soil.create_fact(
+                    Fact(
+                        uuid=action_uuid,
+                        _type="Action",
+                        realized_at=now,
+                        canonical_at=now,
+                        data={
+                            "actor": g.actor,
+                            "actor_type": g.actor_type,
+                            "operation": "mark_occurred",
+                            "params": {
+                                "event_uuid": uid.add_core_prefix(plain),
+                                "occurred_at": occurred_at,
+                            },
+                            "context": "RFC-014 §6 mark-occurred review action",
+                        },
+                        integrity_hash=None,
+                        fidelity="full",
+                    )
+                )
+            except sqlite3.IntegrityError:
+                # system#5: the verdict identity index rejected the insert
+                # — a cross-process verdict for this event landed between
+                # our probe and our write. Roll back and converge on
+                # whichever verdict landed first (idempotent), never
+                # duplicate it.
+                soil._get_connection().rollback()
+                verdict = _verdict_landed(soil, plain)
+                if verdict is not None:
+                    return jsonify({
+                        "idempotent": True,
+                        "event_uuid": uid.add_core_prefix(plain),
+                        "occurrence": _occurrence_view(verdict),
+                    }), 200
+                raise
         # Soil commits on context exit — both facts land atomically.
 
         logger.info(
@@ -296,6 +356,219 @@ def _mark_locked(plain: str, occurred_at: str, now: str):
             "event_uuid": uid.add_core_prefix(plain),
             "occurred_at": occurred_at,
             "occurrence_uuid": occurrence_uuid,
+            "action_uuid": action_uuid,
+        }), 201
+
+
+# ============================================================================
+# Dismiss (RFC-014 amendment 2026-11-26, api#57) — the did-not-occur verdict
+# ============================================================================
+
+
+def _parse_dismissed_at(raw: str | None) -> str:
+    """Validate/normalize the dismissal stamp.
+
+    Same absolute-ground-truth rules as occurred_at (parseable ISO,
+    timezone-aware, normalized to UTC) MINUS the future rule: dismissing
+    a future slot is legitimate — the slot will not happen (RFC-014
+    amendment §1).
+    """
+    if raw is None:
+        return isodatetime.now()
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as err:
+        raise ValidationError(
+            f"dismissed_at is not a parseable ISO datetime: {raw!r}",
+            {"field": "dismissed_at"},
+        ) from err
+    if parsed.tzinfo is None:
+        raise ValidationError(
+            "dismissed_at must carry a timezone offset — ground truth is "
+            "absolute",
+            {"field": "dismissed_at"},
+        )
+    return parsed.astimezone(UTC).isoformat()
+
+
+@calendar_events_bp.post("/<event_uuid>/dismiss")
+@validate_request
+def dismiss_event(event_uuid: str, data: DismissRequest):
+    """Dismiss a Core Event entity as did-not-occur (RFC-014 amendment
+    2026-11-26, api#57).
+
+    mark-occurred's symmetric sibling: stamps data.did_not_occur=true +
+    data.dismissed_at on the entity (core-first), lands the universal
+    Event verdict fact with metadata.status='did_not_occur' (a recorded
+    non-occurrence, visible in the timeline rather than a silent gap)
+    plus the audit Action fact.
+
+    Authz: the §6.2 matrix — operator JWT or agent-bound API key;
+    unbound API keys are refused with 403.
+
+    Terminal: once either review stamp exists the state is closed —
+    dismiss-after-mark and mark-after-dismiss are 409
+    (review_terminal). No un-dismissing. Same-verb resubmits converge on
+    the existing verdict (200, idempotent — verdicts are immutable, body
+    differences included).
+
+    Returns:
+        201: First dismissal — the Event + Action facts created.
+        200: Idempotent re-dismiss — the existing verdict.
+        409: Review state already closed by the other verdict.
+
+    Raises:
+        ResourceNotFound: Unknown event uuid (404)
+        ValidationError: Not an Event / bad dismissed_at (400)
+        PermissionDenied: Unbound API key (403)
+        LockConflictError: Review state already closed (409; the error
+        envelope type is ConflictError, matching mg_client's mapping)
+    """
+    # Authz gate BEFORE any reads or writes (RFC-014 §6.2 matrix).
+    if getattr(g, "actor_type", None) not in ("operator", "agent"):
+        raise PermissionDenied(
+            "dismiss requires an operator session (JWT) or an agent-bound "
+            "API key; unbound API keys cannot record review verdicts",
+            {"actor_type": getattr(g, "actor_type", None)},
+        )
+
+    dismissed_at = _parse_dismissed_at(data.dismissed_at)
+    plain = uid.strip_prefix(event_uuid)
+    now = isodatetime.now()
+
+    with _REVIEW_LOCK:
+        return _dismiss_locked(plain, dismissed_at, data.reason, now)
+
+
+def _dismiss_locked(plain: str, dismissed_at: str, reason: str | None,
+                    now: str):
+    with get_core() as core:
+        entity = _load_event(core, plain)
+        entity_data = entity.get("data") or {}
+
+        # Terminal review: dismiss-after-mark is 409 (the mirror guard to
+        # mark-occurred's did_not_occur check).
+        if entity_data.get("occurred_at"):
+            raise LockConflictError(
+                "Event already marked occurred — review state is closed "
+                "(RFC-014 amendment: review stamps are terminal)",
+                {"event_uuid": uid.add_core_prefix(plain),
+                 "occurred_at": entity_data["occurred_at"],
+                 "code": "review_terminal"},
+            )
+
+        with get_soil() as soil:
+            existing = _existing_dismissal(soil, plain)
+        if existing is not None:
+            return jsonify({
+                "idempotent": True,
+                "event_uuid": uid.add_core_prefix(plain),
+                "dismissal": _occurrence_view(existing),
+            }), 200
+
+        # Core-first (the mark path's ordering): entity stamp commits
+        # before the facts — a crash here loses nothing that matters (a
+        # re-dismiss converges idempotently; there is no repair variant
+        # because the stamp carries the full verdict inputs).
+        core.entity.update_data(
+            plain,
+            {**entity_data, "did_not_occur": True, "dismissed_at": dismissed_at},
+        )
+        core._conn.commit()
+
+        verdict_uuid = generate_soil_uuid()
+        action_uuid = generate_soil_uuid()
+        with get_soil() as soil:
+            duplicate = _existing_dismissal(soil, plain)
+            if duplicate is not None:
+                return jsonify({
+                    "idempotent": True,
+                    "event_uuid": uid.add_core_prefix(plain),
+                    "dismissal": _occurrence_view(duplicate),
+                }), 200
+            # Flat Event fact, the mark path's projection; the verdict is
+            # metadata.status='did_not_occur'. canonical_at follows the
+            # cancelled honesty rule: a non-occurrence happened "at" its
+            # missed slot, else at the dismissal decision.
+            flat_data = {
+                "event_uuid": uid.add_core_prefix(plain),
+                "source_id": entity_data.get("source_id"),
+                "kind": "event",
+            }
+            flat_data.update({
+                _to_schema_field(f): entity_data.get(f)
+                for f in _FLAT_FIELDS
+            })
+            verdict_metadata = {
+                "source": entity_data.get("source"),
+                "status": "did_not_occur",
+                "resolved_at": dismissed_at,
+                "account": entity_data.get("account"),
+                "calendar_id": entity_data.get("calendar_id"),
+            }
+            if reason:
+                verdict_metadata["reason"] = reason
+            params = {
+                "event_uuid": uid.add_core_prefix(plain),
+                "dismissed_at": dismissed_at,
+            }
+            if reason:
+                params["reason"] = reason
+            try:
+                soil.create_fact(
+                    Fact(
+                        uuid=verdict_uuid,
+                        _type="Event",
+                        realized_at=now,
+                        canonical_at=entity_data.get("starts_at")
+                        or dismissed_at,
+                        data=flat_data,
+                        metadata=verdict_metadata,
+                        integrity_hash=None,
+                        fidelity="full",
+                    )
+                )
+                soil.create_fact(
+                    Fact(
+                        uuid=action_uuid,
+                        _type="Action",
+                        realized_at=now,
+                        canonical_at=now,
+                        data={
+                            "actor": g.actor,
+                            "actor_type": g.actor_type,
+                            "operation": "dismiss_event",
+                            "params": params,
+                            "context": "RFC-014 amendment dismiss review "
+                                       "action (api#57)",
+                        },
+                        integrity_hash=None,
+                        fidelity="full",
+                    )
+                )
+            except sqlite3.IntegrityError:
+                # system#5: the verdict identity index rejected the insert
+                # — converge on whichever verdict landed first.
+                soil._get_connection().rollback()
+                verdict = _verdict_landed(soil, plain)
+                if verdict is not None:
+                    return jsonify({
+                        "idempotent": True,
+                        "event_uuid": uid.add_core_prefix(plain),
+                        "dismissal": _occurrence_view(verdict),
+                    }), 200
+                raise
+        # Soil commits on context exit — both facts land atomically.
+
+        logger.info(
+            "Event dismissed: %s by %s (%s)",
+            plain, g.actor, g.actor_type,
+        )
+        return jsonify({
+            "idempotent": False,
+            "event_uuid": uid.add_core_prefix(plain),
+            "dismissed_at": dismissed_at,
+            "verdict_uuid": verdict_uuid,
             "action_uuid": action_uuid,
         }), 201
 
@@ -316,8 +589,9 @@ def pending_review():
     lexicographically against the ISO cutoff — a past `YYYY-MM-DD` sorts
     before any full ISO timestamp of today, a future one sorts after it.
 
-    Events that did not happen simply stay unmarked (no dismissal path
-    exists — RFC-015 §4.2); they age out of the window.
+    Events that did not happen can be dismissed (POST /<uuid>/dismiss,
+    RFC-014 amendment 2026-11-26 — the did_not_occur verdict); until a
+    verdict lands they age out of the window.
 
     Query params:
         window_days: how far back to look (default 30, cap 365)

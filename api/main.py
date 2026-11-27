@@ -15,6 +15,7 @@ from system import (
 )
 from system.exceptions import (
     AuthenticationError,
+    ConflictError,
     LockConflictError,
     MemoGardenError,
     PermissionDenied,
@@ -219,6 +220,26 @@ def _register_error_handlers(app):
 
         The envelope type is "ConflictError" so REST clients (mg_client) map
         it to their 409-conflict exception class.
+        """
+        response = {
+            "error": {
+                "type": "ConflictError",
+                "message": error.message
+            }
+        }
+        if error.details:
+            response["error"]["details"] = error.details
+        return jsonify(response), 409
+
+    @app.errorhandler(ConflictError)
+    def handle_conflict_error(error):
+        """Handle ConflictError as 409 (same envelope as LockConflictError's).
+
+        First raise sites: the review-terminal guards on
+        mark-occurred/dismiss (api#57 — review stamps are terminal,
+        RFC-014 amendment). Previously ConflictError fell through to the
+        generic MemoGardenError 500 despite the artifact handler's
+        comment claiming a 409; this gives the class its real mapping.
         """
         response = {
             "error": {
