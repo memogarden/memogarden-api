@@ -1149,3 +1149,113 @@ class TestTrackGate:
             client, agent_key["headers"], uid.add_core_prefix(a))
         assert response.status_code == 403
         assert response.get_json()["error"]["details"]["code"] == "scope_read_denied"
+
+
+# ============================================================================
+# api#102 — read gates on the artifact commit verbs
+# ============================================================================
+
+class TestArtifactReadGate:
+    """api#102: get_artifact_at_commit / diff_commits serve artifact
+    CONTENT — the §4.5 read predicate with the public short-circuit;
+    403 scope_read_denied outside the frame, 404 for missing first."""
+
+    def _two_commits(self, client, auth_headers, artifact):
+        """Operator makes two commits; returns (hash_a, hash_b) truncated
+        like callers pass them."""
+        h1 = _commit(client, auth_headers, artifact, auth_headers
+                     ).get_json()["result"]["new_hash"][:8]
+        h2 = _commit(client, auth_headers, artifact, auth_headers
+                     ).get_json()["result"]["new_hash"][:8]
+        return h1, h2
+
+    def _get_at(self, client, headers, artifact, commit_hash):
+        return client.post(
+            "/mg",
+            json={"op": "get_artifact_at_commit", "artifact": artifact,
+                  "commit_hash": commit_hash},
+            headers=headers,
+        )
+
+    def _diff(self, client, headers, artifact, a, b):
+        return client.post(
+            "/mg",
+            json={"op": "diff_commits", "artifact": artifact,
+                  "commit_a": a, "commit_b": b},
+            headers=headers,
+        )
+
+    def test_get_at_commit_denied_outside_frame(
+        self, client, auth_headers, agent_key, scope_uuid, enforcement
+    ):
+        artifact = _artifact(client, auth_headers, scopes=[scope_uuid])
+        h1, _h2 = self._two_commits(client, auth_headers, artifact)
+        response = self._get_at(client, agent_key["headers"], artifact, h1)
+        assert response.status_code == 403
+        assert response.get_json()["error"]["details"]["code"] == "scope_read_denied"
+
+    def test_diff_commits_denied_outside_frame(
+        self, client, auth_headers, agent_key, scope_uuid, enforcement
+    ):
+        artifact = _artifact(client, auth_headers, scopes=[scope_uuid])
+        h1, h2 = self._two_commits(client, auth_headers, artifact)
+        response = self._diff(client, agent_key["headers"], artifact, h1, h2)
+        assert response.status_code == 403
+        assert response.get_json()["error"]["details"]["code"] == "scope_read_denied"
+
+    def test_get_at_commit_public_label_readable(
+        self, client, auth_headers, agent_key, public_scope_uuid, enforcement
+    ):
+        """Read rule: a public-visibility label relaxes the read from any
+        frame — content flows without grant or entry."""
+        artifact = _artifact(client, auth_headers, scopes=[public_scope_uuid])
+        h1, _h2 = self._two_commits(client, auth_headers, artifact)
+        response = self._get_at(client, agent_key["headers"], artifact, h1)
+        assert response.status_code == 200, response.get_json()
+        assert "content" in response.get_json()["result"]
+
+    def test_get_at_commit_allowed_inside_frame(
+        self, client, auth_headers, agent_key, scope_uuid, enforcement
+    ):
+        artifact = _artifact(client, auth_headers, scopes=[scope_uuid])
+        h1, _h2 = self._two_commits(client, auth_headers, artifact)
+        assert _grant_agent(client, auth_headers, agent_key, scope_uuid).status_code == 201
+        assert _enter(client, agent_key["headers"], scope_uuid).status_code == 200
+        response = self._get_at(client, agent_key["headers"], artifact, h1)
+        assert response.status_code == 200, response.get_json()
+
+    def test_diff_commits_allowed_inside_frame(
+        self, client, auth_headers, agent_key, scope_uuid, enforcement
+    ):
+        artifact = _artifact(client, auth_headers, scopes=[scope_uuid])
+        h1, h2 = self._two_commits(client, auth_headers, artifact)
+        assert _grant_agent(client, auth_headers, agent_key, scope_uuid).status_code == 201
+        assert _enter(client, agent_key["headers"], scope_uuid).status_code == 200
+        response = self._diff(client, agent_key["headers"], artifact, h1, h2)
+        assert response.status_code == 200, response.get_json()
+
+    def test_commit_reads_advisory_mode_untouched(
+        self, client, auth_headers, agent_key, scope_uuid
+    ):
+        """Flag off: no gate, byte-identical advisory behavior."""
+        artifact = _artifact(client, auth_headers, scopes=[scope_uuid])
+        h1, h2 = self._two_commits(client, auth_headers, artifact)
+        assert self._get_at(client, agent_key["headers"], artifact, h1).status_code == 200
+        assert self._diff(client, agent_key["headers"], artifact, h1, h2).status_code == 200
+
+    def test_commit_reads_jwt_sovereign(
+        self, client, auth_headers, scope_uuid, enforcement
+    ):
+        artifact = _artifact(client, auth_headers, scopes=[scope_uuid])
+        h1, h2 = self._two_commits(client, auth_headers, artifact)
+        assert self._get_at(client, auth_headers, artifact, h1).status_code == 200
+        assert self._diff(client, auth_headers, artifact, h1, h2).status_code == 200
+
+    def test_get_at_commit_missing_404_under_enforcement(
+        self, client, auth_headers, agent_key, enforcement
+    ):
+        """A missing artifact 404s even under enforcement — existence is
+        not hidden behind the gate (the get precedent)."""
+        response = self._get_at(
+            client, agent_key["headers"], "core_does_not_exist", "deadbeef")
+        assert response.status_code == 404
