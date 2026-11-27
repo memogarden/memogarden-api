@@ -1,0 +1,215 @@
+{% extends "console_base.html" %}
+
+{% block console_title %}Documents{% endblock %}
+{% block console_page %}documents{% endblock %}
+
+{% block console_content %}
+<div class="flex justify-between items-center mb-2">
+    <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Documents</h2>
+    <span class="text-xs text-gray-500 dark:text-gray-400">ingested documents · recent · 🔤 full-text</span>
+</div>
+<p class="text-sm text-gray-600 dark:text-gray-400 mb-3">
+    The documents the ingestion stage has extracted — each an Artifact linked
+    to its stored source file. Recent by default; a text query runs the
+    full-text index (bm25) with keyword fallback. Rows open a detail view;
+    the source PDF opens exactly as ingested.
+</p>
+
+<div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 mb-4 flex flex-wrap gap-2 items-center">
+    <input id="q" type="search" placeholder="Search documents…"
+           class="flex-1 min-w-[12rem] border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm bg-transparent">
+    <select id="scopeFilter" class="border border-gray-300 dark:border-gray-600 rounded-lg px-2 py-1.5 text-sm bg-transparent">
+        <option value="">any scope</option>
+    </select>
+    <select id="categoryFilter" class="border border-gray-300 dark:border-gray-600 rounded-lg px-2 py-1.5 text-sm bg-transparent">
+        <option value="">any category</option>
+        <option value="unknown">unknown</option>
+    </select>
+    <button id="searchBtn" class="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">Search</button>
+    <span id="modeInfo" class="text-xs text-gray-400 dark:text-gray-500"></span>
+</div>
+
+<div id="results" class="space-y-2"></div>
+<div class="mt-3 text-center">
+    <button id="moreBtn" class="hidden px-3 py-1.5 text-xs border border-gray-300 dark:border-gray-600 rounded-lg text-gray-600 dark:text-gray-400">Load more</button>
+</div>
+
+<!-- Detail modal (same pattern as the triage item modal) -->
+<div id="docModal" class="hidden fixed inset-0 z-50 overflow-y-auto" role="dialog" aria-modal="true">
+    <div class="fixed inset-0 bg-black/50" data-close-modal></div>
+    <div class="relative mx-auto my-8 max-w-3xl bg-white dark:bg-gray-900 shadow-xl rounded-lg p-5">
+        <button class="absolute top-3 right-3 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 text-xl leading-none" data-close-modal aria-label="Close">&times;</button>
+        <div id="docModalBody" class="space-y-3"><div class="text-sm text-gray-400">Loading…</div></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block console_scripts %}
+<script>
+let SCOPE_BY_UUID = {};
+let offset = 0, reachedEnd = false;
+
+document.addEventListener('console:overview', (evt) => {
+    for (const s of (evt.detail.scopes || [])) {
+        SCOPE_BY_UUID[s.uuid.replace(/^(soil_|core_)/, '')] = (s.data ? s.data.label : s.label) || s.uuid;
+    }
+    const sel = document.getElementById('scopeFilter');
+    sel.innerHTML = '<option value="">any scope</option>' + (evt.detail.scopes || [])
+        .map(s => `<option value="${esc(s.uuid)}">${esc((s.data ? s.data.label : s.label) || s.uuid)}</option>`)
+        .join('');
+}, { once: true });
+
+function esc(value) {
+    const div = document.createElement('div');
+    div.textContent = value === null || value === undefined ? '' : String(value);
+    return div.innerHTML.replace(/"/g, '&quot;');
+}
+function fmtTime(t) { return (t || '').replace('T', ' ').slice(0, 16); }
+
+function scopeChips(scopes) {
+    return (scopes || []).map(s => {
+        const label = SCOPE_BY_UUID[s.replace(/^(soil_|core_)/, '')] || s.slice(0, 8);
+        return `<span class="inline-block px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 text-xs">${esc(label)}</span>`;
+    }).join(' ');
+}
+
+function renderResults(items, append) {
+    const el = document.getElementById('results');
+    const rows = items.map(it => `
+        <div class="bg-white dark:bg-gray-900 shadow rounded-lg p-3 cursor-pointer hover:ring-1 hover:ring-gray-300 dark:hover:ring-gray-700" data-uuid="${esc(it.uuid)}">
+            <div class="flex justify-between items-start gap-2">
+                <span class="text-sm font-medium text-gray-900 dark:text-gray-100 break-words doc-open">${esc(it.label || it.uuid)}</span>
+                ${typeof it.score === 'number' ? `<span class="text-xs text-indigo-500 flex-shrink-0" title="full-text rank">${Math.round(100 * it.score)}</span>` : ''}
+            </div>
+            <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                ${esc(it.category)} · ${it.pages ? esc(it.pages) + 'p · ' : ''}${fmtTime(it.updated_at)}
+                ${scopeChips(it.scopes) ? '· ' + scopeChips(it.scopes) : ''}
+                · <span class="underline decoration-dotted doc-file cursor-pointer" data-uuid="${esc(it.uuid)}">PDF</span>
+                · <span class="doc-open underline decoration-dotted">${esc(it.uuid.slice(0, 13))}…</span>
+            </div>
+        </div>`);
+    el.innerHTML = append ? el.innerHTML + rows.join('') : (rows.join('') ||
+        '<div class="bg-white dark:bg-gray-900 shadow rounded-lg p-6 text-center text-gray-400 dark:text-gray-500 text-sm">Nothing found.</div>');
+    el.querySelectorAll('.doc-file').forEach(node => {
+        node.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const uuid = node.getAttribute('data-uuid');
+            if (uuid) openPdf(uuid);
+        });
+    });
+    el.querySelectorAll('[data-uuid].doc-open, div[data-uuid]').forEach(node => {
+        node.addEventListener('click', (e) => {
+            if (e.target.closest('.doc-file')) return;
+            const uuid = node.getAttribute('data-uuid');
+            if (uuid) openDoc(uuid);
+        });
+    });
+}
+
+// Top-level navigation cannot carry the Authorization header (the JWT
+// lives in localStorage, no cookie fallback), so the source PDF is
+// fetched with the header and opened from a blob URL — a raw href to
+// the endpoint would 401 every time.
+async function openPdf(uuid) {
+    try {
+        const r = await fetch('/api/v1/artifacts/' + encodeURIComponent(uuid) + '/file', {
+            headers: { Authorization: 'Bearer ' + localStorage.access_token },
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        window.open(URL.createObjectURL(await r.blob()), '_blank', 'noopener');
+    } catch (err) {
+        alert('Could not open the source PDF: ' + err.message);
+    }
+}
+
+async function openDoc(uuid) {
+    const body = document.getElementById('docModalBody');
+    document.getElementById('docModal').classList.remove('hidden');
+    body.innerHTML = '<div class="text-sm text-gray-400">Loading…</div>';
+    try {
+        const r = await api('/api/v1/artifacts/' + encodeURIComponent(uuid));
+        const a = r.artifact, sf = r.source_fact || {};
+        const meta = [
+            esc(a.category),
+            a.pages ? esc(a.pages) + ' pages' : '',
+            a.truncated ? 'truncated' : '',
+            sf.filename ? esc(sf.filename) : '',
+            sf.size ? Math.round(sf.size / 1024) + ' KB' : '',
+            fmtTime(a.updated_at),
+        ].filter(Boolean).join(' · ');
+        body.innerHTML = `
+            <h3 class="text-base font-semibold text-gray-900 dark:text-gray-100 break-words">${esc(a.label || a.uuid)}</h3>
+            <div class="text-xs text-gray-500 dark:text-gray-400">${meta} ${scopeChips(a.scopes) ? '· ' + scopeChips(a.scopes) : ''}</div>
+            <div class="flex flex-wrap gap-2 pt-1">
+                <button id="openPdfBtn" class="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-700">Open source PDF</button>
+                <span class="text-xs text-gray-400 self-center" id="relabelInfo">${esc(a.category === 'unknown' ? 'uncategorised' : '')}</span>
+            </div>
+            <div class="flex flex-wrap gap-2 items-center pt-1 border-t border-gray-200 dark:border-gray-700">
+                <span class="text-xs text-gray-500 dark:text-gray-400">Relabel:</span>
+                <select id="relabelScope" class="border border-gray-300 dark:border-gray-600 rounded-lg px-2 py-1 text-xs bg-transparent">
+                    <option value="">pick a scope…</option>
+                </select>
+                <button id="relabelBtn" class="px-3 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded-lg text-gray-600 dark:text-gray-400">Apply</button>
+                <span id="relabelMsg" class="text-xs text-gray-400"></span>
+            </div>
+            <pre class="text-xs leading-relaxed whitespace-pre-wrap bg-gray-50 dark:bg-gray-800 text-gray-800 dark:text-gray-200 rounded-lg p-3 max-h-96 overflow-y-auto">${esc(a.content)}</pre>`;
+        const sel = body.querySelector('#relabelScope');
+        sel.innerHTML = '<option value="">pick a scope…</option>' + Object.entries(SCOPE_BY_UUID)
+            .map(([uuid, label]) => `<option value="${esc(uuid)}">${esc(label)}</option>`).join('');
+        body.querySelector('#openPdfBtn').addEventListener('click', () => openPdf(a.uuid));
+        body.querySelector('#relabelBtn').addEventListener('click', async () => {
+            const scope = sel.value;
+            const msg = body.querySelector('#relabelMsg');
+            if (!scope) { msg.textContent = 'pick a scope first'; return; }
+            try {
+                await mg({ op: 'edit', target: a.uuid, set: { scopes: [scope] } });
+                msg.textContent = 'relabelled';
+                runSearch(false);
+            } catch (err) { msg.textContent = 'failed: ' + err.message; }
+        });
+    } catch (err) {
+        body.innerHTML = `<div class="text-red-600 dark:text-red-400 text-sm">Load failed: ${esc(err.message)}</div>`;
+    }
+}
+
+document.querySelectorAll('#docModal [data-close-modal]').forEach(node =>
+    node.addEventListener('click', () => document.getElementById('docModal').classList.add('hidden')));
+
+async function runSearch(reset) {
+    const q = document.getElementById('q').value.trim();
+    const scope = document.getElementById('scopeFilter').value;
+    const category = document.getElementById('categoryFilter').value;
+    if (reset) { offset = 0; reachedEnd = false; }
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (scope) params.set('scope', scope);
+    if (category) params.set('category', category);
+    params.set('limit', '50');
+    params.set('offset', String(offset));
+    const el = document.getElementById('results');
+    try {
+        const endpoint = q ? '/api/v1/artifacts/search' : '/api/v1/artifacts';
+        const r = await api(endpoint + '?' + params.toString());
+        const results = q ? r.results : r.artifacts;
+        document.getElementById('modeInfo').textContent =
+            q ? `mode: ${r.mode}` : `${r.total} document${r.total === 1 ? '' : 's'}`;
+        renderResults(results || [], !reset);
+        reachedEnd = typeof r.has_more === 'boolean' ? !r.has_more : ((results || []).length < 50);
+        document.getElementById('moreBtn').classList.toggle('hidden', reachedEnd);
+        offset = Number.isInteger(r.next_offset) ? r.next_offset : (offset + (results || []).length);
+    } catch (err) {
+        el.innerHTML = `<div class="text-red-600 dark:text-red-400 text-sm p-3">Search failed: ${esc(err.message)}</div>`;
+        document.getElementById('moreBtn').classList.add('hidden');
+    }
+}
+
+document.getElementById('searchBtn').addEventListener('click', () => runSearch(true));
+document.getElementById('q').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(true); });
+document.getElementById('scopeFilter').addEventListener('change', () => runSearch(true));
+document.getElementById('categoryFilter').addEventListener('change', () => runSearch(true));
+document.getElementById('moreBtn').addEventListener('click', () => runSearch(false));
+(async function init() {
+    await runSearch(true);
+})();
+</script>
+{% endblock %}

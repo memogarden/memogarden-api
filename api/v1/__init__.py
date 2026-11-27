@@ -59,6 +59,11 @@ api_v1_bp.register_blueprint(runs_bp)
 from .operator import operator_bp  # noqa: E402 (blueprint wiring)
 api_v1_bp.register_blueprint(operator_bp)
 
+# Register artifact reads (statement-pipeline register v2 D9: listing,
+# search, detail, source access — the document trial's exit interface)
+from .artifacts import artifacts_bp  # noqa: E402 (blueprint wiring)
+api_v1_bp.register_blueprint(artifacts_bp)
+
 # Register calendar Event review actions (RFC-014 §6: mark-occurred)
 from .events import calendar_events_bp  # noqa: E402 (blueprint wiring)
 api_v1_bp.register_blueprint(calendar_events_bp)
