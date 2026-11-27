@@ -778,6 +778,24 @@ class TestArtifactWriteGate:
         response = _commit(client, auth_headers, artifact, auth_headers)
         assert response.status_code == 200, response.get_json()
 
+    def test_commit_prefixed_legacy_label_normalized(
+        self, client, auth_headers, agent_key, scope_uuid, enforcement
+    ):
+        """A legacy prefixed label in data.scopes must not wrongly deny an
+        inside-frame write — the gate normalizes through row_labels like
+        every other gate (review finding)."""
+        with get_core() as core:
+            artifact = core.entity.create(
+                entity_type="Artifact",
+                data={"title": "legacy", "content": "",
+                      "scopes": [scope_uuid]},  # core_-prefixed
+            )
+            core._conn.commit()
+        assert _grant_agent(client, auth_headers, agent_key, scope_uuid).status_code == 201
+        assert _enter(client, agent_key["headers"], scope_uuid).status_code == 200
+        response = _commit(client, agent_key["headers"], artifact, auth_headers)
+        assert response.status_code == 200, response.get_json()
+
 
 class TestRelationWriteGate:
     """api#100: a relation write touches its endpoints — both must be
@@ -833,6 +851,15 @@ class TestRelationWriteGate:
         response = self._edit(client, agent_key["headers"], rel)
         assert response.status_code == 200, response.get_json()
 
+    def test_edit_relation_jwt_sovereign(
+        self, client, auth_headers, scope_uuid, enforcement
+    ):
+        open_entity = _unscoped_entity(client, auth_headers)
+        hidden = _scoped_entity(client, auth_headers, scope_uuid)
+        rel = _link(client, auth_headers, open_entity, hidden)
+        response = self._edit(client, auth_headers, rel)
+        assert response.status_code == 200, response.get_json()
+
 
 class TestRelationReadStubbing:
     """api#100: §4.9(4) / visibility addendum §6 item 5 — edges stay
@@ -881,6 +908,9 @@ class TestRelationReadStubbing:
         assert "unresolved" not in body
         assert body["metadata"] == {"note": "operator note"}
         assert body["evidence"] == {"quote": "scoped content quote"}
+        assert "time_horizon" in body
+        assert "last_access_at" in body
+        assert "created_at" in body
 
     def test_get_relation_advisory_mode_untouched(
         self, client, auth_headers, agent_key, scope_uuid
@@ -913,6 +943,48 @@ class TestRelationReadStubbing:
         edge = next(r for r in body["results"] if r["uuid"] == rel)
         assert edge["unresolved"] == ["target"]
         assert "evidence" not in edge
+
+
+    def test_get_relation_jwt_sovereign_full_row(
+        self, client, auth_headers, agent_key, scope_uuid, enforcement
+    ):
+        open_entity = _unscoped_entity(client, auth_headers)
+        hidden = _scoped_entity(client, auth_headers, scope_uuid)
+        rel = self._link_with_content(client, auth_headers, open_entity, hidden)
+        response = client.post(
+            "/mg", json={"op": "get_relation", "target": rel},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        body = response.get_json()["result"]
+        assert "unresolved" not in body
+        assert body["metadata"] == {"note": "operator note"}
+
+    def test_get_relation_public_endpoint_readable(
+        self, client, auth_headers, agent_key, public_scope_uuid, enforcement
+    ):
+        """Read rule: a public-visibility label relaxes the read from any
+        frame — full row, no stub (visibility addendum §6 item 5)."""
+        open_entity = _unscoped_entity(client, auth_headers)
+        public_entity = _scoped_entity(client, auth_headers, public_scope_uuid)
+        rel = self._link_with_content(client, auth_headers, open_entity, public_entity)
+        response = client.post(
+            "/mg", json={"op": "get_relation", "target": rel},
+            headers=agent_key["headers"],
+        )
+        assert response.status_code == 200
+        body = response.get_json()["result"]
+        assert "unresolved" not in body
+        assert body["metadata"] == {"note": "operator note"}
+
+    def test_get_relation_missing_404_under_enforcement(
+        self, client, auth_headers, agent_key, enforcement
+    ):
+        response = client.post(
+            "/mg", json={"op": "get_relation", "target": "core_does_not_exist"},
+            headers=agent_key["headers"],
+        )
+        assert response.status_code == 404
 
 
 # ============================================================================
@@ -1003,3 +1075,77 @@ class TestTrackGate:
         parent_node = node["sources"][0]
         assert parent_node["type"] == "Artifact"
         assert "unresolved" not in parent_node
+
+    def test_track_jwt_sovereign_full_chain(
+        self, client, auth_headers, agent_key, scope_uuid, enforcement
+    ):
+        grand, parent, child = self._chain(parent_scopes=[scope_uuid])
+        response = self._track(
+            client, auth_headers, uid.add_core_prefix(child))
+        assert response.status_code == 200
+        node = response.get_json()["result"]["chain"][0]
+        parent_node = node["sources"][0]
+        assert parent_node["type"] == "Artifact"
+        assert "unresolved" not in parent_node
+
+    def test_track_public_ancestor_resolved(
+        self, client, auth_headers, agent_key, public_scope_uuid, enforcement
+    ):
+        """Read rule: a public-visibility ancestor is resolved from any
+        frame — the track gate takes the public short-circuit like every
+        read path (visibility addendum §6 item 5)."""
+        grand, parent, child = self._chain(parent_scopes=[public_scope_uuid])
+        response = self._track(
+            client, agent_key["headers"], uid.add_core_prefix(child))
+        assert response.status_code == 200
+        parent_node = response.get_json()["result"]["chain"][0]["sources"][0]
+        assert parent_node["type"] == "Artifact"
+        assert "unresolved" not in parent_node
+        assert parent_node["sources"][0]["id"] == uid.add_core_prefix(grand)
+
+    def test_track_missing_target_404_under_enforcement(
+        self, client, auth_headers, agent_key, enforcement
+    ):
+        response = self._track(
+            client, agent_key["headers"], "core_does_not_exist")
+        assert response.status_code == 404
+
+    def test_track_depth_cap_invisible_ancestor_marked(
+        self, client, auth_headers, agent_key, scope_uuid, enforcement
+    ):
+        """The node gate sits above the depth early-return, so an
+        invisible ancestor met exactly at the cap renders the same
+        unresolved shape as any other (review finding)."""
+        grand, parent, child = self._chain(parent_scopes=[scope_uuid])
+        response = client.post(
+            "/mg",
+            json={"op": "track", "target": uid.add_core_prefix(child),
+                  "depth": 1},
+            headers=agent_key["headers"],
+        )
+        assert response.status_code == 200
+        parent_node = response.get_json()["result"]["chain"][0]["sources"][0]
+        assert parent_node.get("unresolved") is True
+        assert parent_node["sources"] == []
+
+    def test_track_cyclic_target_fails_closed(
+        self, client, auth_headers, agent_key, scope_uuid, enforcement
+    ):
+        """A cyclic superseded chain gives current_labels None — the
+        target gate falls back to the named row's own labels and denies,
+        symmetric with the ancestor gate's None→stub (review finding)."""
+        with get_core() as core:
+            a = core.entity.create(entity_type="Artifact", data={
+                "name": "cycle-a",
+                "scopes": [uid.strip_prefix(scope_uuid)]})
+            b = core.entity.create(
+                entity_type="Artifact", data={"name": "cycle-b"})
+            core._conn.execute(
+                "UPDATE entity SET superseded_by = ? WHERE uuid = ?", (b, a))
+            core._conn.execute(
+                "UPDATE entity SET superseded_by = ? WHERE uuid = ?", (a, b))
+            core._conn.commit()
+        response = self._track(
+            client, agent_key["headers"], uid.add_core_prefix(a))
+        assert response.status_code == 403
+        assert response.get_json()["error"]["details"]["code"] == "scope_read_denied"

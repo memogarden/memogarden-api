@@ -781,7 +781,8 @@ def _relation_row(row) -> dict:
     }
 
 
-def _gated_relation_row(row, active_scope: str | None, public_scopes: frozenset) -> dict:
+def _gated_relation_row(row, labels: dict, active_scope: str | None,
+                        public_scopes: frozenset) -> dict:
     """§4.9(4) / visibility addendum §6 item 5 (api#100): relation edges
     stay fully listed — uuid/kind/endpoint-type only, no item data — and
     endpoints the reader cannot access are presented as unresolved
@@ -793,8 +794,15 @@ def _gated_relation_row(row, active_scope: str | None, public_scopes: frozenset)
     edge reduces to the stub shape. Reads honor the public-visibility
     short-circuit; flag-off and sovereign callers get the full row
     (callers check enforcement_enabled()/requester_has_all_scopes() first).
+
+    Args:
+        row: The relation row.
+        labels: live_labels() result covering both endpoints. Callers
+            batch (query_relation resolves every row's endpoints in one
+            call) so the request costs two store opens, not two per row.
+        active_scope: The requester's active scope.
+        public_scopes: Plain uuids of public-visibility scopes.
     """
-    labels = live_labels([row["source"], row["target"]])
     unresolved = [
         side
         for side in ("source", "target")
@@ -840,7 +848,10 @@ def handle_get_relation(request: GetRequest, actor: str) -> dict:
 
         if enforcement_enabled() and not requester_has_all_scopes():
             return _gated_relation_row(
-                row, active_scope_for(actor), public_scope_uuids()
+                row,
+                live_labels([row["source"], row["target"]]),
+                active_scope_for(actor),
+                public_scope_uuids(),
             )
         return _relation_row(row)
 
@@ -873,7 +884,14 @@ def handle_query_relation(request: QueryRelationRequest, actor: str) -> dict:
         if enforcement_enabled() and not requester_has_all_scopes():
             active_scope = active_scope_for(actor)
             public_scopes = public_scope_uuids()
-            results = [_gated_relation_row(row, active_scope, public_scopes) for row in rows]
+            endpoint_refs = list({
+                ref for row in rows for ref in (row["source"], row["target"])
+            })
+            labels = live_labels(endpoint_refs)
+            results = [
+                _gated_relation_row(row, labels, active_scope, public_scopes)
+                for row in rows
+            ]
         else:
             results = [_relation_row(row) for row in rows]
 
@@ -1129,18 +1147,19 @@ def handle_track(request: TrackRequest, actor: str) -> dict:
         public_scopes = public_scope_uuids()
 
     with get_core() as core:
-        # Existence probe — 404 for a missing target, unchanged
-        core.entity.get_by_id(target_uuid)
-
-        # Target direct-read gate. current_labels' None (cyclic chain) is
-        # not a scope question — the tree builder's own stubs keep
-        # today's dangling-parent response for those.
+        # Target direct-read gate — a missing target 404s first,
+        # unchanged. current_labels follows superseded chains to the live
+        # labels; None there means a cyclic chain (corrupt data): fail
+        # CLOSED on the named row's own labels, symmetric with the
+        # ancestor gate below — otherwise the tree builder would render
+        # a cyclic-chain target fully (review finding).
+        entity_row = core.entity.get_by_id(target_uuid)
         if enforce:
             with get_soil() as soil:
                 target_labels = current_labels(soil, core, target_uuid)
-            if target_labels is not None and not item_visible(
-                target_labels, active_scope, public_scopes
-            ):
+            if target_labels is None:
+                target_labels = row_labels(entity_row.get("data"))
+            if not item_visible(target_labels, active_scope, public_scopes):
                 raise PermissionDenied(
                     "Target is in a scope you are not inside",
                     {"target": request.target, "code": "scope_read_denied"},
@@ -1155,6 +1174,36 @@ def handle_track(request: TrackRequest, actor: str) -> dict:
 
         def build_tree(entity_uuid: str, current_depth: int) -> dict:
             """Recursively build derivation tree for an entity."""
+            # Get entity details
+            try:
+                entity = core.entity.get_by_id(entity_uuid)
+            except ResourceNotFound:
+                return {
+                    "kind": "entity",
+                    "id": uid.add_core_prefix(entity_uuid),
+                    "sources": [],  # Entity not found
+                }
+
+            # api#101 node gate: the walk revealed this ancestor, the
+            # caller did not name it (the root passed the direct-read
+            # gate above). Invisible → unresolved reference, subtree
+            # pruned — recursing would only enumerate more hidden ids.
+            # Sits above the depth/cycle early-returns so an invisible
+            # ancestor renders the same unresolved shape wherever the
+            # walk meets it (review finding).
+            if enforce and current_depth > 0:
+                with get_soil() as soil:
+                    node_labels = current_labels(soil, core, entity_uuid)
+                if node_labels is None or not item_visible(
+                    node_labels, active_scope, public_scopes
+                ):
+                    return {
+                        "kind": "entity",
+                        "id": uid.add_core_prefix(entity_uuid),
+                        "unresolved": True,
+                        "sources": [],
+                    }
+
             # Check depth limit
             if depth_limit is not None and current_depth >= depth_limit:
                 return {
@@ -1172,33 +1221,6 @@ def handle_track(request: TrackRequest, actor: str) -> dict:
                 }
 
             visited.add(entity_uuid)
-
-            # Get entity details
-            try:
-                entity = core.entity.get_by_id(entity_uuid)
-            except ResourceNotFound:
-                return {
-                    "kind": "entity",
-                    "id": uid.add_core_prefix(entity_uuid),
-                    "sources": [],  # Entity not found
-                }
-
-            # api#101 node gate: the walk revealed this ancestor, the
-            # caller did not name it (the root passed the direct-read
-            # gate above). Invisible → unresolved reference, subtree
-            # pruned — recursing would only enumerate more hidden ids.
-            if enforce and current_depth > 0:
-                with get_soil() as soil:
-                    node_labels = current_labels(soil, core, entity_uuid)
-                if node_labels is None or not item_visible(
-                    node_labels, active_scope, public_scopes
-                ):
-                    return {
-                        "kind": "entity",
-                        "id": uid.add_core_prefix(entity_uuid),
-                        "unresolved": True,
-                        "sources": [],
-                    }
 
             sources = []
 

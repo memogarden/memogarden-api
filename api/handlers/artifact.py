@@ -100,7 +100,10 @@ def handle_commit_artifact(request: CommitArtifactRequest, actor: str) -> dict:
         # still 404s before anything is written.
         if enforcement_enabled() and not requester_has_all_scopes():
             current = core.entity.get_by_id(uid.strip_prefix(request.artifact))
-            artifact_scopes = set((current.get("data") or {}).get("scopes") or [])
+            # row_labels normalizes (prefix-strip) like every other gate —
+            # a legacy prefixed label must not wrongly deny an
+            # inside-frame write (review finding).
+            artifact_scopes = set(row_labels(current.get("data")))
             if not item_visible(sorted(artifact_scopes), active_scope_for(actor)):
                 raise PermissionDenied(
                     "Artifact is in a scope you are not inside",
