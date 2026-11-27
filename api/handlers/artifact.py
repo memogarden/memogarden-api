@@ -14,17 +14,23 @@ Publishes SSE events for artifact delta operations:
 import logging
 
 from system.core import get_core
-from system.exceptions import ConflictError, ResourceNotFound
+from system.exceptions import ConflictError, PermissionDenied
 from utils import uid
-from .decorators import with_audit
 
+from ..events import publish_artifact_delta
+from ..middleware.scope_access import (
+    active_scope_for,
+    enforcement_enabled,
+    item_visible,
+    requester_has_all_scopes,
+    row_labels,
+)
 from ..schemas.semantic import (
     CommitArtifactRequest,
     DiffCommitsRequest,
     GetArtifactAtCommitRequest,
 )
-from ..events import publish_artifact_delta
-from ..middleware.scope_access import row_labels
+from .decorators import with_audit
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +90,28 @@ def handle_commit_artifact(request: CommitArtifactRequest, actor: str) -> dict:
         ValueError: If delta operations are invalid
     """
     with get_core() as core:
+        # RFC-011 §4.5 write semantics (api#100): commit_artifact mutates
+        # the artifact's content — strict frame gate on its current labels,
+        # the edit precedent. Visibility never relaxes a write, so no
+        # public-visibility short-circuit here even though these are the
+        # same labels the read paths relax on (ratified 2026-11-19).
+        # Flag-off and sovereign callers skip the gate (§8 / §4.10). The
+        # fetch doubles as the existence check, so a missing artifact
+        # still 404s before anything is written.
+        if enforcement_enabled() and not requester_has_all_scopes():
+            current = core.entity.get_by_id(uid.strip_prefix(request.artifact))
+            # row_labels normalizes (prefix-strip) like every other gate —
+            # a legacy prefixed label must not wrongly deny an
+            # inside-frame write (review finding).
+            artifact_scopes = set(row_labels(current.get("data")))
+            if not item_visible(sorted(artifact_scopes), active_scope_for(actor)):
+                raise PermissionDenied(
+                    "Artifact is in a scope you are not inside",
+                    {"artifact": request.artifact,
+                     "item_scopes": sorted(artifact_scopes),
+                     "code": "scope_write_denied"},
+                )
+
         try:
             result = core.artifact.commit_delta(
                 artifact_uuid=request.artifact,

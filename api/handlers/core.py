@@ -33,6 +33,7 @@ from ..events import (
 )
 from ..middleware.scope_access import (
     active_scope_for,
+    current_labels,
     enforcement_enabled,
     filter_visible,
     item_visible,
@@ -715,6 +716,27 @@ def handle_edit_relation(request: EditRequest, actor: str) -> dict:
         ResourceNotFound: If relation doesn't exist
     """
     with get_core() as core:
+        # RFC-011 §4.5 write semantics (api#100): the endpoints are what a
+        # relation write touches — both must be writable by the requester
+        # (active-frame membership, strict; visibility never relaxes a
+        # write, so no public-visibility short-circuit here even though
+        # the read paths relax on it). Flag-off and sovereign callers
+        # skip the gate (§8 / §4.10).
+        if enforcement_enabled() and not requester_has_all_scopes():
+            current = core.relation.get_by_id(request.target)
+            endpoint_labels = live_labels([current["source"], current["target"]])
+            for side in ("source", "target"):
+                if not item_visible(
+                    endpoint_labels.get(current[side]) or [],
+                    active_scope_for(actor),
+                ):
+                    raise PermissionDenied(
+                        "Relation endpoint is in a scope you are not inside",
+                        {"target": request.target, "endpoint": side,
+                         "endpoint_uuid": current[side],
+                         "code": "scope_write_denied"},
+                    )
+
         # Edit the relation
         core.relation.edit(
             relation_id=request.target,
@@ -738,19 +760,73 @@ def handle_edit_relation(request: EditRequest, actor: str) -> dict:
             item_labels=live_labels([row["source"], row["target"]]),
         )
 
-        return {
-            "uuid": uid.add_core_prefix(row["uuid"]),
-            "kind": row["kind"],
-            "source": uid.add_core_prefix(row["source"]),
-            "source_type": row["source_type"],
-            "target": uid.add_core_prefix(row["target"]),
-            "target_type": row["target_type"],
-            "time_horizon": row["time_horizon"],
-            "last_access_at": row["last_access_at"],
-            "created_at": row["created_at"],
-            "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
-            "evidence": json.loads(row["evidence"]) if row["evidence"] else None,
-        }
+        return _relation_row(row)
+
+
+def _relation_row(row) -> dict:
+    """The full (ungated) relation response shape — shared by the relation
+    handlers so the gate and the advisory path can't drift."""
+    return {
+        "uuid": uid.add_core_prefix(row["uuid"]),
+        "kind": row["kind"],
+        "source": uid.add_core_prefix(row["source"]),
+        "source_type": row["source_type"],
+        "target": uid.add_core_prefix(row["target"]),
+        "target_type": row["target_type"],
+        "time_horizon": row["time_horizon"],
+        "last_access_at": row["last_access_at"],
+        "created_at": row["created_at"],
+        "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
+        "evidence": json.loads(row["evidence"]) if row["evidence"] else None,
+    }
+
+
+def _gated_relation_row(row, labels: dict, active_scope: str | None,
+                        public_scopes: frozenset) -> dict:
+    """§4.9(4) / visibility addendum §6 item 5 (api#100): relation edges
+    stay fully listed — uuid/kind/endpoint-type only, no item data — and
+    endpoints the reader cannot access are presented as unresolved
+    references, not omitted (the count stays truthful).
+
+    An edge with an invisible endpoint also drops its content-bearing
+    attributes (time_horizon/metadata/evidence): a quote or note attached
+    to the relation is data about the endpoints, so under enforcement the
+    edge reduces to the stub shape. Reads honor the public-visibility
+    short-circuit; flag-off and sovereign callers get the full row
+    (callers check enforcement_enabled()/requester_has_all_scopes() first).
+
+    Args:
+        row: The relation row.
+        labels: live_labels() result covering both endpoints. Callers
+            batch (query_relation resolves every row's endpoints in one
+            call) so the request costs two store opens, not two per row.
+        active_scope: The requester's active scope.
+        public_scopes: Plain uuids of public-visibility scopes.
+    """
+    unresolved = [
+        side
+        for side in ("source", "target")
+        if not item_visible(labels.get(row[side]) or [], active_scope, public_scopes)
+    ]
+    edge = {
+        "uuid": uid.add_core_prefix(row["uuid"]),
+        "kind": row["kind"],
+        "source": uid.add_core_prefix(row["source"]),
+        "source_type": row["source_type"],
+        "target": uid.add_core_prefix(row["target"]),
+        "target_type": row["target_type"],
+    }
+    if unresolved:
+        edge["unresolved"] = unresolved
+        return edge
+    edge.update({
+        "time_horizon": row["time_horizon"],
+        "last_access_at": row["last_access_at"],
+        "created_at": row["created_at"],
+        "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
+        "evidence": json.loads(row["evidence"]) if row["evidence"] else None,
+    })
+    return edge
 
 
 @with_audit
@@ -770,19 +846,14 @@ def handle_get_relation(request: GetRequest, actor: str) -> dict:
     with get_core() as core:
         row = core.relation.get_by_id(request.target)
 
-        return {
-            "uuid": uid.add_core_prefix(row["uuid"]),
-            "kind": row["kind"],
-            "source": uid.add_core_prefix(row["source"]),
-            "source_type": row["source_type"],
-            "target": uid.add_core_prefix(row["target"]),
-            "target_type": row["target_type"],
-            "time_horizon": row["time_horizon"],
-            "last_access_at": row["last_access_at"],
-            "created_at": row["created_at"],
-            "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
-            "evidence": json.loads(row["evidence"]) if row["evidence"] else None,
-        }
+        if enforcement_enabled() and not requester_has_all_scopes():
+            return _gated_relation_row(
+                row,
+                live_labels([row["source"], row["target"]]),
+                active_scope_for(actor),
+                public_scope_uuids(),
+            )
+        return _relation_row(row)
 
 
 @with_audit
@@ -810,21 +881,19 @@ def handle_query_relation(request: QueryRelationRequest, actor: str) -> dict:
             limit=request.limit,
         )
 
-        results = []
-        for row in rows:
-            results.append({
-                "uuid": uid.add_core_prefix(row["uuid"]),
-                "kind": row["kind"],
-                "source": uid.add_core_prefix(row["source"]),
-                "source_type": row["source_type"],
-                "target": uid.add_core_prefix(row["target"]),
-                "target_type": row["target_type"],
-                "time_horizon": row["time_horizon"],
-                "last_access_at": row["last_access_at"],
-                "created_at": row["created_at"],
-                "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
-                "evidence": json.loads(row["evidence"]) if row["evidence"] else None,
+        if enforcement_enabled() and not requester_has_all_scopes():
+            active_scope = active_scope_for(actor)
+            public_scopes = public_scope_uuids()
+            endpoint_refs = list({
+                ref for row in rows for ref in (row["source"], row["target"])
             })
+            labels = live_labels(endpoint_refs)
+            results = [
+                _gated_relation_row(row, labels, active_scope, public_scopes)
+                for row in rows
+            ]
+        else:
+            results = [_relation_row(row) for row in rows]
 
         return {
             "results": results,
@@ -1059,9 +1128,42 @@ def handle_track(request: TrackRequest, actor: str) -> dict:
     # Strip prefix from target UUID
     target_uuid = uid.strip_prefix(request.target)
 
+    # RFC-011 §4.5 (api#101): track is the one traversal read that crosses
+    # item boundaries by following derived_from links the caller did not
+    # name. The target is a direct read — it gates like get/explore's
+    # anchor (403, not a stub). Ancestor nodes the walk reveals gate per
+    # node through current_labels — which follows superseded chains to the
+    # live version's labels (SG-9 / api#97 semantics) — and item_visible
+    # with the public short-circuit (a read path); an invisible node
+    # becomes an UNRESOLVED REFERENCE with its subtree pruned (§4.9(4),
+    # visibility addendum §6 item 5): structure stays listed, content does
+    # not. Flag-off and sovereign callers resolve every node fully —
+    # advisory byte-identity and SG-11 both depend on that.
+    enforce = enforcement_enabled() and not requester_has_all_scopes()
+    active_scope = None
+    public_scopes = frozenset()
+    if enforce:
+        active_scope = active_scope_for(actor)
+        public_scopes = public_scope_uuids()
+
     with get_core() as core:
-        # Get the target entity
+        # Target direct-read gate — a missing target 404s first,
+        # unchanged. current_labels follows superseded chains to the live
+        # labels; None there means a cyclic chain (corrupt data): fail
+        # CLOSED on the named row's own labels, symmetric with the
+        # ancestor gate below — otherwise the tree builder would render
+        # a cyclic-chain target fully (review finding).
         entity_row = core.entity.get_by_id(target_uuid)
+        if enforce:
+            with get_soil() as soil:
+                target_labels = current_labels(soil, core, target_uuid)
+            if target_labels is None:
+                target_labels = row_labels(entity_row.get("data"))
+            if not item_visible(target_labels, active_scope, public_scopes):
+                raise PermissionDenied(
+                    "Target is in a scope you are not inside",
+                    {"target": request.target, "code": "scope_read_denied"},
+                )
 
         # Build the derivation tree
         # For now, track derived_from links (entity-to-entity derivation)
@@ -1072,6 +1174,36 @@ def handle_track(request: TrackRequest, actor: str) -> dict:
 
         def build_tree(entity_uuid: str, current_depth: int) -> dict:
             """Recursively build derivation tree for an entity."""
+            # Get entity details
+            try:
+                entity = core.entity.get_by_id(entity_uuid)
+            except ResourceNotFound:
+                return {
+                    "kind": "entity",
+                    "id": uid.add_core_prefix(entity_uuid),
+                    "sources": [],  # Entity not found
+                }
+
+            # api#101 node gate: the walk revealed this ancestor, the
+            # caller did not name it (the root passed the direct-read
+            # gate above). Invisible → unresolved reference, subtree
+            # pruned — recursing would only enumerate more hidden ids.
+            # Sits above the depth/cycle early-returns so an invisible
+            # ancestor renders the same unresolved shape wherever the
+            # walk meets it (review finding).
+            if enforce and current_depth > 0:
+                with get_soil() as soil:
+                    node_labels = current_labels(soil, core, entity_uuid)
+                if node_labels is None or not item_visible(
+                    node_labels, active_scope, public_scopes
+                ):
+                    return {
+                        "kind": "entity",
+                        "id": uid.add_core_prefix(entity_uuid),
+                        "unresolved": True,
+                        "sources": [],
+                    }
+
             # Check depth limit
             if depth_limit is not None and current_depth >= depth_limit:
                 return {
@@ -1089,16 +1221,6 @@ def handle_track(request: TrackRequest, actor: str) -> dict:
                 }
 
             visited.add(entity_uuid)
-
-            # Get entity details
-            try:
-                entity = core.entity.get_by_id(entity_uuid)
-            except ResourceNotFound:
-                return {
-                    "kind": "entity",
-                    "id": uid.add_core_prefix(entity_uuid),
-                    "sources": [],  # Entity not found
-                }
 
             sources = []
 
