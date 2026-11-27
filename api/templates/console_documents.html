@@ -21,8 +21,15 @@
     <select id="scopeFilter" class="border border-gray-300 dark:border-gray-600 rounded-lg px-2 py-1.5 text-sm bg-transparent">
         <option value="">any scope</option>
     </select>
-    <select id="categoryFilter" class="border border-gray-300 dark:border-gray-600 rounded-lg px-2 py-1.5 text-sm bg-transparent">
-        <option value="">any category</option>
+    <select id="docClassFilter" class="border border-gray-300 dark:border-gray-600 rounded-lg px-2 py-1.5 text-sm bg-transparent">
+        <option value="">any class</option>
+        <option value="statement">statement</option>
+        <option value="overview">overview</option>
+        <option value="bill">bill</option>
+        <option value="notice">notice</option>
+        <option value="policy">policy</option>
+        <option value="document">document</option>
+        <option value="mixed">mixed → triage</option>
         <option value="unknown">unknown</option>
     </select>
     <button id="searchBtn" class="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">Search</button>
@@ -82,7 +89,7 @@ function renderResults(items, append) {
                 ${typeof it.score === 'number' ? `<span class="text-xs text-indigo-500 flex-shrink-0" title="full-text rank">${Math.round(100 * it.score)}</span>` : ''}
             </div>
             <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                ${esc(it.category)} · ${it.pages ? esc(it.pages) + 'p · ' : ''}${fmtTime(it.updated_at)}
+                <span class="${it.doc_class === 'mixed' ? 'text-amber-600 dark:text-amber-400 font-medium' : ''}">${esc(it.doc_class)}</span> · ${it.pages ? esc(it.pages) + 'p · ' : ''}${fmtTime(it.updated_at)}
                 ${scopeChips(it.scopes) ? '· ' + scopeChips(it.scopes) : ''}
                 · <span class="underline decoration-dotted doc-file cursor-pointer" data-uuid="${esc(it.uuid)}">PDF</span>
                 · <span class="doc-open underline decoration-dotted">${esc(it.uuid.slice(0, 13))}…</span>
@@ -129,8 +136,9 @@ async function openDoc(uuid) {
     try {
         const r = await api('/api/v1/artifacts/' + encodeURIComponent(uuid));
         const a = r.artifact, sf = r.source_fact || {};
+        const cls = a.classification || {};
         const meta = [
-            esc(a.category),
+            esc(a.doc_class) + (cls.confidence ? ` (${esc(cls.confidence)})` : ''),
             a.pages ? esc(a.pages) + ' pages' : '',
             a.truncated ? 'truncated' : '',
             sf.filename ? esc(sf.filename) : '',
@@ -142,7 +150,7 @@ async function openDoc(uuid) {
             <div class="text-xs text-gray-500 dark:text-gray-400">${meta} ${scopeChips(a.scopes) ? '· ' + scopeChips(a.scopes) : ''}</div>
             <div class="flex flex-wrap gap-2 pt-1">
                 <button id="openPdfBtn" class="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-700">Open source PDF</button>
-                <span class="text-xs text-gray-400 self-center" id="relabelInfo">${esc(a.category === 'unknown' ? 'uncategorised' : '')}</span>
+                ${(cls.evidence || []).map(e => `<span class="text-xs text-gray-400 self-center" title="classification evidence">${esc(e)}</span>`).join('')}
             </div>
             <div class="flex flex-wrap gap-2 items-center pt-1 border-t border-gray-200 dark:border-gray-700">
                 <span class="text-xs text-gray-500 dark:text-gray-400">Relabel:</span>
@@ -178,12 +186,12 @@ document.querySelectorAll('#docModal [data-close-modal]').forEach(node =>
 async function runSearch(reset) {
     const q = document.getElementById('q').value.trim();
     const scope = document.getElementById('scopeFilter').value;
-    const category = document.getElementById('categoryFilter').value;
+    const docClass = document.getElementById('docClassFilter').value;
     if (reset) { offset = 0; reachedEnd = false; }
     const params = new URLSearchParams();
     if (q) params.set('q', q);
     if (scope) params.set('scope', scope);
-    if (category) params.set('category', category);
+    if (docClass) params.set('doc_class', docClass);
     params.set('limit', '50');
     params.set('offset', String(offset));
     const el = document.getElementById('results');
@@ -206,7 +214,7 @@ async function runSearch(reset) {
 document.getElementById('searchBtn').addEventListener('click', () => runSearch(true));
 document.getElementById('q').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(true); });
 document.getElementById('scopeFilter').addEventListener('change', () => runSearch(true));
-document.getElementById('categoryFilter').addEventListener('change', () => runSearch(true));
+document.getElementById('docClassFilter').addEventListener('change', () => runSearch(true));
 document.getElementById('moreBtn').addEventListener('click', () => runSearch(false));
 (async function init() {
     await runSearch(true);

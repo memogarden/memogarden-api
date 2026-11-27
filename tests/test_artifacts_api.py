@@ -1,6 +1,6 @@
 """GET /api/v1/artifacts — the artifact access interface (register v2 D9).
 
-- GET /api/v1/artifacts           — list (category/scope filters, paging)
+- GET /api/v1/artifacts           — list (doc_class/scope filters, paging)
 - GET /api/v1/artifacts/search    — recent → keyword_fallback → lexical ladder
 - GET /api/v1/artifacts/<uuid>    — detail incl. content + source-fact summary
 - GET /api/v1/artifacts/<uuid>/file — the stored source document's bytes
@@ -50,14 +50,16 @@ def _make_attachment_fact(filename: str, sha256: str, content_path: str | None,
 
 
 def _make_artifact(core, label: str, content: str, scopes: list | None = None,
-                   category: str = "unknown", attachment_uuid: str | None = None,
+                   doc_class: str = "unknown", attachment_uuid: str | None = None,
                    sha256: str | None = None) -> str:
     data = {
         "label": label,
         "content": content,
         "content_type": "text/markdown",
         "scopes": scopes or [],
-        "category": category,
+        "doc_class": doc_class,
+        "classification": {"method": "rules-v1", "confidence": "high",
+                           "evidence": ["test fixture"], "mixed": False},
         "extraction": {"engine": "docling", "version": "2.153.0",
                        "pages": 2, "seconds": 40.0, "truncated": False},
     }
@@ -117,24 +119,24 @@ def test_list_returns_rows_without_content(client, core, auth_headers):
     assert labels == {"SP Services Bill", "Course notes"}
     for a in body["artifacts"]:
         assert "content" not in a
-        assert a["category"] == "unknown"
+        assert a["doc_class"] == "unknown"
         assert a["uuid"].startswith("core_")
 
 
-def test_list_category_and_scope_filters(client, core, auth_headers):
+def test_list_doc_class_and_scope_filters(client, core, auth_headers):
     scope_a = core.entity.create(
         entity_type="Scope",
         data={"label": "Household", "visibility": "private",
               "active_participants": [], "artifact_uuids": []},
     )
     core._conn.commit()
-    _make_artifact(core, "Bill A", "charges", category="unknown")
-    _make_artifact(core, "Bill B", "charges", category="utility",
+    _make_artifact(core, "Bill A", "charges", doc_class="unknown")
+    _make_artifact(core, "Bill B", "charges", doc_class="bill",
                    scopes=[scope_a])
 
-    by_category = client.get(
-        "/api/v1/artifacts?category=utility", headers=auth_headers).get_json()
-    assert [a["label"] for a in by_category["artifacts"]] == ["Bill B"]
+    by_doc_class = client.get(
+        "/api/v1/artifacts?doc_class=bill", headers=auth_headers).get_json()
+    assert [a["label"] for a in by_doc_class["artifacts"]] == ["Bill B"]
 
     by_scope = client.get(
         f"/api/v1/artifacts?scope={scope_a}", headers=auth_headers).get_json()
@@ -252,7 +254,7 @@ def test_search_degrades_to_keyword_when_fts_is_unavailable(
     assert [x["label"] for x in body["results"]] == ["Named bill"]
 
 
-def test_search_scope_and_category_filters(fts_enabled, client, auth_headers):
+def test_search_scope_and_doc_class_filters(fts_enabled, client, auth_headers):
     core = fts_enabled
     scope = core.entity.create(
         entity_type="Scope",
@@ -261,10 +263,10 @@ def test_search_scope_and_category_filters(fts_enabled, client, auth_headers):
     )
     core._conn.commit()
     _make_artifact(core, "Statement", "bank statement october", scopes=[scope],
-                   category="statement")
-    _make_artifact(core, "Lecture", "bank of slides on banks", category="unknown")
+                   doc_class="statement")
+    _make_artifact(core, "Lecture", "bank of slides on banks", doc_class="document")
 
-    r = client.get("/api/v1/artifacts/search?q=bank&scope=Finances&category=statement",
+    r = client.get("/api/v1/artifacts/search?q=bank&scope=Finances&doc_class=statement",
                    headers=auth_headers)
     body = r.get_json()
     assert [x["label"] for x in body["results"]] == ["Statement"]
