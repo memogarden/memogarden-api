@@ -237,6 +237,17 @@ def semantic_api():
         # Dispatch to handler
         result = handler(validated_request, actor)
 
+        # Artifact span sync (Project Studio §15.6 edit flow): after a
+        # successful create(Arifact) / commit_artifact, the bridge chunks the
+        # new content via the Artifact Handler and persists the span set.
+        # Never breaks the commit — any failure leaves spans_pending for the
+        # sweep, and the envelope carries no span errors.
+        try:
+            from api.artifact_spans import maybe_sync
+            maybe_sync(op, request.json, result)
+        except Exception:
+            logger.exception("artifact span sync failed (spans stay pending)")
+
         # Build success response
         response = SemanticResponse(
             ok=True,

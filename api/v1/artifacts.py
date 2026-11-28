@@ -16,8 +16,8 @@ internal index; FTS failures degrade down the ladder, never up).
 
 No write surface: relabels go through the existing /mg edit verb
 (cascade to derived facts is D8, a later slice). Content never appears
-in list payloads — detail and the source-file download are the only
-content channels.
+in list payloads — detail, the source-file download, and the fragment-span
+read (§15.5 single resolver) are the only content channels.
 """
 
 import json
@@ -28,6 +28,7 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, request, send_file
 
+from api.artifact_spans import content_version_of, spans_for, status_for
 from system.core import get_core
 from system.exceptions import PermissionDenied, ResourceNotFound, ValidationError
 from system.soil import get_soil
@@ -481,3 +482,35 @@ def get_artifact_file(uuid: str):
         mimetype=mime if mime == "application/pdf" else "application/octet-stream",
         conditional=True,
     )
+
+
+@artifacts_bp.get("/<uuid>/spans")
+def artifact_spans(uuid):
+    """Fragment spans for the artifact's HEAD content version (§15.4/§15.5).
+
+    The single-resolver read surface: every app resolves ^ids through this
+    route — spans are canonical state (schema 20261130), chunked by the
+    Artifact Handler and persisted by the bridge. status: `ok` (spans
+    follow, ordered by document position) · `pending` (§15.6 step 4 — the
+    producer was down at commit; the sweep fills it) · `none` (never
+    chunked — pre-span artifact).
+    """
+    _authenticate_jwt()
+    entity = _load_artifact(uuid)
+    if entity is None:
+        raise ResourceNotFound(
+            "Artifact not found", {"uuid": uid.add_core_prefix(uid.strip_prefix(uuid))}
+        )
+    _gate(entity)
+
+    content = entity["data"].get("content") or ""
+    version = content_version_of(content)
+    with get_core() as core:
+        status = status_for(core._conn, entity["uuid"], version)
+        spans = spans_for(core._conn, entity["uuid"], version) if status == "ok" else []
+    return jsonify({
+        "artifact_uuid": uid.add_core_prefix(entity["uuid"]),
+        "content_version": version,
+        "status": status,
+        "spans": spans,
+    })
