@@ -184,10 +184,10 @@ def create_api_key(conn: sqlite3.Connection, user_id: str, data: APIKeyCreate) -
 
     # Create API key entity (foreign key to entity)
     conn.execute(
-        """INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix, agent_entity_id, capabilities, expires_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (api_key_id, user_id, data.name, key_hash, key_prefix, agent_entity_id,
-         json.dumps(data.capabilities or []), expires_at_str, now)
+        """INSERT INTO api_keys (id, user_id, name, description, key_hash, key_prefix, agent_entity_id, capabilities, expires_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (api_key_id, user_id, data.name, data.description, key_hash, key_prefix,
+         agent_entity_id, json.dumps(data.capabilities or []), expires_at_str, now)
     )
 
     # RFC-011 §6: a key created bound to an agent inherits the agent's
@@ -198,6 +198,7 @@ def create_api_key(conn: sqlite3.Connection, user_id: str, data: APIKeyCreate) -
     return APIKeyResponse(
         id=api_key_id,
         name=data.name,
+        description=data.description,
         key=plain_key,  # Full key only shown on creation
         prefix=key_prefix,
         agent_id=agent_entity_id,
@@ -228,7 +229,7 @@ def list_api_keys(conn: sqlite3.Connection, user_id: str) -> list[APIKeyListResp
     ```
     """
     cursor = conn.execute(
-        """SELECT id, name, key_prefix, agent_entity_id, capabilities, expires_at, created_at, last_seen, revoked_at
+        """SELECT id, name, description, key_prefix, agent_entity_id, capabilities, expires_at, created_at, last_seen, revoked_at
         FROM api_keys
         WHERE user_id = ?
         ORDER BY created_at DESC""",
@@ -244,6 +245,7 @@ def list_api_keys(conn: sqlite3.Connection, user_id: str) -> list[APIKeyListResp
         results.append(APIKeyListResponse(
             id=row["id"],
             name=row["name"],
+            description=row["description"],
             prefix=row["key_prefix"],
             agent_id=row["agent_entity_id"],
             capabilities=json.loads(row["capabilities"] or "[]"),
@@ -308,7 +310,7 @@ def get_api_key_by_id(conn: sqlite3.Connection, api_key_id: str) -> APIKeyListRe
     ```
     """
     cursor = conn.execute(
-        """SELECT id, name, key_prefix, agent_entity_id, capabilities, expires_at, created_at, last_seen, revoked_at
+        """SELECT id, name, description, key_prefix, agent_entity_id, capabilities, expires_at, created_at, last_seen, revoked_at
         FROM api_keys
         WHERE id = ?""",
         (api_key_id,)
@@ -324,6 +326,7 @@ def get_api_key_by_id(conn: sqlite3.Connection, api_key_id: str) -> APIKeyListRe
     return APIKeyListResponse(
         id=row["id"],
         name=row["name"],
+        description=row["description"],
         prefix=row["key_prefix"],
         agent_id=row["agent_entity_id"],
         capabilities=json.loads(row["capabilities"] or "[]"),
@@ -721,6 +724,50 @@ def set_key_capabilities(
     conn.execute(
         "UPDATE api_keys SET capabilities = ? WHERE id = ? AND user_id = ?",
         (json.dumps(capabilities or []), api_key_id, user_id)
+    )
+
+    key = get_api_key_by_id(conn, api_key_id)
+    assert key is not None  # row existence verified above
+    return key
+
+
+def set_key_description(
+    conn: sqlite3.Connection,
+    api_key_id: str,
+    user_id: str,
+    description: str | None,
+) -> APIKeyListResponse:
+    """Set (or clear) an API key's description (api#105).
+
+    Explicit operator action, same guard shape as set_key_capabilities:
+    ownership enforced, revoked keys refused. NULL clears the field.
+
+    Returns:
+        Updated APIKeyListResponse
+
+    Raises:
+        ResourceNotFound: Key not found (or not owned by user_id)
+        LockConflictError: Key is revoked (409)
+    """
+    row = conn.execute(
+        "SELECT revoked_at FROM api_keys WHERE id = ? AND user_id = ?",
+        (api_key_id, user_id)
+    ).fetchone()
+
+    if row is None:
+        raise ResourceNotFound(
+            "API key not found",
+            {"api_key_id": api_key_id}
+        )
+    if row["revoked_at"] is not None:
+        raise LockConflictError(
+            "Cannot update a revoked API key",
+            {"api_key_id": api_key_id}
+        )
+
+    conn.execute(
+        "UPDATE api_keys SET description = ? WHERE id = ? AND user_id = ?",
+        (description, api_key_id, user_id)
     )
 
     key = get_api_key_by_id(conn, api_key_id)

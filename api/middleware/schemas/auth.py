@@ -161,6 +161,12 @@ class APIKeyBase(BaseModel):
         max_length=100,
         description="Descriptive name for the API key (e.g., 'claude-code', 'custom-script')",
     )
+    description: str | None = Field(
+        default=None,
+        max_length=500,
+        description="What the key is for and where it lives (api#105); "
+        "name stays the short identifier used in logs and audit records.",
+    )
 
 
 class APIKeyCreate(APIKeyBase):
@@ -264,6 +270,12 @@ class APIKeyUpdate(BaseModel):
     agent_id: str | None = Field(
         default=None,
         description="Agent entity uuid to bind, null to unbind; absent = no change",
+    )
+    description: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Key description; absent = no change, null = clear, "
+        "set = replace (api#105)",
     )
     capabilities: list[str] | None = Field(
         default=None,

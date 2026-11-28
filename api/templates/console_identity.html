@@ -50,6 +50,7 @@
         </div>
         <div id="mintKeyForm" class="hidden bg-white dark:bg-gray-900 shadow rounded-lg p-3 mt-2 space-y-2">
             <input id="keyName" maxlength="100" class="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm" placeholder="Key name (required, e.g. sessions-daemon)">
+            <input id="keyDescription" maxlength="500" class="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm" placeholder="Description (optional — what is this key for, where does it live)">
             <div class="flex gap-2">
                 <input id="keyExpires" type="datetime-local" class="flex-1 border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm" title="Expiration (optional)">
                 <select id="keyAgent" class="flex-1 border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm">
@@ -137,10 +138,11 @@
     function scopeLabel(s) { return (s.data ? s.data.label : s.label) || s.uuid; }
 
     function renderKeys(keys) {
-        const unbound = keys.filter(k => !(k.agent_entity_id || k.agent_id)).map(k => k.name);
+        const KNOWN_UNBOUND = (n) => /^ingest-/.test(n) || ['tada-trigger', 'sessions-daemon', 'operator-env'].includes(n);
+        const unbound = keys.filter(k => !(k.agent_entity_id || k.agent_id) && !KNOWN_UNBOUND(k.name)).map(k => k.name);
         const warn = el('unboundWarning');
         if (unbound.length) {
-            warn.textContent = 'Unbound keys: ' + unbound.join(', ') + ' — attribution collapses to actor_type=api_key. Bind or retire.';
+            warn.textContent = 'Unbound keys (not a known trigger lane): ' + unbound.join(', ') + ' — attribution collapses to actor_type=api_key. Bind or retire.';
             warn.classList.remove('hidden');
         } else {
             warn.classList.add('hidden');
@@ -158,10 +160,17 @@
                         <button class="px-2 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-800" data-bind-key="${esc(k.id)}">Apply</button>
                     </div>`
                     : '<span class="text-xs text-gray-400 dark:text-gray-500">mint an agent first</span>';
+                const knownUnbound = !agentId && (
+                    /^ingest-/.test(k.name) || ['tada-trigger', 'sessions-daemon', 'operator-env'].includes(k.name));
+                const nameCell = `<b>${esc(k.name)}</b>${knownUnbound
+                    ? ' <span class="text-xs text-gray-400 dark:text-gray-500" title="trigger/personal lane — deliberately unbound (RFC-010 attribution does not apply)">unbound by design</span>' : ''}<div class="text-xs text-gray-400 dark:text-gray-500">${esc(k.key_prefix || '')}</div>${k.description ? `<div class="text-xs text-gray-500 dark:text-gray-400" title="${esc(k.description)}">${esc(k.description)}</div>` : ''}`;
+                const grantsCell = (agentId || (OV && (OV.grants || []).find(g => g.key_id.endsWith(k.id) && (g.grants || []).length)))
+                    ? `<a class="underline decoration-gray-300 hover:decoration-gray-500" href="/console/scopes" title="issue/revoke on Scopes & grants">${esc(grantsFor(k))}</a>`
+                    : esc(grantsFor(k));
                 return `<tr class="border-b border-gray-100 dark:border-gray-800">
-                    <td class="px-3 py-2"><b>${esc(k.name)}</b><div class="text-xs text-gray-400 dark:text-gray-500">${esc(k.key_prefix || '')}</div></td>
+                    <td class="px-3 py-2">${nameCell}</td>
                     <td class="px-3 py-2 text-xs">${bindControl}</td>
-                    <td class="px-3 py-2 text-xs">${esc(grantsFor(k))}</td>
+                    <td class="px-3 py-2 text-xs">${grantsCell}</td>
                     <td class="px-3 py-2 text-xs">${fmtTime(k.last_seen)}</td>
                     <td class="px-3 py-2 text-right">
                         <button class="px-2 py-1 text-xs border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 rounded hover:bg-red-50 dark:hover:bg-red-900/40" data-revoke-key="${esc(k.id)}">Revoke</button>
@@ -249,6 +258,8 @@
             return;
         }
         const body = { name: name };
+        const desc = el('keyDescription').value.trim();
+        if (desc) body.description = desc;
         const expiresRaw = el('keyExpires').value;
         if (expiresRaw) body.expires_at = new Date(expiresRaw).toISOString();
         const agentId = el('keyAgent').value;
@@ -256,6 +267,7 @@
         try {
             const result = await api('/api-keys/', { method: 'POST', body: body });
             el('keyName').value = '';
+            el('keyDescription').value = '';
             el('keyExpires').value = '';
             el('keyAgent').value = '';
             el('mintKeyForm').classList.add('hidden');

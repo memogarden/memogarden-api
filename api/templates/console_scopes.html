@@ -45,9 +45,9 @@
         <div class="bg-white dark:bg-gray-900 shadow rounded-lg table-scroll">
             <table class="w-full text-sm">
                 <thead><tr class="text-left text-xs text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
-                    <th class="px-3 py-2">Principal</th><th class="px-3 py-2">Scopes</th><th class="px-3 py-2">Expiry</th><th class="px-3 py-2"></th>
+                    <th class="px-3 py-2">Principal</th><th class="px-3 py-2">Grants <span class="font-normal text-gray-400 dark:text-gray-500">(scope · expiry · revoke)</span></th>
                 </tr></thead>
-                <tbody id="grantsBody"><tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="4">Loading…</td></tr></tbody>
+                <tbody id="grantsBody"><tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="2">Loading…</td></tr></tbody>
             </table>
         </div>
         <div id="issueGrantForm" class="hidden bg-white dark:bg-gray-900 shadow rounded-lg p-3 mt-2 space-y-2">
@@ -57,6 +57,7 @@
                 <input id="grantExpires" type="date" class="border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm">
             </div>
             <button id="issueGrantGo" class="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm">Grant</button>
+            <p id="grantScopeHint" class="text-xs text-gray-400 dark:text-gray-500"></p>
             <p class="text-xs text-gray-400 dark:text-gray-500">Agent principals grant all bound keys; future bindings inherit.</p>
         </div>
     </section>
@@ -136,29 +137,31 @@ function renderOverview() {
             </td></tr>`;
     }).join('');
 
-    // Grants: one row per (principal, scope) grant entry
+    // Grants: ONE row per principal (api#104) — scopes as chips, each chip
+    // carrying its own expiry and revoke (revocation is per grant_id, so
+    // chips map 1:1 onto DELETE /grants/<id>).
     const rows = [];
     for (const key of OV.grants) {
         const principal = key.agent_label || key.agent_entity_id
             ? `key ${esc(key.key_label)} → agent ${esc(key.agent_label || '')}`
             : `key ${esc(key.key_label)} <span class="text-xs text-red-500 dark:text-red-400">unbound</span>`;
-        if (!(key.grants || []).length) {
+        const grants = key.grants || [];
+        if (!grants.length) {
             rows.push(`<tr class="border-b border-gray-100 dark:border-gray-800"><td class="px-3 py-2">${principal}</td>
-                <td class="px-3 py-2 text-gray-400 dark:text-gray-500" colspan="3">no grants</td></tr>`);
+                <td class="px-3 py-2 text-gray-400 dark:text-gray-500">no grants</td></tr>`);
             continue;
         }
-        for (const g of key.grants) {
+        const chips = grants.map(g => {
             const scope = OV.scopes.find(s => s.uuid.endsWith(g.scope_uuid) || g.scope_uuid.endsWith(s.uuid));
-            rows.push(`<tr class="border-b border-gray-100 dark:border-gray-800">
-                <td class="px-3 py-2">${principal}</td>
-                <td class="px-3 py-2">${scope ? esc(scopeLabel(scope)) : shortUuid(g.scope_uuid)}</td>
-                <td class="px-3 py-2">${g.expires_at ? fmtTime(g.expires_at) : '—'}</td>
-                <td class="px-3 py-2 text-right"><button class="px-2 py-1 text-xs border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 rounded hover:bg-red-50 dark:hover:bg-red-900/40" onclick="revokeGrant('${esc(g.grant_id)}')">revoke</button></td>
-            </tr>`);
-        }
+            const label = scope ? scopeLabel(scope) : shortUuid(g.scope_uuid);
+            const expiry = g.expires_at ? ` · ${fmtTime(g.expires_at)}` : '';
+            return `<span class="inline-flex items-center gap-1 px-2 py-0.5 my-0.5 text-xs rounded-full border border-gray-200 dark:border-gray-700" data-grant-id="${esc(g.grant_id)}">${esc(label)}${esc(expiry)}<button class="font-bold text-red-500 hover:text-red-700" data-revoke-grant="${esc(g.grant_id)}" title="revoke ${esc(label)}">×</button></span>`;
+        }).join(' ');
+        rows.push(`<tr class="border-b border-gray-100 dark:border-gray-800"><td class="px-3 py-2 align-top">${principal}</td>
+            <td class="px-3 py-2">${chips}</td></tr>`);
     }
     document.getElementById('grantsBody').innerHTML = rows.length ? rows.join('') :
-        '<tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="4">No keys yet.</td></tr>';
+        '<tr><td class="px-3 py-4 text-gray-400 dark:text-gray-500" colspan="2">No keys yet.</td></tr>';
 
     // Issue-grant form options
     const principals = OV.grants.map(k => {
@@ -167,8 +170,17 @@ function renderOverview() {
         return `<option value="${esc(value)}">${esc(label)}</option>`;
     }).join('');
     document.getElementById('grantPrincipal').innerHTML = principals;
-    document.getElementById('grantScope').innerHTML = OV.scopes.map(s =>
-        `<option value="${esc(s.uuid)}">${esc(scopeLabel(s))}</option>`).join('');
+    refreshGrantScopeOptions();
+
+    // delegated revoke for grant chips (api#104)
+    const grantsBody = document.getElementById('grantsBody');
+    if (!grantsBody.dataset.revokeWired) {
+        grantsBody.dataset.revokeWired = '1';
+        grantsBody.addEventListener('click', function(evt) {
+            const btn = evt.target.closest('[data-revoke-grant]');
+            if (btn) revokeGrant(btn.dataset.revokeGrant);
+        });
+    }
 
     // Provider policies
     const providers = Object.keys(OV.provider_policies || {});
@@ -270,6 +282,36 @@ document.getElementById('scopesBody').addEventListener('click', function(evt) {
 
 document.getElementById('issueGrantBtn').addEventListener('click', () =>
     document.getElementById('issueGrantForm').classList.toggle('hidden'));
+
+// api#104: the scope dropdown offers only scopes the selected principal
+// does NOT already hold; the Grant button disables with a hint when
+// nothing remains. (Server-side re-grants are already idempotent —
+// grant_scope_to_agent/grant_scope_to_key skip held scopes — this is
+// purely presentational.)
+function heldScopeUuids() {
+    const parts = document.getElementById('grantPrincipal').value.split('|');
+    const id = parts[1];
+    const key = (OV.grants || []).find(k => (parts[0] === 'agent'
+        ? (k.agent_entity_id || '') === id
+        : k.key_id === id));
+    return (key && key.grants || []).map(g => g.scope_uuid);
+}
+
+function refreshGrantScopeOptions() {
+    if (!OV) return;
+    const held = heldScopeUuids();
+    const available = (OV.scopes || []).filter(s =>
+        !held.some(u => s.uuid.endsWith(u) || u.endsWith(s.uuid)));
+    document.getElementById('grantScope').innerHTML = available.map(s =>
+        `<option value="${esc(s.uuid)}">${esc(scopeLabel(s))}</option>`).join('');
+    const go = document.getElementById('issueGrantGo');
+    const hint = document.getElementById('grantScopeHint');
+    go.disabled = !available.length;
+    if (hint) hint.textContent = available.length
+        ? '' : 'Every scope is already granted to this principal.';
+}
+
+document.getElementById('grantPrincipal').addEventListener('change', refreshGrantScopeOptions);
 document.getElementById('issueGrantGo').addEventListener('click', async function() {
     clearError();
     const parts = document.getElementById('grantPrincipal').value.split('|');

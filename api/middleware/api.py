@@ -697,11 +697,12 @@ def update_api_key(data: APIKeyUpdate, api_key_id: str):
 
     sets_agent = "agent_id" in data.model_fields_set
     sets_capabilities = "capabilities" in data.model_fields_set
-    if not sets_agent and not sets_capabilities:
+    sets_description = "description" in data.model_fields_set
+    if not (sets_agent or sets_capabilities or sets_description):
         raise ValidationError(
-            "PATCH body must set agent_id (bind/unbind) and/or capabilities "
-            "(restricted key classes, E3)",
-            {"expected_fields": ["agent_id", "capabilities"]}
+            "PATCH body must set agent_id (bind/unbind), capabilities "
+            "(restricted key classes, E3), and/or description (api#105)",
+            {"expected_fields": ["agent_id", "capabilities", "description"]}
         )
 
     core = get_core()
@@ -711,6 +712,9 @@ def update_api_key(data: APIKeyUpdate, api_key_id: str):
     if sets_capabilities:
         key = api_keys.set_key_capabilities(
             core._conn, api_key_id, payload.sub, data.capabilities)
+    if sets_description:
+        key = api_keys.set_key_description(
+            core._conn, api_key_id, payload.sub, data.description)
     core._conn.commit()
 
     # RFC-010 INV-2 / §5.3: (re-)attribution is explicit and auditable
