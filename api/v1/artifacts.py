@@ -511,6 +511,7 @@ def artifact_spans(uuid):
     return jsonify({
         "artifact_uuid": uid.add_core_prefix(entity["uuid"]),
         "content_version": version,
+        "doc_class": entity["data"].get("doc_class") or "unknown",
         "status": status,
         "spans": spans,
     })

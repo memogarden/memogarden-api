@@ -44,7 +44,7 @@ def _canned_spans(content: str) -> list[dict]:
 def _patch_ok_handler(monkeypatch):
     import hashlib as _h
 
-    def fake(artifact_uuid, content):
+    def fake(artifact_uuid, content, doc_class=None):
         return {
             "ok": True,
             "content_version": _h.sha256(content.encode()).hexdigest()[:8],
@@ -110,7 +110,7 @@ class TestCreateHookLandsSpans:
         assert [s["ord"] for s in body["spans"]] == [0, 1, 2]
 
     def test_create_envelope_never_carries_span_errors(self, client, auth_headers, monkeypatch):
-        def broken(artifact_uuid, content):
+        def broken(artifact_uuid, content, doc_class=None):
             raise ConnectionRefusedError("handler down")
 
         monkeypatch.setattr(artifact_spans, "_call_handler", broken)
@@ -121,7 +121,7 @@ class TestCreateHookLandsSpans:
 
 class TestPendingPath:
     def test_handler_down_leaves_pending(self, client, auth_headers, monkeypatch):
-        def dead(artifact_uuid, content):
+        def dead(artifact_uuid, content, doc_class=None):
             raise ConnectionRefusedError("handler socket absent")
 
         monkeypatch.setattr(artifact_spans, "_call_handler", dead)
@@ -135,7 +135,7 @@ class TestPendingPath:
         assert body["content_version"] == artifact_spans.content_version_of(CONTENT)
 
     def test_tampered_producer_set_is_rejected_to_pending(self, client, auth_headers, monkeypatch):
-        def lying_handler(artifact_uuid, content):
+        def lying_handler(artifact_uuid, content, doc_class=None):
             spans = _canned_spans(content)
             spans[0]["fragment_id"] = "^zzz"
             return {"ok": True, "content_version": artifact_spans.content_version_of(content),
@@ -164,7 +164,7 @@ class TestSameFragmentMultiplePositions:
              "abs_start": 11, "abs_end": 20, "ord": 1},
         ]
 
-        def canned(artifact_uuid, text):
+        def canned(artifact_uuid, text, doc_class=None):
             return {"ok": True,
                     "content_version": artifact_spans.content_version_of(text),
                     "spans": spans if text == content else []}
@@ -182,6 +182,46 @@ class TestSameFragmentMultiplePositions:
         assert body["spans"][1]["abs_start"] == 11
 
 
+class TestDocClassThreading:
+    """Stage-2 profiles: the bridge hands the artifact's doc_class to the
+    handler (request-scoped metadata; handler stays Core-free) and the
+    resolver response exposes it."""
+
+    def test_create_hook_passes_doc_class_to_producer(self, client, auth_headers, monkeypatch):
+        seen = {}
+
+        def canned(artifact_uuid, content, doc_class=None):
+            seen["doc_class"] = doc_class
+            import hashlib as _h
+            return {"ok": True,
+                    "content_version": _h.sha256(content.encode()).hexdigest()[:8],
+                    "spans": _canned_spans(content) if content == CONTENT else []}
+
+        monkeypatch.setattr(artifact_spans, "_call_handler", canned)
+        response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact",
+                  "data": {"label": "classified", "content": CONTENT,
+                           "content_type": "text/markdown", "doc_class": "statement"}},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        assert seen["doc_class"] == "statement"
+
+    def test_spans_endpoint_exposes_doc_class(self, client, auth_headers, monkeypatch):
+        _patch_ok_handler(monkeypatch)
+        response = client.post(
+            "/mg",
+            json={"op": "create", "type": "Artifact",
+                  "data": {"label": "classified", "content": CONTENT,
+                           "content_type": "text/markdown", "doc_class": "bill"}},
+            headers=auth_headers,
+        )
+        uuid = response.get_json()["result"]["uuid"]
+        body = client.get(f"/api/v1/artifacts/{uuid}/spans", headers=auth_headers).get_json()
+        assert body["doc_class"] == "bill"
+
+
 class TestSpansEndpointSurface:
     def test_requires_auth(self, client):
         assert client.get("/api/v1/artifacts/core_x/spans").status_code == 401
@@ -194,7 +234,7 @@ class TestSpansEndpointSurface:
         """An artifact whose content version was never chunked reads `none`.
         (Pins a dead handler: with the real socket live on this host the hook
         would genuinely chunk, making the expectation environment-dependent.)"""
-        def dead(artifact_uuid, content):
+        def dead(artifact_uuid, content, doc_class=None):
             raise ConnectionRefusedError("handler socket absent")
 
         monkeypatch.setattr(artifact_spans, "_call_handler", dead)

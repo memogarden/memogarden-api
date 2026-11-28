@@ -47,7 +47,7 @@ def main() -> int:
             skipped += 1
             continue
 
-        result = artifact_spans.sync_spans(uuid, content)
+        result = artifact_spans.sync_spans(uuid, content, doc_class=data.get("doc_class"))
         processed += 1
         if result == "ok":
             ok += 1

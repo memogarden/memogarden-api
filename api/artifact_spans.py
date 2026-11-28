@@ -102,15 +102,17 @@ def validate(content: str, content_version: str, spans: list[dict]) -> list[str]
     return errors
 
 
-def _call_handler(artifact_uuid: str, content: str) -> dict:
-    """§15.3 socket contract. Raises on unreachability or ok:false."""
+def _call_handler(artifact_uuid: str, content: str,
+                  doc_class: str | None = None) -> dict:
+    """§15.3 socket contract (+ optional doc_class for stage-2 profiles).
+    Raises on unreachability or ok:false."""
     path = _handler_socket()
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     conn.settimeout(_HANDLER_TIMEOUT)
     try:
         conn.connect(path)
         conn.sendall(json.dumps(
-            {"artifact_uuid": artifact_uuid, "content": content}
+            {"artifact_uuid": artifact_uuid, "content": content, "doc_class": doc_class}
         ).encode("utf-8"))
         conn.shutdown(socket.SHUT_WR)
         response = b""
@@ -153,17 +155,25 @@ def _store(conn, artifact_uuid: str, content_version: str, spans: list[dict]) ->
     )
 
 
-def sync_spans(artifact_uuid: str, content: str) -> str:
+def sync_spans(artifact_uuid: str, content: str, doc_class: str | None = None) -> str:
     """§15.6 edit flow for one artifact content version.
 
-    Marks the version pending, chunks via the handler, validates, stores.
-    Never raises into the caller: any failure leaves `pending` for the sweep.
-    Returns the final status ('ok' | 'pending').
+    Marks the version pending, chunks via the handler (doc_class selects the
+    stage-2 density profile; looked up from the Artifact entity when the
+    caller doesn't hold it), validates, stores. Never raises into the caller:
+    any failure leaves `pending` for the sweep. Returns 'ok' | 'pending'.
     """
     plain = artifact_uuid.removeprefix("core_")
     version = content_version_of(content)
     try:
         with get_core() as core:
+            if doc_class is None:
+                row = core._conn.execute(
+                    "SELECT json_extract(data, '$.doc_class') FROM entity "
+                    "WHERE uuid = ? AND type = 'Artifact'", (plain,),
+                ).fetchone()
+                if row and row[0]:
+                    doc_class = row[0]
             core._conn.execute(
                 "INSERT OR REPLACE INTO artifact_span_status "
                 "(artifact_uuid, content_version, status, updated_at) VALUES (?, ?, 'pending', ?)",
@@ -174,7 +184,7 @@ def sync_spans(artifact_uuid: str, content: str) -> str:
         logger.exception("span pending-mark failed for %s@%s", plain, version)
 
     try:
-        result = _call_handler(plain, content)
+        result = _call_handler(plain, content, doc_class)
     except Exception as e:  # noqa: BLE001 — §15.6 step 4: handler down = pending
         logger.warning("artifact handler unreachable for %s@%s: %s", plain, version, e)
         return "pending"
@@ -199,9 +209,10 @@ def maybe_sync(op: str, request_json: dict, result: dict | None) -> None:
     create(Arifact) / commit_artifact. Never raises."""
     try:
         if op == "create" and (result or {}).get("type") == "Artifact":
-            content = (result.get("data") or {}).get("content")
+            data = result.get("data") or {}
+            content = data.get("content")
             if result.get("uuid") and content:
-                sync_spans(result["uuid"], content)
+                sync_spans(result["uuid"], content, doc_class=data.get("doc_class"))
         elif op == "commit_artifact":
             artifact = request_json.get("artifact")
             content = (result or {}).get("new_content")
