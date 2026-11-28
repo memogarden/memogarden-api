@@ -799,7 +799,9 @@ def get_last_success_at(name: str, account_id: str = "") -> str | None:
     return row["last_success"] if row else None
 
 
-def claim_run(name: str, triggered_by: str, account_id: str = "") -> str:
+def claim_run(name: str, triggered_by: str, account_id: str = "",
+              triggered_by_key: str | None = None,
+              external_app_id: str | None = None) -> str:
     """Claim a run slot by inserting a 'running' row (RFC-012 §4.4).
 
     Single-flight is enforced by the partial unique index on
@@ -809,8 +811,13 @@ def claim_run(name: str, triggered_by: str, account_id: str = "") -> str:
 
     Args:
         name: Provider name
-        triggered_by: 'heartbeat' or 'manual'
+        triggered_by: 'heartbeat' | 'manual' | 'external-app'
         account_id: '' for a provider-level run, else the provider_accounts.id
+        triggered_by_key: api_keys.name of the authenticating key — every
+            lane tags itself (heartbeat key, tada-trigger key, agent key).
+        external_app_id: verbatim app-supplied id (X-External-App-Id header)
+            when the caller is an external app; the app self-describes, we
+            don't presume how it manages its automations.
 
     Returns:
         The run id
@@ -826,9 +833,11 @@ def claim_run(name: str, triggered_by: str, account_id: str = "") -> str:
         with _RUNS_LOCK:
             core._conn.execute(
                 """INSERT INTO provider_runs
-                   (id, provider_name, account_id, status, started_at, triggered_by)
-                   VALUES (?, ?, ?, 'running', ?, ?)""",
-                (run_id, name, account_id, now, triggered_by),
+                   (id, provider_name, account_id, status, started_at, triggered_by,
+                    triggered_by_key, external_app_id)
+                   VALUES (?, ?, ?, 'running', ?, ?, ?, ?)""",
+                (run_id, name, account_id, now, triggered_by, triggered_by_key,
+                 external_app_id),
             )
             core._conn.commit()
     except sqlite3.IntegrityError:
