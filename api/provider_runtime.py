@@ -78,14 +78,20 @@ def start_run(
     name: str,
     triggered_by: str = "manual",
     account_id: str = "",
+    triggered_by_key: str | None = None,
+    external_app_id: str | None = None,
 ) -> dict:
     """Start a provider run in a background thread.
 
     Args:
         name: Registered provider name
-        triggered_by: 'heartbeat' or 'manual'
+        triggered_by: 'heartbeat' | 'manual' | 'external-app'
         account_id: '' for a provider-level run; else run this specific
             account binding (RFC-012 §4.5)
+        triggered_by_key: api_keys.name of the authenticating key — every
+            lane tags itself.
+        external_app_id: verbatim app-supplied id (X-External-App-Id header)
+            when an external app triggers the run.
 
     Returns:
         {"name", "run_id", "status": "running"} (plus "account_id"/"subject"
@@ -106,7 +112,9 @@ def start_run(
         config = {**config, **(account.get("config") or {})}
         interval = account.get("interval") or manifest["interval"]
 
-    run_id = claim_run(name, triggered_by, account_id=account_id)
+    run_id = claim_run(name, triggered_by, account_id=account_id,
+                       triggered_by_key=triggered_by_key,
+                       external_app_id=external_app_id)
     since = get_last_success_at(name, account_id=account_id)
 
     thread = threading.Thread(
@@ -137,7 +145,12 @@ def start_run(
     return result
 
 
-def start_provider_run(name: str, triggered_by: str = "manual") -> dict:
+def start_provider_run(
+    name: str,
+    triggered_by: str = "manual",
+    triggered_by_key: str | None = None,
+    external_app_id: str | None = None,
+) -> dict:
     """Trigger runs for a provider now (manual, even if not yet due).
 
     Account-less providers start one provider-level run (RFC-004 behavior).
@@ -148,7 +161,8 @@ def start_provider_run(name: str, triggered_by: str = "manual") -> dict:
     get_provider(name)  # 404 if unknown
     accounts = provider_registry.list_accounts(name)
     if not accounts:
-        return start_run(name, triggered_by)
+        return start_run(name, triggered_by, triggered_by_key=triggered_by_key,
+                         external_app_id=external_app_id)
 
     triggered, skipped = [], []
     for account in accounts:
@@ -160,7 +174,9 @@ def start_provider_run(name: str, triggered_by: str = "manual") -> dict:
             })
             continue
         try:
-            started = start_run(name, triggered_by, account_id=account["id"])
+            started = start_run(name, triggered_by, account_id=account["id"],
+                                triggered_by_key=triggered_by_key,
+                                external_app_id=external_app_id)
             triggered.append(started)
         except LockConflictError:
             skipped.append({
@@ -171,7 +187,11 @@ def start_provider_run(name: str, triggered_by: str = "manual") -> dict:
     return {"name": name, "triggered": triggered, "skipped": skipped}
 
 
-def run_all_due(triggered_by: str = "heartbeat") -> dict:
+def run_all_due(
+    triggered_by: str = "heartbeat",
+    triggered_by_key: str | None = None,
+    external_app_id: str | None = None,
+) -> dict:
     """Run every due work item: account-less providers plus due accounts.
 
     The systemd heartbeat timer pokes POST /api/v1/providers/run; the server
@@ -187,14 +207,18 @@ def run_all_due(triggered_by: str = "heartbeat") -> dict:
     triggered, skipped = [], []
     for manifest in get_due_providers():
         try:
-            triggered.append(start_run(manifest["name"], triggered_by))
+            triggered.append(start_run(manifest["name"], triggered_by,
+                                       triggered_by_key=triggered_by_key,
+                                       external_app_id=external_app_id))
         except LockConflictError:
             skipped.append({"name": manifest["name"], "reason": "already running"})
     for account in get_due_accounts():
         label = {"name": account["provider_name"], "account": account["subject"]}
         try:
             started = start_run(
-                account["provider_name"], triggered_by, account_id=account["id"]
+                account["provider_name"], triggered_by, account_id=account["id"],
+                triggered_by_key=triggered_by_key,
+                external_app_id=external_app_id,
             )
             triggered.append(started)
         except LockConflictError:

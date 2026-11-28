@@ -7,9 +7,12 @@ so POST /providers/run (the heartbeat entry point) stays unambiguous.
 
 import logging
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, g, jsonify, request
+
+from system.core import get_core
 
 from .. import provider_registry, provider_runtime
+from ..middleware.api_keys import get_api_key_by_id
 from ..middleware.decorators import _authenticate_jwt
 from ..schemas.provider import (
     RegisterAccountRequest,
@@ -133,6 +136,26 @@ def set_scope_policy(name: str, data: ScopePolicyRequest):
     return jsonify(provider_registry.set_scope_policy(name, policy))
 
 
+def _trigger_tagging() -> tuple[str | None, str | None]:
+    """(authenticating key name, external app id) for run tagging
+    (RFC-012 tagging, operator directive 2026-11-28).
+
+    Every lane tags itself: the authenticating key's name travels with the
+    run. An external app additionally self-describes via the
+    X-External-App-Id header — recorded verbatim (≤200 chars), never
+    validated: we don't presume how the app manages its automations. An
+    empty/oversized-stripped value is treated as absent.
+    """
+    key_name = None
+    key_id = getattr(g, "api_key_id", None)
+    if key_id:
+        with get_core() as core:
+            key = get_api_key_by_id(core._conn, key_id)
+        key_name = key.name if key else None
+    app_id = (request.headers.get("X-External-App-Id") or "").strip()[:200] or None
+    return key_name, app_id
+
+
 @providers_bp.post("/run")
 def run_due_providers():
     """Run all due work (heartbeat entry point).
@@ -141,8 +164,17 @@ def run_due_providers():
     due-ness from intervals against last_run_at — provider-level for
     account-less providers, per-account for account-backed ones (RFC-012
     §4.5). Runs execute in background threads; this returns immediately.
+
+    The authenticating key's name is recorded on every run
+    (triggered_by_key); an external app may self-describe via
+    X-External-App-Id (recorded verbatim as external_app_id).
     """
-    return jsonify(provider_runtime.run_all_due(triggered_by="heartbeat")), 202
+    key_name, app_id = _trigger_tagging()
+    return jsonify(provider_runtime.run_all_due(
+        triggered_by="heartbeat",
+        triggered_by_key=key_name,
+        external_app_id=app_id,
+    )), 202
 
 
 @providers_bp.post("/<name>/run")
@@ -152,6 +184,12 @@ def run_provider(name: str):
     Account-less providers start one provider-level run. Account-backed
     providers start every active account in parallel (RFC-012 §4.5).
 
+    When the caller presents an X-External-App-Id header the run is
+    tagged triggered_by='external-app' with the header value recorded
+    verbatim (external_app_id) — the app self-describes, we don't
+    presume how it manages its automations. Otherwise triggered_by is
+    'manual'.
+
     Returns:
         202: Provider-level {"name", "run_id", "status": "running"} or
              account-backed {"name", "triggered": [...], "skipped": [...]}
@@ -159,7 +197,13 @@ def run_provider(name: str):
         409: Single-flight lock held (provider-level only; account runs
              report collisions per account inside "skipped")
     """
-    return jsonify(provider_runtime.start_provider_run(name, triggered_by="manual")), 202
+    key_name, app_id = _trigger_tagging()
+    return jsonify(provider_runtime.start_provider_run(
+        name,
+        triggered_by="external-app" if app_id else "manual",
+        triggered_by_key=key_name,
+        external_app_id=app_id,
+    )), 202
 
 
 # ============================================================================

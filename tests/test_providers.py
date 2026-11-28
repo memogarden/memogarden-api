@@ -671,3 +671,80 @@ class TestScopePolicy:
             f = attachment({"email_uuid": "soil_does_not_exist"})
             _inherit_parent_scopes(f, soil)
             assert "scopes" not in f.metadata
+
+
+# ============================================================================
+# Provider-run tagging (operator directive 2026-11-28) — every run records
+# the authenticating key's name; an external app self-describes via
+# X-External-App-Id, recorded verbatim.
+# ============================================================================
+
+def _run_row(run_id: str) -> dict | None:
+    from system.core import get_core
+
+    with get_core() as core:
+        row = core._conn.execute(
+            "SELECT * FROM provider_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+class TestProviderRunTagging:
+    def test_named_run_without_header_is_manual_keyed(
+        self, client, auth_headers, auth_headers_apikey, dummy_module
+    ):
+        _register(client, auth_headers, _payload(dummy_module))
+        response = client.post(
+            "/api/v1/providers/testprov/run", headers=auth_headers_apikey
+        )
+        assert response.status_code == 202, response.get_json()
+        run_id = response.get_json()["run_id"]
+        row = _run_row(run_id)
+        assert row["triggered_by"] == "manual"
+        assert row["triggered_by_key"] == "test-key"  # the auth_headers_apikey fixture's key
+        assert row["external_app_id"] is None
+        _wait_for_finish(client, auth_headers, "testprov")
+
+    def test_named_run_with_header_is_external_app(
+        self, client, auth_headers, auth_headers_apikey, dummy_module
+    ):
+        _register(client, auth_headers, _payload(dummy_module))
+        response = client.post(
+            "/api/v1/providers/testprov/run",
+            headers={**auth_headers_apikey, "X-External-App-Id": "tada-prod-1"},
+        )
+        assert response.status_code == 202, response.get_json()
+        row = _run_row(response.get_json()["run_id"])
+        assert row["triggered_by"] == "external-app"
+        assert row["external_app_id"] == "tada-prod-1"
+        assert row["triggered_by_key"] == "test-key"
+        _wait_for_finish(client, auth_headers, "testprov")
+
+    def test_external_app_id_recorded_verbatim_whitespace_trimmed(
+        self, client, auth_headers, auth_headers_apikey, dummy_module
+    ):
+        """No format validation — the app self-describes; we only trim
+        surrounding whitespace and cap length (200)."""
+        _register(client, auth_headers, _payload(dummy_module))
+        response = client.post(
+            "/api/v1/providers/testprov/run",
+            headers={**auth_headers_apikey, "X-External-App-Id": "  tada/webhook#7  "},
+        )
+        assert response.status_code == 201 or response.status_code == 202
+        row = _run_row(response.get_json()["run_id"])
+        assert row["external_app_id"] == "tada/webhook#7"
+        _wait_for_finish(client, auth_headers, "testprov")
+
+    def test_heartbeat_run_records_key_name(
+        self, client, auth_headers, auth_headers_apikey, dummy_module
+    ):
+        _register(client, auth_headers, _payload(dummy_module))
+        response = client.post("/api/v1/providers/run", headers=auth_headers_apikey)
+        assert response.status_code == 202
+        body = response.get_json()
+        assert body["triggered"], "dummy provider should be due"
+        run_id = body["triggered"][0]["run_id"]
+        row = _run_row(run_id)
+        assert row["triggered_by"] == "heartbeat"
+        assert row["triggered_by_key"] == "test-key"
+        _wait_for_finish(client, auth_headers, "testprov")
