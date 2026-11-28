@@ -27,6 +27,8 @@ Execution model:
 
 import json
 import logging
+import sqlite3
+import time
 import socket
 import threading
 from contextlib import ExitStack
@@ -423,7 +425,20 @@ def _execute_run(
                 # operator's policy — the framework applies it, providers
                 # cannot forget (SG-7: providers are never scope-gated).
                 _apply_scope_policy(fact, scope_policy, resolve_scope)
-                fact_uuid = soil.create_fact(fact)
+                # Bounded retry on SQLITE_BUSY: under concurrent-writer
+                # bursts the single WAL write lock can stay contested past
+                # busy_timeout (system#15) — a lost fact would corrupt the
+                # run's counts, so retry (rollback + redo) instead.
+                for _attempt in range(3):
+                    try:
+                        fact_uuid = soil.create_fact(fact)
+                        soil.commit()
+                        break
+                    except sqlite3.OperationalError as e:
+                        if "locked" not in str(e).lower() or _attempt == 2:
+                            raise
+                        soil._get_connection().rollback()
+                        time.sleep(0.4 * (_attempt + 1))
                 # Commit before create_relations: providers hold their own
                 # Soil instance (get_soil() is not cached), and a separate
                 # connection cannot see this transaction's uncommitted rows —

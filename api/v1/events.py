@@ -265,12 +265,13 @@ def _mark_locked(plain: str, occurred_at: str, now: str):
 
         occurrence_uuid = generate_soil_uuid()
         action_uuid = generate_soil_uuid()
-        with get_soil() as soil:
-            # In-transaction re-probe: under the process lock this is
-            # belt-and-suspenders; across processes the verdict identity
-            # index (system#5) is the guarantee — a raced double-insert
-            # raises IntegrityError, which converges on the verdict that
-            # landed first (idempotent), never duplicates it.
+        with get_soil() as soil, soil.write_txn():
+            # In-transaction re-probe inside one BEGIN IMMEDIATE write
+            # transaction (system#15): probe + verdict + Action land as a
+            # single atomic acquisition. Across processes the verdict
+            # identity index (system#5) is the guarantee — a raced
+            # double-insert raises IntegrityError, which converges on the
+            # verdict that landed first (idempotent), never duplicates it.
             duplicate = _existing_occurrence(soil, plain)
             if duplicate is not None:
                 return jsonify({
@@ -478,7 +479,7 @@ def _dismiss_locked(plain: str, dismissed_at: str, reason: str | None,
 
         verdict_uuid = generate_soil_uuid()
         action_uuid = generate_soil_uuid()
-        with get_soil() as soil:
+        with get_soil() as soil, soil.write_txn():
             duplicate = _existing_dismissal(soil, plain)
             if duplicate is not None:
                 return jsonify({

@@ -35,8 +35,10 @@ The with_audit decorator adds audit logging for all Semantic API operations:
 """
 
 import json
+import sqlite3
 import time
 import traceback
+from collections.abc import Callable
 from functools import wraps
 
 from flask import g
@@ -66,6 +68,30 @@ def _current_actor_type() -> str | None:
 # ============================================================================
 # Audit Decorator (Session 6)
 # ============================================================================
+
+def _write_audit_with_retry(write: Callable[[object], None]) -> None:
+    """One audit write with bounded retry on SQLITE_BUSY (system#15).
+
+    Under concurrent writer bursts the single WAL write lock can stay
+    contested past busy_timeout, and a lost audit write would 500 a user
+    request whose actual operation was fine. 3 attempts with linear
+    backoff; each attempt runs `write(soil)` inside its own soil context
+    (commit on exit, so a multi-write attempt stays atomic). A final
+    failure re-raises.
+    """
+    last = None
+    for attempt in range(1, 4):
+        try:
+            with get_soil() as soil:
+                write(soil)
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower():
+                raise
+            last = e
+            time.sleep(0.4 * attempt)
+    raise last
+
 
 def with_audit(handler_func):
     """Decorator that adds audit logging for Semantic API operations.
@@ -113,6 +139,8 @@ def with_audit(handler_func):
         # Generate request ID for correlation
         request_id = uid.generate_uuid()
 
+
+
         # Create Action fact immediately (separate context for immediate commit)
         action_uuid = generate_soil_uuid()
         action_item = Fact(
@@ -131,10 +159,9 @@ def with_audit(handler_func):
             }
         )
 
-        # Use separate context for Action (immediate commit so other agents can see "in progress")
-        with get_soil() as soil:
-            soil.create_fact(action_item)
-            # Commits on __exit__
+        # Separate context for Action (immediate commit so other agents see
+        # "in progress"); retried on lock contention (system#15)
+        _write_audit_with_retry(lambda soil: soil.create_fact(action_item))
 
         try:
             # Call the actual handler
@@ -158,8 +185,9 @@ def with_audit(handler_func):
                 }
             )
 
-            # Create ActionResult and relation in single transaction
-            with get_soil() as soil:
+            # ActionResult and relation in one transaction; retried on lock
+            # contention (system#15)
+            def _success_audit(soil):
                 soil.create_fact(actionresult_item)
 
                 # Create result_of relation
@@ -177,7 +205,9 @@ def with_audit(handler_func):
                     }
                 )
                 soil.create_relation(relation)
-                # Commits on __exit__
+                # Commits on context exit
+
+            _write_audit_with_retry(_success_audit)
 
             return result
 
@@ -216,8 +246,9 @@ def with_audit(handler_func):
                         }
                     )
 
-                    # Create ActionResult and relation in single transaction
-                    with get_soil() as soil:
+                    # ActionResult and relation in one transaction; retried
+                    # on lock contention (system#15)
+                    def _error_audit(soil):
                         soil.create_fact(actionresult_item)
 
                         # Create result_of relation
@@ -235,7 +266,9 @@ def with_audit(handler_func):
                             }
                         )
                         soil.create_relation(relation)
-                        # Commits on __exit__
+                        # Commits on context exit
+
+                    _write_audit_with_retry(_error_audit)
                 except Exception as audit_error:
                     # If audit logging fails, don't hide the original error
                     # Log and continue with original exception
