@@ -30,4 +30,12 @@ html.dark { color-scheme: dark; }
      apply wherever a table would otherwise grow the page unbounded. */
   .table-scroll { @apply overflow-auto max-h-[70vh]; }
   .table-scroll thead th { @apply sticky top-0 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700; }
+  /* Pin the LAST column (row actions: Revoke, delete, …) to the right edge
+     of the scroll box — when a table overflows horizontally, the action
+     buttons used to fall outside the visible area and read as a clipped
+     "Re…" fragment (the 2026-11-28 "where is Revoke?" finding). Content
+     scrolls beneath the pinned cell. */
+  .table-scroll th:last-child, .table-scroll td:last-child { @apply sticky right-0 bg-white dark:bg-gray-900; }
+  .table-scroll th:last-child, .table-scroll td:last-child { box-shadow: -1px 0 0 0 rgb(229 231 235); }
+  .table-scroll th:last-child:is(.dark *), .table-scroll td:last-child:is(.dark *) { box-shadow: -1px 0 0 0 rgb(55 65 81); }
 }
