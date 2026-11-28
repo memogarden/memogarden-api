@@ -68,11 +68,18 @@ def validate(content: str, content_version: str, spans: list[dict]) -> list[str]
     """§15.6 invariants, independent implementation (rejects foreign sets)."""
     errors: list[str] = []
     by_block: dict[str, list[tuple[int, int, int]]] = {}
+    seen_ords: set[int] = set()
     for i, span in enumerate(spans):
         fid = span.get("fragment_id", "")
         text = span.get("content", "")
         start, end = span.get("start_char"), span.get("end_char")
         abs_start, abs_end = span.get("abs_start"), span.get("abs_end")
+
+        ord_ = span.get("ord")
+        if ord_ is None or ord_ in seen_ords:
+            errors.append(f"span[{i}] ({fid}): duplicate or missing ord")
+        else:
+            seen_ords.add(ord_)
 
         if fid not in _salt_candidates(text):
             errors.append(f"span[{i}] ({fid}): id is not the content hash of its text")

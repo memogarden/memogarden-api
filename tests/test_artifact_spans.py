@@ -87,6 +87,12 @@ class TestSpanValidation:
         errors = artifact_spans.validate(CONTENT, "00000000", _canned_spans(CONTENT))
         assert any("content_version" in e for e in errors)
 
+    def test_rejects_duplicate_ord(self):
+        spans = _canned_spans(CONTENT)
+        spans[2]["ord"] = spans[1]["ord"]
+        errors = artifact_spans.validate(CONTENT, artifact_spans.content_version_of(CONTENT), spans)
+        assert any("duplicate or missing ord" in e for e in errors)
+
 
 class TestCreateHookLandsSpans:
     def test_create_artifact_lands_span_set(self, client, auth_headers, monkeypatch):
@@ -142,6 +148,40 @@ class TestPendingPath:
         assert body["status"] == "pending"
 
 
+class TestSameFragmentMultiplePositions:
+    """§15.4 (20261201): identical text = one fragment row, many memberships —
+    every occurrence must survive the store (schema PK per position)."""
+
+    def test_repeated_text_keeps_every_membership(self, client, auth_headers, monkeypatch):
+        content = "Para one.\n\nPara one."
+        fid = _frag_id("Para one.")
+        spans = [
+            {"fragment_id": fid, "content": "Para one.", "block_hash": "cccc1111",
+             "block_type": "paragraph", "start_char": 0, "end_char": 9,
+             "abs_start": 0, "abs_end": 9, "ord": 0},
+            {"fragment_id": fid, "content": "Para one.", "block_hash": "cccc2222",
+             "block_type": "paragraph", "start_char": 0, "end_char": 9,
+             "abs_start": 11, "abs_end": 20, "ord": 1},
+        ]
+
+        def canned(artifact_uuid, text):
+            return {"ok": True,
+                    "content_version": artifact_spans.content_version_of(text),
+                    "spans": spans if text == content else []}
+
+        monkeypatch.setattr(artifact_spans, "_call_handler", canned)
+        response = _create_artifact(client, auth_headers, content=content)
+        assert response.status_code == 200
+        uuid = response.get_json()["result"]["uuid"]
+
+        body = client.get(f"/api/v1/artifacts/{uuid}/spans", headers=auth_headers).get_json()
+        assert body["status"] == "ok"
+        assert len(body["spans"]) == 2  # both memberships, not a collapsed first-only
+        assert [s["ord"] for s in body["spans"]] == [0, 1]
+        assert all(s["fragment_id"] == fid for s in body["spans"])
+        assert body["spans"][1]["abs_start"] == 11
+
+
 class TestSpansEndpointSurface:
     def test_requires_auth(self, client):
         assert client.get("/api/v1/artifacts/core_x/spans").status_code == 401
@@ -150,8 +190,14 @@ class TestSpansEndpointSurface:
         response = client.get("/api/v1/artifacts/core_doesnotexist/spans", headers=auth_headers)
         assert response.status_code == 404
 
-    def test_pre_span_artifact_reads_none(self, client, auth_headers):
-        """An artifact whose content version was never chunked reads `none`."""
+    def test_pre_span_artifact_reads_none(self, client, auth_headers, monkeypatch):
+        """An artifact whose content version was never chunked reads `none`.
+        (Pins a dead handler: with the real socket live on this host the hook
+        would genuinely chunk, making the expectation environment-dependent.)"""
+        def dead(artifact_uuid, content):
+            raise ConnectionRefusedError("handler socket absent")
+
+        monkeypatch.setattr(artifact_spans, "_call_handler", dead)
         response = _create_artifact(client, auth_headers)
         uuid = response.get_json()["result"]["uuid"]
         # no handler patch and no prior sync → mark pending manually is the
